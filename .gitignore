@@ -26,3 +26,6 @@ hdf5_files
 *.autosave
 
 *.blend1
+
+# Local study GUI temp
+scripts/study_gui/Simulator_Recordings/tmp/

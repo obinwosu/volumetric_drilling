@@ -1,27 +1,24 @@
 import yaml
 import pathlib
-from enum import Enum
 
 
 class VolumeInfo:
-    def __init__(self, name, adf_path, icon_path):
+    def __init__(self, name, adf_path, icon_path, description=""):
         self.name = name
         self.adf_path = adf_path
         self.icon_path = icon_path
+        self.description = description or ""
 
     def print_info(self):
         print('ADF Path', self.adf_path)
         print('Icon Path', self.icon_path)
+        print('Description', self.description)
 
-class ParamType(Enum):
-    FILE=1
-    FOLDER=2
 
 class GUIParam:
-    def __init__(self, id, val: str, ptype: ParamType):
+    def __init__(self, id, val):
         self._id = id
         self._param = val
-        self._ptype = ptype
 
     def get_id(self):
         return self._id
@@ -29,94 +26,112 @@ class GUIParam:
     def get(self):
         return self._param
 
-    def set(self, val: str):
+    def get_as_str(self):
+        return str(self._param)
+
+    def set(self, val):
         self._param = val
 
-    def get_type(self):
-        return self._ptype
-    
-    def set_type(self, ptype):
-        self._ptype = ptype
+
+def _resolve_config_value(raw, *, as_path=True):
+    """Resolve repo-relative paths; keep bare command names (PATH lookups) as-is."""
+    text = str(raw).strip()
+    if not text:
+        return text
+    expanded = pathlib.Path(text).expanduser()
+    # Device nodes and existing files/dirs: resolve.
+    if text.startswith("/dev/") or expanded.exists():
+        return expanded.resolve() if as_path else str(expanded)
+    # Absolute or explicit relative path components → resolve against cwd.
+    if text.startswith("/") or text.startswith(".") or "/" in text or "\\" in text:
+        return expanded.resolve()
+    # Bare command name (e.g. ambf_simulator, pupil_capture)
+    return text
 
 
 class GUIConfiguration:
     def __init__(self, setup_filename):
         self.setup_file_name = setup_filename
-        self.configuration_filepath = pathlib.Path(self.setup_file_name)
+        self.yaml_file_path = pathlib.Path(self.setup_file_name)
+        self.yaml_file = open(str(self.yaml_file_path), 'r')
 
-        self.param_keys = {"ambf_executable": ParamType.FILE,
-                           "pupil_capture_executable": ParamType.FILE,
-                           "recording_script_executable": ParamType.FILE,
-                           "recording_base_path": ParamType.FOLDER,
-                           "launch_file": ParamType.FILE,
-                           "footpedal_device": ParamType.FILE}
+        self.param_keys = ["ambf_executable",
+                           "pupil_executable",
+                           "recording_script_executable",
+                           "recording_base_path",
+                           "launch_file",
+                           "footpedal_device"]
+        # Optional absolute paths; empty string means skip.
+        self.optional_path_keys = ["spacenav_plugin", "external_video_recording_plugin"]
         self.params = {}
-        self.yaml_data = None
+
+        self.yaml_data = yaml.safe_load(self.yaml_file)
+
+        for l in self.param_keys:
+            self.params[l] = GUIParam(l, _resolve_config_value(self.yaml_data[l]))
+
+        self.ambf_executable = self.params["ambf_executable"]
+        self.pupil_executable = self.params["pupil_executable"]
+        self.recording_script = self.params["recording_script_executable"]
+        self.recording_base_path = self.params['recording_base_path']
+        self.launch_file = self.params["launch_file"]
+        self.footpedal_device = self.params["footpedal_device"]
+        self.spacenav_plugin = str(self.yaml_data.get("spacenav_plugin", "") or "")
+        self.external_video_recording_plugin = str(
+            self.yaml_data.get("external_video_recording_plugin", "") or ""
+        )
+
+        volumes_data = self.yaml_data['volumes']
         self.volumes_info = []
-
-        self.load_params_from_file()
-        self.load_volumes_info_from_file()
-
+        for v in volumes_data:
+            adf_path = pathlib.Path(self.yaml_data[v]['adf_path']).expanduser().resolve()
+            icon_path = pathlib.Path(self.yaml_data[v]['icon_path']).expanduser().resolve()
+            name = self.yaml_data[v]['name']
+            description = self.yaml_data[v].get('description', '')
+            new_volume_info = VolumeInfo(name, adf_path, icon_path, description)
+            self.volumes_info.append(new_volume_info)
 
     def print_volumes_info(self):
         for v in self.volumes_info:
             print('-------')
             v.print_info()
 
-    def print_params(self):
+    def print(self):
         print('Printing GUI Params:')
         for k,v in self.params.items():
-            print('\t', k, v.get())
+            print('\t', k, v.get_as_str())
 
-    def _load_yaml_data(self, yaml_filepath=None):
-        if yaml_filepath is None:
-            yaml_filepath = self.configuration_filepath
-        yaml_file = open(str(yaml_filepath), 'r')
-        yaml_data = yaml.safe_load(yaml_file)
-        yaml_file.close()
-        return yaml_data
-
-    def save_params_to_file(self, configuration_filepath=None):
-        if configuration_filepath is None:
-            configuration_filepath = self.configuration_filepath
+    def save(self):
         for k, v in self.params.items():
-            self.yaml_data[k] = v.get()
-            print("\tGUI Param: ", k, " | Raw Value: ", v.get())
-        yaml_file = open(str(configuration_filepath), 'w')
-        yaml.dump(self.yaml_data, yaml_file)
-        yaml_file.close()
+            self.yaml_data[k] = v.get_as_str()
+            print(k, v.get_as_str())
+        self.yaml_file = open(str(self.yaml_file_path), 'w')
+        yaml.dump(self.yaml_data, self.yaml_file)
+        self.yaml_file.close()
 
-    def load_params_from_file(self, yaml_filepath=None):
-        self.yaml_data = self._load_yaml_data(yaml_filepath)
-        for k, v in self.param_keys.items():
-            if self.params.get(k) is None:
-                self.params[k] = GUIParam(k, self.yaml_data[k], v)
-            else:
-                self.params[k].set(self.yaml_data[k])
-                self.params[k].set_type(v)
-        # self.print()
+    def reload(self):
+        self.yaml_file = open(str(self.yaml_file_path), 'r')
+        self.yaml_data = yaml.safe_load(self.yaml_file)
+        for l in self.param_keys:
+            self.params[l] = GUIParam(l, _resolve_config_value(self.yaml_data[l]))
 
-    def load_volumes_info_from_file(self, yaml_filepath=None):
-        self.yaml_data = self._load_yaml_data(yaml_filepath)
-        volumes_data = self.yaml_data['volumes']
-        self.volumes_info.clear()
-        for v in volumes_data:
-            adf_path = self.yaml_data[v]['adf_path']
-            icon_path = self.yaml_data[v]['icon_path']
-            name = self.yaml_data[v]['name']
-            # print('Parsing: ', v, ' ADF Path: ', adf_path, ' Icon Path: ', icon_path)
-            new_volume_info = VolumeInfo(name, adf_path, icon_path)
-            self.volumes_info.append(new_volume_info)
-        
+        self.ambf_executable = self.params["ambf_executable"]
+        self.pupil_executable = self.params["pupil_executable"]
+        self.recording_script = self.params["recording_script_executable"]
+        self.recording_base_path = self.params['recording_base_path']
+        self.launch_file = self.params["launch_file"]
+        self.footpedal_device = self.params["footpedal_device"]
+        self.spacenav_plugin = str(self.yaml_data.get("spacenav_plugin", "") or "")
+        self.external_video_recording_plugin = str(
+            self.yaml_data.get("external_video_recording_plugin", "") or ""
+        )
+        self.yaml_file.close()
 
 
 def main():
     gs = GUIConfiguration('gui_setup.yaml')
     gs.print_volumes_info()
-    gs.print_params()
 
 
 if __name__ == "__main__":
     main()
-
-

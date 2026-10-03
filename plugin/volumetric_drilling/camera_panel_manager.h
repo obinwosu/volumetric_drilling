@@ -52,7 +52,9 @@ using namespace std;
 
 enum class PanelReferenceOrigin{
     LOWER_LEFT=0, // Take the lower left corner of the panel/label as its origin
-    CENTER=1 // Take the center of the panel/label as its origin
+    CENTER=1, // Take the center of the panel/label as its origin
+    LOWER_RIGHT=2,
+    UPPER_RIGHT=3
 };
 
 enum class PanelReferenceType{
@@ -88,7 +90,11 @@ public:
     bool setFontColor(cPanel* a_panel, cColorf a_color);
     bool setText(cPanel* a_panel, string a_text);
     bool setPos(cPanel* a_panel, double a_xpos, double a_ypos, PanelReferenceOrigin a_reference=PanelReferenceOrigin::CENTER, PanelReferenceType a_refType=PanelReferenceType::NORMALIZED);
+    // Update placement for one camera only (e.g. desktop corners vs VR-centered).
+    bool setPosForCamera(cPanel* a_panel, afCameraPtr a_camera, double a_xpos, double a_ypos, PanelReferenceOrigin a_reference=PanelReferenceOrigin::CENTER, PanelReferenceType a_refType=PanelReferenceType::NORMALIZED);
     bool setVisible(cPanel* a_panel, bool a_visible);
+    bool setVisibleForCamera(cPanel* a_panel, afCameraPtr a_camera, bool a_visible);
+    bool setFontScaleForCamera(cPanel* a_panel, afCameraPtr a_camera, double a_scale);
 
     void update();
 

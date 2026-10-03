@@ -1,32 +1,189 @@
 ambf_executable: ambf_simulator
-footpedal_device: /dev/input/js1
-launch_file: ../../launch.yaml
-pupil_capture_executable: pupil_capture
-recording_base_path: ~/Volumetric Drilling Userstudy
-recording_script_executable: ../data_record.py
+footpedal_device: /dev/input/js0
+launch_file: /home/obihome/ros_ambf_ws/src/volumetric_drilling/launch.yaml
+pupil_executable: pupil_capture
+recording_base_path: /home/obihome/Volumetric_Drilling_Userstudy
+recording_script_executable: /home/obihome/ros_ambf_ws/src/volumetric_drilling/scripts/data_record.py
+spacenav_plugin: ''
+external_video_recording_plugin: ''
 volume1:
   adf_path: ../../ADF/volume_256_RT143.yaml
   icon_path: ./assets/RT143.png
-  name: Anatomy a
+  name: Anatomy A
+  description: 'Anatomy A: Temporal bone CT volume (right ear).'
+volume10:
+  adf_path: ../../ADF/volume_256_LT147.yaml
+  icon_path: ./assets/LT147.png
+  name: Anatomy J
+  description: 'Anatomy J: Temporal bone CT volume (left ear).'
+volume11:
+  adf_path: ../../ADF/volume_256_LT148.yaml
+  icon_path: ./assets/LT148.png
+  name: Anatomy K
+  description: 'Anatomy K: Temporal bone CT volume (left ear).'
+volume12:
+  adf_path: ../../ADF/volume_256_LT150.yaml
+  icon_path: ./assets/LT150.png
+  name: Anatomy L
+  description: 'Anatomy L: Temporal bone CT volume (left ear).'
+volume13:
+  adf_path: ../../ADF/volume_256_LT152.yaml
+  icon_path: ./assets/LT152.png
+  name: Anatomy M
+  description: 'Anatomy M: Temporal bone CT volume (left ear).'
+volume14:
+  adf_path: ../../ADF/volume_256_LT169.yaml
+  icon_path: ./assets/LT169.png
+  name: Anatomy N
+  description: 'Anatomy N: Temporal bone CT volume (left ear).'
+volume15:
+  adf_path: ../../ADF/volume_256_LT171.yaml
+  icon_path: ./assets/LT171.png
+  name: Anatomy O
+  description: 'Anatomy O: Temporal bone CT volume (left ear).'
+volume16:
+  adf_path: ../../ADF/volume_256_RT142.yaml
+  icon_path: ./assets/RT142.png
+  name: Anatomy P
+  description: 'Anatomy P: Temporal bone CT volume (right ear).'
+volume17:
+  adf_path: ../../ADF/volume_256_RT144.yaml
+  icon_path: ./assets/RT144.png
+  name: Anatomy Q
+  description: 'Anatomy Q: Temporal bone CT volume (right ear).'
+volume18:
+  adf_path: ../../ADF/volume_256_RT146.yaml
+  icon_path: ./assets/RT146.png
+  name: Anatomy R
+  description: 'Anatomy R: Temporal bone CT volume (right ear).'
+volume19:
+  adf_path: ../../ADF/volume_256_RT150.yaml
+  icon_path: ./assets/RT150.png
+  name: Anatomy S
+  description: 'Anatomy S: Temporal bone CT volume (right ear).'
 volume2:
   adf_path: ../../ADF/volume_256_RT138.yaml
   icon_path: ./assets/RT138.png
-  name: Anatomy b
+  name: Anatomy B
+  description: 'Anatomy B: Temporal bone CT volume (right ear).'
+volume20:
+  adf_path: ../../ADF/volume_256_RT152.yaml
+  icon_path: ./assets/RT152.png
+  name: Anatomy T
+  description: 'Anatomy T: Temporal bone CT volume (right ear).'
+volume21:
+  adf_path: ../../ADF/volume_256_RT153.yaml
+  icon_path: ./assets/RT153.png
+  name: Anatomy U
+  description: 'Anatomy U: Temporal bone CT volume (right ear).'
+volume22:
+  adf_path: ../../ADF/volume_512.yaml
+  icon_path: ./assets/LT146.png
+  name: Anatomy 512
+  description: 'Anatomy 512: Temporal bone CT volume.'
+volume23:
+  adf_path: ../../ADF/gaze_marker.yaml
+  icon_path: ../../ADF/meshes/high_res/gaze_marker.png
+  name: Gaze Marker
+  description: 'Gaze Marker: Gaze calibration marker (not a drilling anatomy).'
+volume24:
+  adf_path: ../../ADF/volume_512_nasbs_eb29f.yaml
+  icon_path: ./assets/nasbs_eb29f.png
+  name: NASBS EB29F
+  description: 'NASBS EB29F: NASBS temporal bone volume.'
+volume25:
+  adf_path: ../../ADF/volume_512_nasbs_ms53f_nodura.yaml
+  icon_path: ./assets/nasbs_ms53f.png
+  name: NASBS MS53F
+  description: 'NASBS MS53F: NASBS temporal bone volume.'
+volume26:
+  adf_path: ../../ADF/volume_512_nasbs_sm50m_rt_nodura.yaml
+  icon_path: ./assets/nasbs_ms53f.png
+  name: NASBS SM50M RT
+  description: 'NASBS SM50M RT: NASBS temporal bone volume (right ear).'
+volume27:
+  adf_path: ../../ADF/volume_EMMJ5MW1_114334.yaml
+  icon_path: ./assets/EMMJ5MW1_114334.png
+  name: volume_EMMJ5MW1_114334
+  description: 'volume_EMMJ5MW1_114334: DG tumor temporal bone CT volume (right ear).'
+volume28:
+  adf_path: ../../ADF/volume_EMMJ5MW1_114334_nodura.yaml
+  icon_path: ./assets/EMMJ5MW1_114334_nodura.png
+  name: volume_EMMJ5MW1_114334_nodura
+  description: 'volume_EMMJ5MW1_114334_nodura: DG tumor temporal bone CT volume (right
+    ear, no dura).'
+volume29:
+  adf_path: ../../ADF/volume_EMMJ5MW1_114334_raw.yaml
+  icon_path: ./assets/EMMJ5MW1_114334_raw.png
+  name: volume_EMMJ5MW1_114334_raw
+  description: 'volume_EMMJ5MW1_114334_raw: DG tumor temporal bone CT volume (right
+    ear, no dura, raw/staircased).'
+volume30:
+  adf_path: ../../ADF/volume_EMMJ5MW1_114334_smoothed.yaml
+  icon_path: ./assets/EMMJ5MW1_114334_smoothed.png
+  name: volume_EMMJ5MW1_114334_smoothed
+  description: 'volume_EMMJ5MW1_114334_smoothed: DG tumor temporal bone CT volume
+    (right ear, no dura, smoothed DVR).'
 volume3:
   adf_path: ../../ADF/volume_256_RT147.yaml
   icon_path: ./assets/RT147.png
-  name: Anatomy c
+  name: Anatomy C
+  description: 'Anatomy C: Temporal bone CT volume (right ear).'
 volume4:
   adf_path: ../../ADF/volume_256_LT143.yaml
   icon_path: ./assets/LT143.png
-  name: Anatomy d
+  name: Anatomy D
+  description: 'Anatomy D: Temporal bone CT volume (left ear).'
 volume5:
   adf_path: ../../ADF/volume_256_LT151.yaml
   icon_path: ./assets/LT151.png
-  name: Anatomy e
+  name: Anatomy E
+  description: 'Anatomy E: Temporal bone CT volume (left ear).'
+volume6:
+  adf_path: ../../ADF/volume_256_LT138.yaml
+  icon_path: ./assets/LT138.png
+  name: Anatomy F
+  description: 'Anatomy F: Temporal bone CT volume (left ear).'
+volume7:
+  adf_path: ../../ADF/volume_256_LT144.yaml
+  icon_path: ./assets/LT144.png
+  name: Anatomy G
+  description: 'Anatomy G: Temporal bone CT volume (left ear).'
+volume8:
+  adf_path: ../../ADF/volume_256_LT145.yaml
+  icon_path: ./assets/LT145.png
+  name: Anatomy H
+  description: 'Anatomy H: Temporal bone CT volume (left ear).'
+volume9:
+  adf_path: ../../ADF/volume_256_LT146.yaml
+  icon_path: ./assets/LT146.png
+  name: Anatomy I
+  description: 'Anatomy I: Temporal bone CT volume (left ear).'
 volumes:
 - volume1
 - volume2
-- volume3
 - volume4
 - volume5
+- volume7
+- volume8
+- volume9
+- volume10
+- volume12
+- volume13
+- volume14
+- volume15
+- volume16
+- volume17
+- volume18
+- volume19
+- volume20
+- volume21
+- volume22
+- volume23
+- volume24
+- volume25
+- volume26
+- volume27
+- volume28
+- volume29
+- volume30

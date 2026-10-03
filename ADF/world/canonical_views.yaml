@@ -1,0 +1,40 @@
+# T_world_camera = T_world_home * T_home_view
+# Volume is never moved. Quaternion is qx qy qz qw.
+# Add new labeled slots here (valid: false) and overwrite them from the pause menu.
+views:
+  - id: left
+    label: "Left transtemporal"
+    laterality: left
+    valid: true
+    t: [-4.0833, -1.09966, 0.11406]
+    q: [0.38138, -0.0858802, -0.169681, 0.904645]
+  - id: right
+    label: "Right transtemporal"
+    laterality: right
+    valid: true
+    t: [-2.77177, 0.934857, -1.13597]
+    q: [-0.380217, 0.0698274, 0.131694, 0.912807]
+  - id: left_eac
+    label: "Left EAC"
+    laterality: left
+    valid: false
+    t: [0, 0, 0]
+    q: [0, 0, 0, 1]
+  - id: right_eac
+    label: "Right EAC"
+    laterality: right
+    valid: false
+    t: [0, 0, 0]
+    q: [0, 0, 0, 1]
+  - id: right_mfc
+    label: "Right MFC"
+    laterality: right
+    valid: true
+    t: [-5.47248, -3.86139, -10.2426]
+    q: [-0.544246, 0.570936, 0.278797, 0.547814]
+  - id: right_rsc
+    label: "Right RSC"
+    laterality: right
+    valid: true
+    t: [-14.365, 0.145525, 1.64883]
+    q: [-0.032631, -0.986561, -0.12137, 0.104415]

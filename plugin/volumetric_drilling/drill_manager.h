@@ -57,7 +57,7 @@ struct Drill{
 public:
     afRigidBodyPtr m_rigidBody;
     string m_name;
-    double m_radius;
+    double m_size;
 
     inline int getVoxelRemovalThreshold(){return m_voxelRemovalThreshold;}
     bool setVoxelRemvalThreshold(int val){
@@ -104,7 +104,13 @@ public:
     // cycle between drill types
     void cycleDrillTypes();
 
+    // Select drill by physical burr diameter in mm (1, 2, 4, or 6).
+    bool setDrillSizeMm(int burrSizeMm);
+
     void showOnlyActive();
+
+    // Scale the unit-radius fluted burr mesh to the active drill diameter.
+    void applyBurrVisualScale();
 
     bool getOverrideControl(){return m_overrideControl;}
 
@@ -114,6 +120,15 @@ public:
     void updatePoseFromCursors(void);
 
     void reset();
+
+    // Teleport the drill into view, outside the volume AABB. Returns false if skipped.
+    bool snapToCameraView(const cVector3d& volumeOrigin,
+                          const cVector3d& volumeDims,
+                          const cTransform& volumePose);
+
+    void beginVolumeContactSuppression(int ticks = 10);
+    bool isVolumeContactSuppressed() const { return m_suppressVolumeContact; }
+    void tickVolumeContactSuppression(bool anyCursorInContact);
 
     // a haptic device handler
     cHapticDeviceHandler* m_deviceHandler;
@@ -130,14 +145,21 @@ public:
     bool m_overrideControl = false;
 
     // rate of drill movement
-    double m_drillRate = 0.001f;
+    double m_drillRate = 0.020f;
 
     afRigidBodyPtr m_drillReferenceBody;
 
     // A map of drill burr names and their sizes in simulatio
     double m_units_mmToSim;
 
-    cShapeSphere* m_burrMesh;
+    // Visual only. Cutting radius stays on the tool cursor sphere.
+    cMultiMesh* m_burrMesh = nullptr;
+
+    // Geometric radius of m_burrMesh after the last applyBurrVisualScale().
+    double m_burrVisualRadius = 1.0;
+
+    // Accumulated spin about the drill +X axis, in radians.
+    double m_burrSpinAngle = 0.0;
 
     bool m_show = true;
 
@@ -156,6 +178,9 @@ public:
 
     bool m_deviceClutch = false;
 
+    // Shift + stylus button 2: orbit camera around the drill burr.
+    bool m_camOrbitBurr = false;
+
     cLabel* m_sizeLabel;
 
     cLabel* m_controlModeLabel;
@@ -170,7 +195,7 @@ public:
 
     void setAudioPitch(double pitch);
 
-    bool m_isOn;
+    bool m_isOn = false;
 
     // toggles whether the drill mesh should move slowly towards the followSphere
     // or make a sudden jump
@@ -185,10 +210,10 @@ public:
     vector<cToolCursor*> m_toolCursorList;
 
     // radius of tool cursors
-    vector<double> m_toolCursorRadii;
+    vector<double> m_toolCursorRadius{0.02, 0.013, 0.015, 0.017, 0.019, 0.021, 0.023, 0.025};
 
     // Local offset between shaft tool cursors
-    double m_dX;
+    double m_dX = 0.03;
 
     // for storing index of follow sphere
     int m_targetToolCursorIdx = 0;
@@ -198,6 +223,9 @@ public:
     afCameraPtr m_mainCamera;
 
     CameraPanelManager* m_panelManager;
+
+    bool m_suppressVolumeContact = false;
+    int m_suppressVolumeContactTicks = 0;
 };
 
 #endif

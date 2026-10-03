@@ -22,6 +22,7 @@ if (catkin_FOUND)
     Voxels.msg
     DrillSize.msg
     VolumeInfo.msg
+    DrillReposition.msg
   )
 
   ## Generate added messages and services with any dependencies listed here
@@ -45,6 +46,7 @@ else (catkin_FOUND)
       msg/Voxels.msg
       msg/DrillSize.msg
       msg/VolumeInfo.msg
+      msg/DrillReposition.msg
       DEPENDENCIES builtin_interfaces std_msgs geometry_msgs
       )
 

@@ -40,10 +40,21 @@
 cmake_minimum_required (VERSION 3.3)
 project (volumetric_plugin)
 
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
 
 find_package(AMBF)
 find_package(Boost COMPONENTS program_options filesystem)
+find_package(X11 REQUIRED)
+find_package(ZLIB REQUIRED)
+
+# Vendored cnpy (used by video_recording_controller)
+set(CNPY_DIR ${CMAKE_CURRENT_SOURCE_DIR}/volumetric_drilling/cnpy)
+if (EXISTS ${CNPY_DIR}/cnpy.cpp)
+  add_library(cnpy STATIC ${CNPY_DIR}/cnpy.cpp)
+  target_include_directories(cnpy PUBLIC ${CNPY_DIR})
+  target_link_libraries(cnpy PUBLIC ZLIB::ZLIB)
+  set_property(TARGET cnpy PROPERTY POSITION_INDEPENDENT_CODE TRUE)
+endif()
 
 # Look for the catkin dependecies
 set (ROS1_depends ambf_server volumetric_drilling_msgs)
@@ -85,6 +96,7 @@ add_definitions(${AMBF_DEFINITIONS})
 
 set (vol_plugin_prefix "volumetric_drilling")
 
+# Gaze marker: prefer camera_navigation jagged variant (smooth kept alongside for switch).
 add_library(volumetric_drilling SHARED
     ${vol_plugin_prefix}/common.h
     ${vol_plugin_prefix}/volumetric_drilling.cpp
@@ -101,12 +113,16 @@ add_library(volumetric_drilling SHARED
     ${vol_plugin_prefix}/drill_manager.h
     ${vol_plugin_prefix}/camera_panel_manager.h
     ${vol_plugin_prefix}/camera_panel_manager.cpp
-    ${vol_plugin_prefix}/gaze_marker_controller.h
-  ${vol_plugin_prefix}/gaze_marker_controller.cpp)
+    ${vol_plugin_prefix}/gaze_marker_controller_jagged.h
+    ${vol_plugin_prefix}/gaze_marker_controller_jagged.cpp
+    ${vol_plugin_prefix}/video_recording_controller.h
+    ${vol_plugin_prefix}/video_recording_controller.cpp)
+
+target_include_directories(volumetric_drilling PRIVATE ${CNPY_DIR} ${X11_INCLUDE_DIR})
 
 if (AMBF_ROS_VERSION EQUAL 1)
   add_dependencies (volumetric_drilling ${catkin_EXPORTED_TARGETS})
-  target_link_libraries (volumetric_drilling ${Boost_LIBRARIES} ${AMBF_LIBRARIES} ${catkin_LIBRARIES})
+  target_link_libraries (volumetric_drilling ${Boost_LIBRARIES} ${AMBF_LIBRARIES} ${catkin_LIBRARIES} ${X11_LIBRARIES})
 else ()
   install (
     TARGETS volumetric_drilling
@@ -115,7 +131,12 @@ else ()
     RUNTIME DESTINATION bin
     )
   ament_target_dependencies (volumetric_drilling ${ROS2_depends})
+  target_link_libraries (volumetric_drilling ${Boost_LIBRARIES} ${AMBF_LIBRARIES} ${X11_LIBRARIES})
   ament_package ()
+endif()
+
+if (TARGET cnpy)
+  target_link_libraries(volumetric_drilling cnpy ZLIB::ZLIB)
 endif()
 
 #   add_dependencies(volumetric_drilling ${catkin_EXPORTED_TARGETS})

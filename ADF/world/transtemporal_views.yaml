@@ -1,0 +1,5 @@
+# Deprecated: labeled views now live in canonical_views.yaml
+# T_world_camera = T_world_home * T_home_view
+# Volume is never moved. Quaternion is qx qy qz qw.
+left 1 -4.0833 -1.09966 0.11406 0.38138 -0.0858802 -0.169681 0.904645
+right 1 -2.77177 0.934857 -1.13597 -0.380217 0.0698274 0.131694 0.912807

@@ -44,10 +44,18 @@
 
 #include "joystick.h"
 
-enum class FootPedalButtonMap{
-    CAM_CLUTCH = 0,
-    CHANGE_BURR_SIZE = 1,
-    DEVICE_CLUTCH = 2
+// VOXEL-MAN / Code Mercenaries floor unit (js0): analog pedal + 3 labeled buttons.
+enum class FootPedalJoystickMap{
+    DRILL_TYPE = 0,       // Left button
+    CHANGE_BURR_SIZE = 1, // Middle button
+    START_STOP = 2        // Right button (not used to run the drill)
+};
+
+// Keyboard button mappings (for FootSwitch) - using high key codes to avoid conflicts
+enum class FootPedalKeyboardMap{
+    BURR_STATE = 3,        // Custom high key code (mapped from B key)
+    CHANGE_BURR_SIZE = 4,  // Custom high key code (mapped from C key)
+    CAM_CLUTCH = 5      // Custom high key code (for future use)
 };
 
 class FootPedal: public JoyStick{
@@ -60,7 +68,18 @@ public:
 
     bool isDeviceClutchPressed();
 
+     // Getters that work for both joystick and keyboard
+    bool getCamClutchState();
+    bool getChangeBurrSizeState(); 
+    bool getDeviceClutchState();
+
+private:
     bool m_burrChangeBtnPrevState = false;
+    
+    // Current states for both joystick and keyboard mappings
+    bool m_camClutchState = false;
+    bool m_changeBurrSizeState = false;
+    bool m_deviceClutchState = false;
 };
 
 #endif

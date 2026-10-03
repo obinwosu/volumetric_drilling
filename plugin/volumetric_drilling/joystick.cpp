@@ -43,12 +43,16 @@
 #include "joystick.h"
 #include <string>
 #include <iostream>
+#include <linux/input.h>
+#include <cerrno>
+#include <climits>
+#include <cstring>
 
 using namespace std;
 
 JoyState::JoyState(){
-    m_buttons.resize(3);
-    m_axes.resize(1);
+    m_buttons.resize(16);
+    m_axes.resize(8);
 
     for (int i = 0 ; i < m_buttons.size(); i++){
         m_buttons[i] = false;
@@ -95,6 +99,70 @@ JoyStick::~JoyStick(){
     close(m_js);
 }
 
+///
+/// \brief JoyStick::findFootSwitchDevice
+/// \return device path if found, empty string otherwise
+///
+std::string JoyStick::findFootSwitchDevice() {
+    std::string devicePath;
+    
+    std::cout << "Looking for FootSwitch in /dev/input/by-id..." << std::endl;
+    
+    DIR *dir = opendir("/dev/input/by-id");
+    if (dir == nullptr) {
+        perror("Could not open /dev/input/by-id");
+        return "";
+    }
+    
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        std::string entryName(entry->d_name);
+        std::cout << "Checking: " << entryName << std::endl;
+        
+        // Look for the FootSwitch keyboard event device
+        if (entryName.find("PCsensor_FootSwitch") != std::string::npos && 
+            entryName.find("event-kbd") != std::string::npos) {
+            
+            std::string fullPath = std::string("/dev/input/by-id/") + entryName;
+            std::cout << "*** FOUND FootSwitch: " << fullPath << std::endl;
+            
+            // Resolve the symlink to get the actual device path
+            char actualPath[PATH_MAX];
+            ssize_t len = readlink(fullPath.c_str(), actualPath, sizeof(actualPath)-1);
+            if (len != -1) {
+                actualPath[len] = '\0';
+                
+                // If it's a relative path, make it absolute relative to by-id directory
+                if (actualPath[0] != '/') {
+                    std::string relativePath = std::string("/dev/input/by-id/") + actualPath;
+                    // Canonicalize the path to resolve ".."
+                    char canonicalPath[PATH_MAX];
+                    if (realpath(relativePath.c_str(), canonicalPath)) {
+                        devicePath = std::string(canonicalPath);
+                    } else {
+                        // Fallback: try to resolve manually
+                        devicePath = "/dev/input/" + std::string(actualPath).substr(3); // remove "../"
+                    }
+                } else {
+                    devicePath = std::string(actualPath);
+                }
+            } else {
+                // If readlink fails, use the symlink path directly
+                devicePath = fullPath;
+            }
+            
+            std::cout << "Resolved to: " << devicePath << std::endl;
+            break;
+        }
+    }
+    closedir(dir);
+    
+    if (devicePath.empty()) {
+        std::cout << "Could not find FootSwitch device in /dev/input/by-id" << std::endl;
+    }
+    
+    return devicePath;
+}
 
 ///
 /// \brief JoyStick::init
@@ -105,15 +173,31 @@ int JoyStick::init(string dev_name){
     m_js = open(dev_name.c_str(), O_RDONLY | O_NONBLOCK);
 
     if (m_js == -1){
-        // Since the footpedal is not loaded, set the axes to 0.
-        m_state.m_axes[0] = 0.;
-        perror("Could not open JoyStick");
+        std::cout << "Could not open " << dev_name << ", looking for FootSwitch..." << std::endl;
+        
+        // If joystick fails, look for FootSwitch
+        std::string footSwitchDevice = findFootSwitchDevice();
+        if (!footSwitchDevice.empty()) {
+            m_js = open(footSwitchDevice.c_str(), O_RDONLY | O_NONBLOCK);
+            if (m_js != -1) {
+                std::cout << "Successfully opened FootSwitch device: " << footSwitchDevice << std::endl;
+                m_isKeyboard = true; // Mark as keyboard device
+                return 1;
+            } else {
+                std::cout << "Failed to open FootSwitch device " << footSwitchDevice << " (error: " << strerror(errno) << ")" << std::endl;
+            }
+        }
+        
+        // If both attempts fail, keep analog at released (-1) so the drill stays off.
+        std::cout << "Could not find any input device, using default state." << std::endl;
+        m_state.m_axes[0] = -1.0;
         return -1;
     }
     else{
+        std::cout << "Successfully opened joystick device: " << dev_name << std::endl;
+        m_isKeyboard = false;
         return 1;
     }
-
 }
 
 bool JoyStick::isAvailable(){
@@ -129,9 +213,26 @@ bool JoyStick::isAvailable(){
 ///
 int JoyStick::readEvent(int fd, struct js_event *event){
     ssize_t bytes;
-    bytes = read(fd, event, sizeof(event));
+    bytes = read(fd, event, sizeof(*event));
 
     if (bytes == sizeof(event))
+        return 0;
+
+    /* Error, could not read full event. */
+    return -1;
+}
+
+///
+/// \brief JoyStick::readKeyboardEvent
+/// \param fd
+/// \param event
+/// \return
+///
+int JoyStick::readKeyboardEvent(int fd, struct input_event *event){
+    ssize_t bytes;
+    bytes = read(fd, event, sizeof(*event));
+
+    if (bytes == sizeof(*event))
         return 0;
 
     /* Error, could not read full event. */
@@ -145,6 +246,9 @@ int JoyStick::readEvent(int fd, struct js_event *event){
 /// \return
 ///
 bool JoyStick::getButtonState(int button_index){
+    if (button_index < 0 || button_index >= (int)m_state.m_buttons.size()){
+        return false;
+    }
     return m_state.m_buttons[button_index];
 }
 
@@ -155,28 +259,65 @@ bool JoyStick::getButtonState(int button_index){
 /// \return
 ///
 double JoyStick::getPedalState(int pedal_index){
+    if (pedal_index < 0 || pedal_index >= (int)m_state.m_axes.size()){
+        return -1.0;
+    }
     return m_state.m_axes[pedal_index];
 }
 
 void JoyStick::poll()
 {
-    if (readEvent(m_js, &m_event) == 0)
-    {
-        switch (m_event.type)
-        {
-        case JS_EVENT_BUTTON:
-//            printf("Button %u %s\n", m_event.number, m_event.value ? "pressed" : "released");
-            m_state.m_buttons[m_event.number] = m_event.value;
-            break;
-        case JS_EVENT_AXIS:
-//            printf("Axis at (%6d, %6f)\n", m_event.number, double (m_event.value / 32768.0));
-            m_state.m_axes[m_event.number] = double (m_event.value / 32768.0);
-            break;
-        default:
-            /* Ignore init events. */
-            break;
+    if (m_isKeyboard) {
+        if (readKeyboardEvent(m_js, &m_keyboard_event) == 0) {
+            if (m_keyboard_event.type == EV_KEY) {
+                int button_index = -1;
+                
+                // Map FootSwitch keys to non-conflicting custom key codes
+                if (m_keyboard_event.code == KEY_F18) { // Fn23 key from FootSwitch
+                    button_index = 3; // Custom high key code instead of B
+                }
+                else if (m_keyboard_event.code == KEY_F19) { // Fn24 key from FootSwitch
+                    button_index = 4; // Custom high key code instead of C
+                }
+                // Add more mappings if needed
+                else if (m_keyboard_event.code == KEY_F17) { // Fn22 key from FootSwitch
+                    button_index = 5; // Custom high key code instead of A
+                }
+                
+                if (button_index != -1 && button_index < m_state.m_buttons.size()) {
+                    m_state.m_buttons[button_index] = m_keyboard_event.value;
+                }
+            }
+            fflush(stdout);
         }
-
-        fflush(stdout);
+    }
+    else {
+        // Handle joystick events (drain the queue; include INIT so rest pose is known).
+        for (int n = 0; n < 32; n++){
+            if (readEvent(m_js, &m_event) != 0){
+                break;
+            }
+            const unsigned char evType = m_event.type & ~JS_EVENT_INIT;
+            switch (evType) {
+            case JS_EVENT_BUTTON:
+                if (m_event.number < m_state.m_buttons.size()) {
+                    m_state.m_buttons[m_event.number] = m_event.value;
+                }
+                if ((m_event.type & JS_EVENT_INIT) == 0){
+                    printf("Button %u %s\n", m_event.number, m_event.value ? "pressed" : "released");
+                }
+                break;
+            case JS_EVENT_AXIS:
+                if (m_event.number < m_state.m_axes.size()) {
+                    m_state.m_axes[m_event.number] = double (m_event.value / 32768.0);
+                }
+                if ((m_event.type & JS_EVENT_INIT) == 0){
+                    printf("Axis at (%6d, %6f)\n", m_event.number, double (m_event.value / 32768.0));
+                }
+                break;
+            default:
+                break;
+            }
+        }
     }
 }

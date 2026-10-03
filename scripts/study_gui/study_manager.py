@@ -2,7 +2,8 @@ import os
 import subprocess
 import sys
 from pupil_manager import *
-
+import numpy as np
+from pathlib import Path
 
 class RecordOptions:
     def __init__(self):
@@ -12,8 +13,10 @@ class RecordOptions:
 
 
 class StudyManager:
-    def __init__(self, recording_script_filepath):
-        self.recording_script_filepath = str(recording_script_filepath)
+    def __init__(self, ambf_executable_path, pupil_executable_path, recording_script_path):
+        self.ambf_executable_path = str(ambf_executable_path)
+        self.pupil_executable_path = str(pupil_executable_path)
+        self.recording_script_path = str(recording_script_path)
         self.pupil_manager = PupilManager()
         self.ambf_handle = None
         self.pupil_service_handle = None
@@ -51,11 +54,18 @@ class StudyManager:
 
     def start_recording(self, record_options):
         os.makedirs(record_options.path)
-
+        window_handle = self._get_ambf_main_window_handle()
         if record_options.pupil_data:
-            self.send_xdotool_keycmd(self._get_ambf_main_window_handle(), 'ctrl+g')
-            self.pupil_manager.start_recording(record_options.path)
-
+            self.pupil_manager.start_recording(record_options.path) # need to access the 000 folder created by pupil data
+            pupil_data_path = os.path.join(record_options.path, "000")
+            self.send_xdotool_keycmd(window_handle, 'ctrl+g')
+            # Set the environment variable for the recording path
+            temp_path = "./Simulator_Recordings/tmp/recording_path.txt"
+            with open(temp_path, "w") as temp_file:
+                temp_file.write(pupil_data_path)
+            print(f"Recording path written to: {temp_path}")
+            print(f"Set RECORDING_PATH to: {record_options.path}")
+        
         if record_options.simulator_data:
             self.start_recording_script(record_options.path)
         else:
@@ -70,15 +80,55 @@ class StudyManager:
         if self.recording_script_handle:
             self.recording_script_handle.terminate()
             self.recording_script_handle = None
-
+            
     def close_pupil_service(self):
         if self.pupil_service_handle:
             self.pupil_service_handle.terminate()
             self.pupil_service_handle = None
 
-    def stop_recording(self):
-        self.pupil_manager.stop_recoding()
+    def stop_recording(self, record_options):
+        window_handle = self._get_ambf_main_window_handle()
+        print(f"Before stop_recording - Pupil running: {record_options.pupil_data}")
+        if record_options.pupil_data:
+            self.send_xdotool_keycmd(window_handle, 'ctrl+y') # command to stop video recording
+            self.pupil_manager.stop_recoding()
         self.close_recording_script()
+        print("After stop_recording completed")
+
+    def generate_timestamps(self, exp_dir):
+        # Lazy import: h5py/natsort only needed for offline analysis, not GUI launch.
+        from exp_reader import ExpReader
+
+        exp_dir = Path(exp_dir)
+        timestamp_folder = exp_dir / '000' if (exp_dir / '000').exists() else exp_dir
+        output_timestamps_f = timestamp_folder / 'world_timestamps.npy'
+        
+        reader = ExpReader(exp_dir, verbose=True, ignore_keys=['depth', 'r_img', 'segm'])
+        od = reader._data
+        
+        world_timestamps = np.array(od['data']['time'])
+        if len(world_timestamps) < 2:
+            print("ERROR: Not enough timestamps for interpolation.")
+            return
+        
+        frate = 120  # Recording frame rate
+        time_diffs = np.diff(world_timestamps)
+        frames_per_timestamp = (time_diffs * frate).round().astype(int)
+        upsampled_timestamps = []
+        
+        current_timestamp = world_timestamps[0]
+        for i in range(len(time_diffs)):
+            interval_timestamps = np.linspace(
+                current_timestamp, 
+                current_timestamp + time_diffs[i], 
+                frames_per_timestamp[i], 
+                endpoint=False
+            )
+            upsampled_timestamps.extend(interval_timestamps)
+            current_timestamp += time_diffs[i]
+        
+        np.save(output_timestamps_f, np.array(upsampled_timestamps))
+        print(f"World timestamps saved to: {output_timestamps_f}")
 
     def close(self):
         self.close_simulation()
@@ -105,6 +155,15 @@ class StudyManager:
             proc = subprocess.Popen(cmd_str, shell=True)
             print("Running Command ", cmd_str)
 
+    def _launch_simulator(self, args):
+        print('Launch args: ', args)
+        args_list = []
+        args_list.append(self.ambf_executable_path)
+        for a in args:
+            args_list.append(a)
+        self.ambf_handle = None
+        self.ambf_handle = subprocess.Popen(args_list)
+
     def _get_ambf_main_window_handle(self):
         xdtool_str = 'xdotool search --class AMBF\ Simulator\ Window\ 1'
         xdtool_proc = subprocess.Popen(xdtool_str, shell=True, stdout=subprocess.PIPE)
@@ -112,6 +171,10 @@ class StudyManager:
         window_id_str = window_id.decode().replace('\n', '')
         # print("AMBF Main Window ID: ", window_id_str)
         return window_id_str
+
+    def _launch_pupil_service(self):
+        self.pupil_service_handle = None
+        self.pupil_service_handle = subprocess.Popen(self.pupil_executable_path)
 
     def _launch_recording_script(self, path):
         print('Recording Path: ', path)
@@ -121,7 +184,7 @@ class StudyManager:
         else:
             python_interp = 'python'
         args_list.append(python_interp)
-        args_list.append(self.recording_script_filepath)
+        args_list.append(self.recording_script_path)
         args_list.append('--output_dir')
         args_list.append(path)
         self.recording_script_handle = None

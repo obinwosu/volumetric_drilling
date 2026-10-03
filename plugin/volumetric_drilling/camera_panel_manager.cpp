@@ -89,6 +89,14 @@ void CameraPanel::update(){
         xoffset = 0.;
         yoffset = 0.;
     }
+    else if (m_referenceOrigin == PanelReferenceOrigin::LOWER_RIGHT){
+        xoffset = -m_panel->getWidth();
+        yoffset = 0.;
+    }
+    else if (m_referenceOrigin == PanelReferenceOrigin::UPPER_RIGHT){
+        xoffset = -m_panel->getWidth();
+        yoffset = -m_panel->getHeight();
+    }
 
     if (m_referenceType == PanelReferenceType::NORMALIZED){
         xpos = m_xpos * m_camera->m_width + xoffset;
@@ -169,6 +177,23 @@ bool CameraPanelManager::setPos(cPanel* a_panel, double a_xpos, double a_ypos, P
     return res;
 }
 
+bool CameraPanelManager::setPosForCamera(cPanel* a_panel, afCameraPtr a_camera, double a_xpos, double a_ypos, PanelReferenceOrigin a_reference, PanelReferenceType a_refType){
+    bool res = false;
+    if (!a_camera){
+        return res;
+    }
+    CameraPanels* vec = getCameraPanels(a_panel);
+    if (vec){
+        for (int i = 0 ; i < vec->size() ; i++){
+            if ((*vec)[i]->m_camera == a_camera){
+                (*vec)[i]->setPos(a_xpos, a_ypos, a_reference, a_refType);
+                res = true;
+            }
+        }
+    }
+    return res;
+}
+
 bool CameraPanelManager::setVisible(cPanel *a_panel, bool a_visible){
     bool res = false;
     CameraPanels* vec = getCameraPanels(a_panel);
@@ -176,6 +201,45 @@ bool CameraPanelManager::setVisible(cPanel *a_panel, bool a_visible){
         res = true;
         for (int i = 0 ; i < vec->size() ; i++){
             (*vec)[i]->setVisible(a_visible);
+        }
+    }
+    return res;
+}
+
+bool CameraPanelManager::setVisibleForCamera(cPanel *a_panel, afCameraPtr a_camera, bool a_visible){
+    bool res = false;
+    if (!a_camera){
+        return res;
+    }
+    CameraPanels* vec = getCameraPanels(a_panel);
+    if (vec){
+        for (int i = 0 ; i < vec->size() ; i++){
+            if ((*vec)[i]->m_camera == a_camera){
+                (*vec)[i]->setVisible(a_visible);
+                res = true;
+            }
+        }
+    }
+    return res;
+}
+
+bool CameraPanelManager::setFontScaleForCamera(cPanel *a_panel, afCameraPtr a_camera, double a_scale){
+    bool res = false;
+    if (!a_camera){
+        return res;
+    }
+    CameraPanels* vec = getCameraPanels(a_panel);
+    if (vec){
+        for (int i = 0 ; i < vec->size() ; i++){
+            if ((*vec)[i]->m_camera == a_camera){
+                cLabel* label = dynamic_cast<cLabel*>((*vec)[i]->m_panel);
+                if (label){
+                    label->setFontScale(a_scale);
+                    // setFontScale alone does not resize the panel; re-apply text.
+                    label->setText(label->getText());
+                    res = true;
+                }
+            }
         }
     }
     return res;

@@ -46,10 +46,11 @@
 #include "footpedal.h"
 #include "camera_panel_manager.h"
 #include "wave_generator.h"
-#include "gaze_marker_controller.h"
+#include "gaze_marker_controller_jagged.h" // change bewteen gaze_marker_controller_smooth vs. gaze_marker_controller_jagged
 #include "drill_manager.h"
-#include <ctime>
-#include <sys/stat.h> // For mkdir
+#include "video_recording_controller.h"
+
+#include <vector>
 
 using namespace std;
 using namespace ambf;
@@ -61,7 +62,7 @@ public:
     virtual int init(int argc, char** argv, const afWorldPtr a_afWorld) override;
     virtual void keyboardUpdate(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, int a_mods) override;
     virtual void mouseBtnsUpdate(GLFWwindow* a_window, int a_button, int a_action, int a_modes) override;
-    virtual void mousePosUpdate(GLFWwindow* a_window, double x_pos, double y_pos) override {}
+    virtual void mousePosUpdate(GLFWwindow* a_window, double x_pos, double y_pos) override;
     virtual void mouseScrollUpdate(GLFWwindow* a_window, double x_pos, double y_pos) override;
     virtual void graphicsUpdate() override;
     virtual void physicsUpdate(double dt) override;
@@ -78,6 +79,67 @@ protected:
     void initializeLabels();
 
     afCameraPtr findAndAppendCamera(string cam_name);
+
+    // Roll main_camera about the camera-to-volume axis. Volume pose is unchanged.
+    void setCameraRoll(double clockwiseDeg);
+    void applyCameraRoll(double clockwiseDeg);
+
+    // Move main_camera along the current look axis. Positive = dolly in (keep orientation).
+    void dollyCamera(double distanceTowardVolume);
+
+    void applyVolumeLightingUniforms();
+
+    struct CanonicalView {
+        string id;
+        string label;
+        string laterality; // "left" or "right"
+        bool valid = false;
+        cTransform T_rel;
+    };
+
+    struct PauseViewEntry {
+        string id;      // "home" or CanonicalView.id
+        string label;
+        bool valid = false;
+        bool isHome = false;
+    };
+
+    string canonicalViewsPath();
+    void loadCanonicalViews();
+    void saveCanonicalViews();
+    CanonicalView* findCanonicalView(const string& id);
+    void saveCurrentIntoView(const string& id);
+    bool applyNamedView(const string& id);
+    void applyHomeView();
+    void applyStartupView();
+    void nudgeCameraRoll(double clockwiseDeg);
+    // Yaw-orbit around the current look-at, about camera up (keeps roll).
+    void nudgeCameraOrbitYaw(double rightDeg);
+    // Pitch-orbit around the current look-at, about camera right.
+    void nudgeCameraOrbitPitch(double upDeg);
+    // AMBF scroll always dollies first; reverse that when we consume the wheel.
+    void undoAmbfWheelDolly(GLFWwindow* a_window, double y_pos);
+    vector<PauseViewEntry> buildPauseViewList() const;
+    void applyHighlightedPauseView();
+    void saveHighlightedPauseView();
+    // Apply saved or rough view for anatomy laterality (startup / F3-F4).
+    void applyLateralityStartupView();
+    string findAnatomyAdfPathFromArgs(int argc, char** argv) const;
+    string readLateralityFromAdf(const string& adfPath) const;
+    void showNotice(const string& text, double durationSec = 4.0);
+    // Desktop + VR pause / session menu (Ctrl+P or dbl-click stylus btn 1).
+    void applyStereoCenteredHud();
+    void ensurePauseMenuLabel();
+    void setVrHudVisible(bool visible);
+    void refreshVrHudText();
+    string controlHelpText(bool paused) const;
+    void cyclePauseViewHighlight(int delta);
+    // True if Ctrl is held system-wide (works even when study_gui / VR has focus).
+    bool isCtrlHeld() const;
+    // True if Shift is held system-wide (works even when study_gui / VR has focus).
+    bool isShiftHeld() const;
+
+    void requestDrillReposition();
 
 private:
 
@@ -121,6 +183,21 @@ private:
 
     int m_volumeSmoothingLevel = 2;
 
+    // 0 = no distance falloff. 1 = mild clamped falloff. See dvr/shader.fs.
+    int m_attenuationMode = 0;
+    double m_attConstant = 1.0;
+    double m_attLinear = 0.02;
+    double m_attQuadratic = 0.0;
+    double m_attClampMin = 0.85;
+    double m_attClampMax = 1.0;
+    bool m_revisedSpecular = true;
+    double m_specularStrength = 0.45;
+    double m_shininess = 48.0;
+    // Half-angle of the microscope beam. 0.15 rad is about 8.6 degrees.
+    double m_spotCutoffRad = 0.15;
+    // 1 = smooth fade to the cone edge. Higher pulls brightness toward the axis.
+    double m_spotFocus = 2.0;
+
     cLabel* m_volumeSmoothingLabel;
 
     cVector3d m_maxVolCorner, m_minVolCorner;
@@ -138,6 +215,39 @@ private:
     GazeMarkerController m_gazeMarkerController;
 
     CameraPanelManager m_panelManager;
+
+    VideoRecordingController m_videoRecordingController; // Adapting ambf video recording plugin
+    double m_timeSinceLastCalibration;
+    bool m_isRecording = false;
+    
+    bool m_isCountdownActive; // For pulling back on the camera during recalibration
+    double m_countdownTimer;
+    cTransform m_originalCameraTransform;
+    cVector3d m_volumeLookAt;
+    cVector3d m_cameraHomeUp;
+    double m_activeCameraRollDeg = 0.0;
+    bool m_customViewActive = false;
+    bool m_arcballMouseDown = false;
+    bool m_rightMouseDown = false;
+    cMatrix3d m_rightDragRot;
+    cVector3d m_preservedUp;
+    vector<CanonicalView> m_canonicalViews;
+    string m_startupViewId;
+    int m_pauseViewIndex = 0;
+    string m_anatomyLaterality; // "left", "right", or empty
+    string m_sessionUser;       // from study GUI --session_user
+    string m_sessionAnatomy;    // from study GUI --session_anatomy
+    cLabel* m_cameraPresetLabel;
+    cLabel* m_calibrationWarningLabel;
+    cLabel* m_noticeLabel;
+    cLabel* m_vrHudLabel = nullptr;
+    double m_noticeTimer = 0.0;
+    bool m_vrHudVisible = false;
+    bool m_simPaused = false;
+    double m_wallTimeAtPause = -1.0;
+    bool m_btn1Prev = false;
+    double m_btn1LastClickTime = -1.0;
+    bool m_btn2Prev = false;
 };
 
 

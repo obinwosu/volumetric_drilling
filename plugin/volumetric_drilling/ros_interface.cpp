@@ -53,10 +53,18 @@ DrillingPublisher::~DrillingPublisher(){
         m_voxelsRemovalPub->shutdown();
         m_drillSizePub->shutdown();
         m_volumeInfoPub->shutdown();
+        m_forcefeedbackPub->shutdown();
+        m_drillRepositionPub->shutdown();
+        if (m_removeVoxelsSub) {
+            m_removeVoxelsSub->shutdown();
+        }
     #elif AMBF_ROS2
         m_voxelsRemovalPub.reset();
         m_drillSizePub.reset();
         m_volumeInfoPub.reset();
+        m_forcefeedbackPub.reset();
+        m_drillRepositionPub.reset();
+        m_removeVoxelsSub.reset();
     #endif
 }
 
@@ -71,6 +79,8 @@ void DrillingPublisher::init(string a_namespace, string a_plugin){
 
     ambf_ral::create_publisher<AMBF_RAL_MSG(geometry_msgs, WrenchStamped)>
       (m_forcefeedbackPub, m_rosNode, a_namespace + "/" + a_plugin + "/drill_force_feedback", 1, false);
+    ambf_ral::create_publisher<AMBF_RAL_MSG(volumetric_drilling_msgs, DrillReposition)>
+      (m_drillRepositionPub, m_rosNode, a_namespace + "/" + a_plugin + "/drill_reposition", 1, true);
     ambf_ral::create_subscriber<AMBF_RAL_MSG(volumetric_drilling_msgs, Index), DrillingPublisher>
       (m_removeVoxelsSub, m_rosNode, a_namespace + "/" + a_plugin + "/remove_voxels", 1, &DrillingPublisher::voxelsCallback, this);
 }
@@ -144,7 +154,7 @@ void DrillingPublisher::setVolumeInfo(cTransform &pose, cVector3d& dimensions, c
 void DrillingPublisher::publishVolumeInfo(double time)
 {
     #if AMBF_ROS1
-        m_volume_info_msg.header.stamp.fromSec(time);   
+        m_volume_info_msg.header.stamp.fromSec(time);
         m_volumeInfoPub->publish(m_volume_info_msg);
     #elif AMBF_ROS2
         int32_t sec  = static_cast<int32_t>(time);
@@ -156,13 +166,13 @@ void DrillingPublisher::publishVolumeInfo(double time)
 }
 
 void DrillingPublisher::appendToVoxelMsg(cVector3d &index, cColorf &color)
-{   
+{
     #if AMBF_ROS1
     volumetric_drilling_msgs::Index idx;
-    std_msgs::ColorRGBA col; 
+    std_msgs::ColorRGBA col;
     #elif AMBF_ROS2
     volumetric_drilling_msgs::msg::Index idx;
-    std_msgs::msg::ColorRGBA col; 
+    std_msgs::msg::ColorRGBA col;
     #endif
 
     idx.x = index.x(); idx.y = index.y(); idx.z = index.z();
@@ -179,7 +189,7 @@ void DrillingPublisher::clearVoxelMsg()
 }
 
 void DrillingPublisher::publishVoxelMsg(double time)
-{    
+{
     #if AMBF_ROS1
         m_voxel_msg.header.stamp.fromSec(time);
         m_voxelsRemovalPub->publish(m_voxel_msg);
@@ -211,5 +221,39 @@ void DrillingPublisher::publishForceFeedback(cVector3d& force, cVector3d& moment
         m_force_feedback_msg.header.stamp.sec = sec;
         m_force_feedback_msg.header.stamp.nanosec = nsec;
         m_forcefeedbackPub->publish(m_force_feedback_msg);
+    #endif
+}
+
+#if AMBF_ROS1
+static void fillPoseMsg(geometry_msgs::Pose& poseMsg, const cTransform& T)
+#elif AMBF_ROS2
+static void fillPoseMsg(geometry_msgs::msg::Pose& poseMsg, const cTransform& T)
+#endif
+{
+    cQuaternion quat;
+    quat.fromRotMat(T.getLocalRot());
+    poseMsg.position.x = T.getLocalPos().x();
+    poseMsg.position.y = T.getLocalPos().y();
+    poseMsg.position.z = T.getLocalPos().z();
+    poseMsg.orientation.x = quat.x;
+    poseMsg.orientation.y = quat.y;
+    poseMsg.orientation.z = quat.z;
+    poseMsg.orientation.w = quat.w;
+}
+
+void DrillingPublisher::publishDrillReposition(const cTransform& poseFrom, const cTransform& poseTo, double time)
+{
+    fillPoseMsg(m_drill_reposition_msg.pose_from, poseFrom);
+    fillPoseMsg(m_drill_reposition_msg.pose_to, poseTo);
+
+    #if AMBF_ROS1
+        m_drill_reposition_msg.header.stamp.fromSec(time);
+        m_drillRepositionPub->publish(m_drill_reposition_msg);
+    #elif AMBF_ROS2
+        int32_t sec  = static_cast<int32_t>(time);
+        uint32_t nsec = static_cast<uint32_t>((time - sec) * 1e9);
+        m_drill_reposition_msg.header.stamp.sec = sec;
+        m_drill_reposition_msg.header.stamp.nanosec = nsec;
+        m_drillRepositionPub->publish(m_drill_reposition_msg);
     #endif
 }

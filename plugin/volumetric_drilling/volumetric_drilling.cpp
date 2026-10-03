@@ -45,8 +45,21 @@
 
 #include "volumetric_drilling.h"
 #include <boost/program_options.hpp>
+#include <cctype>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
+
+#define GLFW_EXPOSE_NATIVE_X11
+#include <GLFW/glfw3native.h>
+#include <X11/Xlib.h>
+#include <X11/keysym.h>
 
 using namespace std;
+namespace fs = std::filesystem;
 
 
 //------------------------------------------------------------------------------
@@ -58,9 +71,7 @@ namespace p_opt = boost::program_options;
 
 
 afVolmetricDrillingPlugin::afVolmetricDrillingPlugin(){
-    cout << "/*********************************************" << endl;
-    cout << "/* AMBF VOLUMETRIC DRILLING PLUGIN" << endl;
-    cout << "/*********************************************" << endl;
+
 }
 
 int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_afWorld){
@@ -68,16 +79,55 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
     cmd_opts.add_options()
             ("info", "Show Info")
             ("nt", p_opt::value<int>()->default_value(8), "Number Tool Cursors to Load. Default 8")
-            ("ds", p_opt::value<float>()->default_value(0.0015), "Offset between shaft tool cursors. Default 0.026")
+            ("ds", p_opt::value<float>()->default_value(0.026), "Offset between shaft tool cursors. Default 0.026")
             ("vm", p_opt::value<string>()->default_value("00ShinyWhite.jpg"), "Volume's Matcap Filename (Should be placed in the ./resources/matcap/ folder)")
             ("dm", p_opt::value<string>()->default_value("dark_metal_brushed.jpg"), "Drill's Matcap Filename (Should be placed in ./resources/matcap/ folder)")
             ("fp", p_opt::value<string>()->default_value("/dev/input/js0"), "Footpedal joystick input file description E.g. /dev/input/js0)")
             ("mute", p_opt::value<bool>()->default_value(false), "Mute")
-            ("gcdr", p_opt::value<double>()->default_value(30.0), "Gaze Calibration Marker Motion Duration");
+            ("gcdr", p_opt::value<double>()->default_value(30.0), "Gaze Calibration Marker Motion Duration")
+            ("sb", p_opt::value<int>()->default_value(6), "Starting burr size in mm (1, 2, 4, or 6). Default 6")
+            ("anatomy_adf", p_opt::value<string>()->default_value(""), "Path to anatomy ADF (for laterality)")
+            ("session_user", p_opt::value<string>()->default_value(""), "Study session user / participant name")
+            ("session_anatomy", p_opt::value<string>()->default_value(""), "Study session anatomy display name")
+            ("startup_view", p_opt::value<string>()->default_value(""), "Canonical view id at launch (default|home|<id>)");
 
     p_opt::variables_map var_map;
     p_opt::store(p_opt::command_line_parser(argc, argv).options(cmd_opts).allow_unregistered().run(), var_map);
     p_opt::notify(var_map);
+
+    m_sessionUser = var_map["session_user"].as<string>();
+    m_sessionAnatomy = var_map["session_anatomy"].as<string>();
+    m_startupViewId = var_map["startup_view"].as<string>();
+    for (char& c : m_startupViewId){
+        c = static_cast<char>(::tolower(c));
+    }
+
+    // Prefer explicit --anatomy_adf; fall back to AMBF -a if present in argv.
+    string anatomyAdfPath = var_map["anatomy_adf"].as<string>();
+    if (anatomyAdfPath.empty()){
+        anatomyAdfPath = findAnatomyAdfPathFromArgs(argc, argv);
+    }
+    m_anatomyLaterality = readLateralityFromAdf(anatomyAdfPath);
+    if (m_sessionAnatomy.empty() && !anatomyAdfPath.empty()){
+        // Fallback: basename without .yaml
+        string base = anatomyAdfPath;
+        size_t slash = base.find_last_of("/\\");
+        if (slash != string::npos){
+            base = base.substr(slash + 1);
+        }
+        size_t dot = base.rfind(".yaml");
+        if (dot != string::npos){
+            base = base.substr(0, dot);
+        }
+        m_sessionAnatomy = base;
+    }
+    if (!m_anatomyLaterality.empty()){
+        cerr << "INFO! Anatomy laterality=" << m_anatomyLaterality
+             << " from " << anatomyAdfPath << endl;
+    }
+    else if (!anatomyAdfPath.empty()){
+        cerr << "INFO! No laterality in anatomy ADF " << anatomyAdfPath << endl;
+    }
 
     if(var_map.count("info")){
         std::cout<< cmd_opts << std::endl;
@@ -130,14 +180,8 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
 
     m_volumeObject = m_worldPtr->getVolume("mastoidectomy_volume");
     if (!m_volumeObject){
-        cerr << "WARNING! FAILED TO FIND VOLUME NAMED \"mastoidectomy_volume\". TRYING TO GET FIRST VOLUME" << endl;
-        if (m_worldPtr->getVolumes().size() > 0){
-            m_volumeObject = m_worldPtr->getVolumes()[0];
-        }
-        else{
-            cerr << "ERROR! FAILED TO FIND ANY VOLUME OBJECT. EXITING" << endl;
-            return -1;
-        }
+        cerr << "ERROR! FAILED TO FIND VOLUME NAMED " << "mastoidectomy_volume" << endl;
+        return -1;
     }
     else{
         m_voxelObj = m_volumeObject->getInternalVolume();
@@ -152,16 +196,21 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
         m_textureCoordScale(2) = (m_maxTexCoord.z() - m_minTexCoord.z()) / (m_maxVolCorner.z() - m_minVolCorner.z());
     }
 
+    // read the scale factor between the physical workspace of the haptic
+    // device and the virtual workspace defined for the tool
+    double workspaceScaleFactor = m_drillManager.m_toolCursorList[0]->getWorkspaceScaleFactor();
+
     // stiffness properties
-    double maxStiffness = m_drillManager.m_hapticDevice->getSpecifications().m_maxLinearStiffness;
+    double maxStiffness = m_drillManager.m_hapticDevice->getSpecifications().m_maxLinearStiffness / workspaceScaleFactor;
 
     // Set voxels surface contact properties
-    m_voxelObj->m_material->setStiffness(1.0*maxStiffness);
+    m_voxelObj->m_material->setStiffness(3.0*maxStiffness); // increasing haptic feedback (2.0 --> 3.0)
     m_voxelObj->m_material->setDamping(0.0);
     m_voxelObj->m_material->setDynamicFriction(0.0);
     m_voxelObj->setUseMaterial(true);
 
     initializeLabels();
+    applyStereoCenteredHud();
 
     // Publish Volume Info
     cTransform volPose = m_volumeObject->getLocalTransform();
@@ -183,22 +232,54 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
 
 
 
+    // Dark operating room. The microscope beam is the only light, so empty
+    // space around the bone stays black at every working distance.
     cBackground* background = new cBackground();
-    background->setCornerColors(cColorf(1.0f, 1.0f, 1.0f),
-                                cColorf(1.0f, 1.0f, 1.0f),
-                                cColorf(0.6f, 0.6f, 0.6f),
-                                cColorf(0.6f, 0.6f, 0.6f));
+    background->setCornerColors(cColorf(0.0f, 0.0f, 0.0f),
+                                cColorf(0.0f, 0.0f, 0.0f),
+                                cColorf(0.0f, 0.0f, 0.0f),
+                                cColorf(0.0f, 0.0f, 0.0f));
     m_mainCamera->getBackLayer()->addChild(background);
+    if (m_stereoCamera){
+        cBackground* stereoBackground = new cBackground();
+        stereoBackground->setCornerColors(cColorf(0.0f, 0.0f, 0.0f),
+                                          cColorf(0.0f, 0.0f, 0.0f),
+                                          cColorf(0.0f, 0.0f, 0.0f),
+                                          cColorf(0.0f, 0.0f, 0.0f));
+        m_stereoCamera->getBackLayer()->addChild(stereoBackground);
+    }
 
     if (m_footpedal.init(footpedal_fd) != -1){
-        cerr << "INFO! FOUND FOOTPEDAL INTERFACE \n";
+        cerr << "INFO! FOUND FOOTPEDAL INTERFACE " << footpedal_fd << endl;
+        cerr << "INFO! Pedal map: hold analog pedal = drill and sound on; "
+             << "left/middle buttons cycle burr size" << endl;
     }
     else{
         cerr << "WARNING! NO FOOTPEDAL INTERFACE FOUND \n";
     }
 
-    m_gazeMarkerController.init(m_worldPtr, &m_panelManager, var_map);
+    m_gazeMarkerController.init(m_worldPtr, &m_panelManager);
+    cerr << "INFO! GAZE MARKER INITIALIZED \n";
+    m_timeSinceLastCalibration = 0.0;
 
+    m_originalCameraTransform = m_mainCamera->getLocalTransform();
+    m_volumeLookAt = m_volumeObject->getLocalTransform().getLocalPos();
+    m_cameraHomeUp = m_mainCamera->getUpVector();
+    loadCanonicalViews();
+    applyStartupView();
+    cFontPtr font = NEW_CFONTCALIBRI36();
+    m_calibrationWarningLabel = new cLabel(font);
+    m_calibrationWarningLabel->m_fontColor.setBlack();
+    m_calibrationWarningLabel->setCornerRadius(10, 10, 10, 10);
+    m_calibrationWarningLabel->setColor(cColorf(1., 1., 0.2));
+    m_calibrationWarningLabel->setTransparencyLevel(0.8);
+    m_calibrationWarningLabel->setShowPanel(true);
+    m_calibrationWarningLabel->setShowEnabled(false);
+    m_panelManager.addPanel(m_calibrationWarningLabel, 0.5, 0.5, 
+                        PanelReferenceOrigin::CENTER, PanelReferenceType::NORMALIZED);
+    m_panelManager.setVisible(m_calibrationWarningLabel, false);
+    m_isCountdownActive = false;
+    m_countdownTimer = 0.0;
     return 1;
 }
 
@@ -217,13 +298,71 @@ void afVolmetricDrillingPlugin::graphicsUpdate(){
     }
     m_volumeObject->getShaderProgram()->setUniformi("uMatcapMap", C_TU_AO);
     m_volumeObject->getShaderProgram()->setUniformi("shadowMap", C_TU_SHADOWMAP);
+    m_volumeObject->getShaderProgram()->setUniformf("uAlphaThreshold", 0.85);
+    m_volumeObject->getShaderProgram()->setUniformi("uEnableDVR", 1);
+    applyVolumeLightingUniforms();
 
     static double last_time = 0.0;
+    double now = m_worldPtr->getWallTime();
+    double dt = now - last_time;
+    last_time = now;
 
-    double dt = m_worldPtr->getWallTime() - last_time;
-    last_time = m_worldPtr->getWallTime();
+    // While paused (VR HUD up), do not advance study timers or capture video frames.
+    // Keep last_time current so unpausing does not apply a large catch-up dt.
+    if (!m_simPaused){
+        if (m_isRecording) {
+            // m_timeSinceLastCalibration += dt; // Commenting this out only ensures one calibration sequence
 
-    m_gazeMarkerController.update(dt);
+            // Check if 320 seconds passed and not in countdown
+            if (m_timeSinceLastCalibration >= 100 && !m_isCountdownActive) {
+                cerr << "INFO! Starting calibration countdown" << endl;
+                m_isCountdownActive = true;
+                m_countdownTimer = 3.0; // 3-second countdown
+                m_calibrationWarningLabel->setShowEnabled(true);
+                m_calibrationWarningLabel->setShowPanel(true); // Show background
+                m_panelManager.setVisible(m_calibrationWarningLabel, true);
+
+            }
+            m_videoRecordingController.update(m_worldPtr->getCurrentTimeStamp());
+        }
+
+        // Handle active countdown
+        if (m_isCountdownActive) {
+            m_countdownTimer -= dt;
+            int remaining = static_cast<int>(ceil(m_countdownTimer));
+
+            if (remaining > 0) {
+                string text = "Calibration starting in " + to_string(remaining) + "...\n";
+                text += "Returning to default view";
+                m_panelManager.setText(m_calibrationWarningLabel, text);
+            }
+            else {
+                // Countdown complete
+                m_calibrationWarningLabel->setShowEnabled(false);
+                m_calibrationWarningLabel->setShowPanel(false); // Show background
+                m_panelManager.setVisible(m_calibrationWarningLabel, false);
+                m_isCountdownActive = false;
+                // m_timeSinceLastCalibration = 0.0; // Commenting this out only ensures one calibration sequence
+
+                // Reset camera to original view
+                m_mainCamera->setLocalTransform(m_originalCameraTransform);
+
+                // Restart calibration sequence
+                cerr << "INFO! Restarting gaze calibration" << endl;
+                m_gazeMarkerController.restart();
+            }
+        }
+        m_gazeMarkerController.update(dt);
+    }
+    if (m_noticeTimer > 0.0){
+        m_noticeTimer -= dt;
+        if (m_noticeTimer <= 0.0){
+            m_panelManager.setVisible(m_noticeLabel, false);
+        }
+    }
+    if (m_vrHudVisible){
+        refreshVrHudText();
+    }
     updateButtons();
     m_panelManager.update();
 }
@@ -232,38 +371,34 @@ void afVolmetricDrillingPlugin::physicsUpdate(double dt){
 
     m_worldPtr->getChaiWorld()->computeGlobalPositions(true);
 
+    // HUD pause: freeze drill pose (no haptic velocity) and skip voxel removal / forces.
+    if (m_simPaused){
+        if (m_drillManager.m_toolCursorList.size() > 0 && m_drillManager.m_toolCursorList[0]){
+            m_drillManager.m_toolCursorList[0]->setDeviceLocalForce(0.0, 0.0, 0.0);
+        }
+        if (m_drillManager.m_audioSource && m_drillManager.m_audioState == AudioState::PLAYING){
+            m_drillManager.m_audioSource->stop();
+            m_drillManager.m_audioState = AudioState::STOPPED;
+        }
+        return;
+    }
+
     m_drillManager.update(dt);
 
-    // Need to spin for the subscriber
-    ambf_ral::spin_some(m_drillManager.m_drillingPub->m_rosNode);
-    // Remove volume based on rostopic command "remove_voxels"
-    cVector3d removingIdx;
-    if (m_drillManager.m_drillingPub->getRemoveVoxelsIdx(removingIdx)){
-        cerr << "[INFO] Manually removing voxel [" << removingIdx.x() << ", " << removingIdx.y() << ", " << removingIdx.z() << "]" << endl;
-        cVector3d idx3d(removingIdx.x(), removingIdx.y(), removingIdx.z());
-        cColorb colorb;
-        m_voxelObj->m_texture->m_image->getVoxelColor(uint(idx3d.x()), uint(idx3d.y()), uint(idx3d.z()), colorb);
-
-        if (colorb != m_zeroColor){
-            cColorf colorf = colorb.getColorf();
-            m_drillManager.m_drillingPub->appendToVoxelMsg(idx3d, colorf);
-            
-            m_mutexVoxel.acquire();
-            m_voxelObj->m_texture->m_image->setVoxelColor(uint(idx3d.x()), uint(idx3d.y()), uint(idx3d.z()), m_zeroColor);
-            m_volumeUpdate.enclose(idx3d);
-            m_mutexVoxel.release();
-
-
-            //Publisher for voxels removed
-            m_drillManager.m_drillingPub->publishVoxelMsg(m_worldPtr->getCurrentTimeStamp());
+    bool anyCursorInContact = false;
+    if (m_voxelObj){
+        for (int i = 0; i < (int)m_drillManager.m_toolCursorList.size(); i++){
+            if (m_drillManager.m_toolCursorList[i] &&
+                m_drillManager.m_toolCursorList[i]->isInContact(m_voxelObj)){
+                anyCursorInContact = true;
+                break;
+            }
         }
-        else{
-            cerr << "[INFO] Voxel [" << removingIdx.x() << ", " << removingIdx.y() << ", " << removingIdx.z() << "] was already removed" << endl;
-        }
-        
-    } 
-    
-    if (m_drillManager.m_toolCursorList[0]->isInContact(m_voxelObj) && m_drillManager.m_targetToolCursorIdx == 0 /*&& (userSwitches == 2)*/)
+    }
+    m_drillManager.tickVolumeContactSuppression(anyCursorInContact);
+    const bool skipContact = m_drillManager.isVolumeContactSuppressed();
+
+    if (!skipContact && m_drillManager.m_toolCursorList[0]->isInContact(m_voxelObj) && m_drillManager.m_targetToolCursorIdx == 0 /*&& (userSwitches == 2)*/)
     {
 
         // retrieve contact event
@@ -316,15 +451,40 @@ void afVolmetricDrillingPlugin::physicsUpdate(double dt){
 
     // check if device remains stuck inside voxel object
     // Also orient the force to match the camera rotation
-    cVector3d force = cTranspose(m_mainCamera->getLocalRot()) * m_drillManager.m_targetToolCursor->getDeviceLocalForce();
-    if (m_drillManager.m_isOn){
-//        force += (cVector3d(1.0, 1.0, 1.0) * m_waveGenerator.generate(dt));
+    cVector3d force(0.0, 0.0, 0.0);
+    if (!skipContact){
+        force = cTranspose(m_mainCamera->getLocalRot()) * m_drillManager.m_targetToolCursor->getDeviceLocalForce();
+        if (m_drillManager.m_isOn){
+            force += (cVector3d(1.0, 1.0, 1.0) * m_waveGenerator.generate(dt));
+        }
     }
+
     m_drillManager.m_toolCursorList[0]->setDeviceLocalForce(force);
     m_drillManager.m_drillingPub->publishForceFeedback(force, force, m_worldPtr->getCurrentTimeStamp());
     double maxF = m_drillManager.m_hapticDevice->getSpecifications().m_maxLinearForce;
     double force_mag = cClamp(force.length(), 0.0, maxF);
     m_drillManager.setAudioPitch(3.0 - force_mag / maxF);
+
+    if (m_flagStart)
+    {
+        if (force.length() != 0.0)
+        {
+            m_counter = 0;
+        }
+        else
+        {
+            m_counter++;
+            if (m_counter > 10)
+                m_flagStart = false;
+        }
+    }
+    else
+    {
+        if (force.length() > 10.0)
+        {
+            m_flagStart = true;
+        }
+    }
 
     /////////////////////////////////////////////////////////////////////////
     // FINALIZE
@@ -421,6 +581,7 @@ void afVolmetricDrillingPlugin::updateButtons(){
 
     m_drillManager.m_camClutch = false;
     m_drillManager.m_deviceClutch = false;
+    m_drillManager.m_camOrbitBurr = false;
 
     if (m_footpedal.isAvailable()){
         m_drillManager.m_camClutch = m_footpedal.isCamClutchPressed();
@@ -429,13 +590,183 @@ void afVolmetricDrillingPlugin::updateButtons(){
     }
 
     if (m_drillManager.m_hapticDevice->isDeviceAvailable()){
-        bool val1, val2;
-        m_drillManager.m_hapticDevice->getUserSwitch(1, val1);
-        m_drillManager.m_hapticDevice->getUserSwitch(0, val2);
+        bool btn1 = false; // stylus button 1 (cam-clutch switch index 1)
+        bool btn2 = false; // stylus button 2 (device-clutch switch index 0)
+        m_drillManager.m_hapticDevice->getUserSwitch(1, btn1);
+        m_drillManager.m_hapticDevice->getUserSwitch(0, btn2);
 
-        m_drillManager.m_camClutch |= val1;
-        m_drillManager.m_deviceClutch |= val2;
+        const bool ctrlHeld = isCtrlHeld();
+        const bool shiftHeld = isShiftHeld();
+
+        if (ctrlHeld){
+            // Ctrl + button 2 = zoom/dolly in; Ctrl + button 1 = zoom/dolly out.
+            // Hold for continuous adjust; do not treat as clutch / double-click.
+            const double zoomStep = 0.08;
+            if (btn2){
+                dollyCamera(zoomStep);
+            }
+            if (btn1){
+                dollyCamera(-zoomStep);
+            }
+            m_btn1Prev = btn1;
+            m_btn2Prev = btn2;
+        }
+        else{
+            // Double-click button 1 toggles pause. Required for VR (no keyboard).
+            // Use glfw time, not AMBF wall clock — wall clock is rewound on resume.
+            const double doubleClickSec = 0.45;
+            double now = glfwGetTime();
+
+            if (shiftHeld){
+                // Shift + button 1: snap drill into view. Not clutch, not a double-tap.
+                if (btn1 && !m_btn1Prev){
+                    requestDrillReposition();
+                }
+                if (m_vrHudVisible){
+                    // Paused: Shift + button 2 applies the highlighted canonical view.
+                    if (btn2 && !m_btn2Prev){
+                        applyHighlightedPauseView();
+                        refreshVrHudText();
+                    }
+                }
+                else{
+                    // Shift + button 2: orbit around the burr.
+                    m_drillManager.m_camOrbitBurr |= btn2;
+                }
+                m_btn1Prev = btn1;
+                m_btn2Prev = btn2;
+                m_btn1LastClickTime = -1.0;
+            }
+            else{
+                if (btn1 && !m_btn1Prev){
+                    if (m_btn1LastClickTime >= 0.0 && (now - m_btn1LastClickTime) <= doubleClickSec){
+                        setVrHudVisible(!m_vrHudVisible);
+                        m_btn1LastClickTime = -1.0;
+                    }
+                    else{
+                        m_btn1LastClickTime = now;
+                    }
+                }
+                m_btn1Prev = btn1;
+
+                if (m_vrHudVisible){
+                    // Paused: button 2 tap cycles the view list (headset, no keyboard).
+                    if (btn2 && !m_btn2Prev){
+                        cyclePauseViewHighlight(1);
+                        refreshVrHudText();
+                    }
+                    m_btn2Prev = btn2;
+                }
+                else{
+                    m_btn2Prev = btn2;
+                    m_drillManager.m_camClutch |= btn1;
+                    m_drillManager.m_deviceClutch |= btn2;
+                }
+            }
+        }
     }
+}
+
+bool afVolmetricDrillingPlugin::isCtrlHeld() const
+{
+    // Global X11 keymap: works when focus is on study_gui or another window.
+    Display* dpy = glfwGetX11Display();
+    if (dpy){
+        char keys[32];
+        XQueryKeymap(dpy, keys);
+        auto keyDown = [&](KeySym sym) -> bool {
+            KeyCode code = XKeysymToKeycode(dpy, sym);
+            if (code == 0){
+                return false;
+            }
+            return (keys[code / 8] & (1 << (code % 8))) != 0;
+        };
+        if (keyDown(XK_Control_L) || keyDown(XK_Control_R)){
+            return true;
+        }
+    }
+
+    // Fallback: any AMBF camera window that currently reports Ctrl pressed.
+    auto winCtrl = [](GLFWwindow* win) -> bool {
+        if (!win){
+            return false;
+        }
+        return (glfwGetKey(win, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS)
+            || (glfwGetKey(win, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS);
+    };
+    if (m_mainCamera && winCtrl(m_mainCamera->m_window)){
+        return true;
+    }
+    if (m_stereoCamera && winCtrl(m_stereoCamera->m_window)){
+        return true;
+    }
+    for (const auto& kv : m_cameras){
+        if (kv.second && winCtrl(kv.second->m_window)){
+            return true;
+        }
+    }
+    return false;
+}
+
+bool afVolmetricDrillingPlugin::isShiftHeld() const
+{
+    Display* dpy = glfwGetX11Display();
+    if (dpy){
+        char keys[32];
+        XQueryKeymap(dpy, keys);
+        auto keyDown = [&](KeySym sym) -> bool {
+            KeyCode code = XKeysymToKeycode(dpy, sym);
+            if (code == 0){
+                return false;
+            }
+            return (keys[code / 8] & (1 << (code % 8))) != 0;
+        };
+        if (keyDown(XK_Shift_L) || keyDown(XK_Shift_R)){
+            return true;
+        }
+    }
+
+    auto winShift = [](GLFWwindow* win) -> bool {
+        if (!win){
+            return false;
+        }
+        return (glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
+            || (glfwGetKey(win, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS);
+    };
+    if (m_mainCamera && winShift(m_mainCamera->m_window)){
+        return true;
+    }
+    if (m_stereoCamera && winShift(m_stereoCamera->m_window)){
+        return true;
+    }
+    for (const auto& kv : m_cameras){
+        if (kv.second && winShift(kv.second->m_window)){
+            return true;
+        }
+    }
+    return false;
+}
+
+void afVolmetricDrillingPlugin::requestDrillReposition()
+{
+    if (!m_volumeObject || !m_mainCamera){
+        showNotice("Cannot reposition drill (no volume or camera)");
+        return;
+    }
+
+    cTransform poseFrom = m_drillManager.m_T_d;
+    cVector3d dims = m_volumeObject->getDimensions();
+    if (!m_drillManager.snapToCameraView(m_volumeLookAt, dims, m_volumeObject->getLocalTransform())){
+        showNotice("Cannot reposition drill");
+        return;
+    }
+
+    if (m_drillManager.m_drillingPub){
+        m_drillManager.m_drillingPub->publishDrillReposition(
+            poseFrom, m_drillManager.m_T_d, m_worldPtr->getCurrentTimeStamp());
+    }
+    showNotice("Drill repositioned");
+    cerr << "INFO! DRILL REPOSITIONED INTO VIEW" << endl;
 }
 
 afCameraPtr afVolmetricDrillingPlugin::findAndAppendCamera(string cam_name){
@@ -448,6 +779,876 @@ afCameraPtr afVolmetricDrillingPlugin::findAndAppendCamera(string cam_name){
         cerr << "WARNING! CAMERA NOT FOUND " << cam_name << endl;
     }
     return cam;
+}
+
+void afVolmetricDrillingPlugin::setCameraRoll(double clockwiseDeg)
+{
+    m_activeCameraRollDeg = clockwiseDeg;
+    m_customViewActive = true;
+    applyCameraRoll(clockwiseDeg);
+    cerr << "INFO! CAMERA ROLL " << clockwiseDeg << " deg CW about view axis" << endl;
+}
+
+void afVolmetricDrillingPlugin::applyCameraRoll(double clockwiseDeg)
+{
+    if (!m_mainCamera){
+        return;
+    }
+
+    cVector3d pos = m_mainCamera->getLocalPos();
+    cVector3d axis = m_volumeLookAt - pos;
+    if (axis.length() < 1e-6){
+        return;
+    }
+    axis.normalize();
+
+    // Home up projected onto the plane perpendicular to the view axis
+    cVector3d refUp = m_cameraHomeUp - axis * (m_cameraHomeUp.dot(axis));
+    if (refUp.length() < 1e-6){
+        cVector3d tmp = (fabs(axis.z()) < 0.9) ? cVector3d(0, 0, 1) : cVector3d(0, 1, 0);
+        refUp = cCross(axis, tmp);
+    }
+    refUp.normalize();
+
+    // Clockwise as seen looking toward the volume (negative right-hand rotation about the look axis)
+    cMatrix3d rot;
+    rot.setAxisAngleRotationDeg(axis, -clockwiseDeg);
+    cVector3d up = rot * refUp;
+
+    m_mainCamera->setView(pos, m_volumeLookAt, up);
+}
+
+void afVolmetricDrillingPlugin::nudgeCameraRoll(double clockwiseDeg)
+{
+    if (!m_mainCamera){
+        return;
+    }
+    cVector3d pos = m_mainCamera->getLocalPos();
+    cVector3d look = m_mainCamera->getLookVector();
+    if (look.length() < 1e-6){
+        return;
+    }
+    look.normalize();
+    cVector3d up = m_mainCamera->getUpVector();
+    cMatrix3d rot;
+    rot.setAxisAngleRotationDeg(look, -clockwiseDeg);
+    cVector3d newUp = rot * up;
+    if (newUp.length() < 1e-6){
+        return;
+    }
+    newUp.normalize();
+    m_mainCamera->setView(pos, m_mainCamera->getTargetPosLocal(), newUp);
+    m_activeCameraRollDeg += clockwiseDeg;
+    m_customViewActive = true;
+}
+
+void afVolmetricDrillingPlugin::nudgeCameraOrbitYaw(double rightDeg)
+{
+    if (!m_mainCamera){
+        return;
+    }
+    cVector3d pos = m_mainCamera->getLocalPos();
+    cVector3d pivot = m_mainCamera->getTargetPosLocal();
+    if ((pivot - pos).length() < 1e-3){
+        pivot = m_volumeLookAt;
+    }
+    cVector3d up = m_mainCamera->getUpVector();
+    if (up.length() < 1e-6){
+        return;
+    }
+    up.normalize();
+    cVector3d offset = pos - pivot;
+    double dist = offset.length();
+    if (dist < 1e-4){
+        return;
+    }
+    // Look-at is along up: no yaw circle.
+    if (fabs(offset.dot(up) / dist) > 0.98){
+        return;
+    }
+    cMatrix3d rot;
+    rot.setAxisAngleRotationDeg(up, rightDeg);
+    m_mainCamera->setView(pivot + rot * offset, pivot, up);
+    m_customViewActive = true;
+}
+
+void afVolmetricDrillingPlugin::nudgeCameraOrbitPitch(double upDeg)
+{
+    if (!m_mainCamera){
+        return;
+    }
+    cVector3d pos = m_mainCamera->getLocalPos();
+    cVector3d pivot = m_mainCamera->getTargetPosLocal();
+    if ((pivot - pos).length() < 1e-3){
+        pivot = m_volumeLookAt;
+    }
+    cVector3d right = m_mainCamera->getRightVector();
+    cVector3d up = m_mainCamera->getUpVector();
+    if (right.length() < 1e-6 || up.length() < 1e-6){
+        return;
+    }
+    right.normalize();
+    up.normalize();
+    cVector3d offset = pos - pivot;
+    double dist = offset.length();
+    if (dist < 1e-4){
+        return;
+    }
+    // Avoid flipping through the poles (offset parallel to up).
+    if (fabs(offset.dot(up) / dist) > 0.98){
+        return;
+    }
+    cMatrix3d rot;
+    rot.setAxisAngleRotationDeg(right, upDeg);
+    cVector3d newUp = rot * up;
+    if (newUp.length() < 1e-6){
+        return;
+    }
+    newUp.normalize();
+    m_mainCamera->setView(pivot + rot * offset, pivot, newUp);
+    m_customViewActive = true;
+}
+
+void afVolmetricDrillingPlugin::undoAmbfWheelDolly(GLFWwindow* a_window, double y_pos)
+{
+    if (!m_mainCamera){
+        return;
+    }
+    // Match ambf_simulator mouseScrollCallback: local-X dolly, Shift slows 10x.
+    double speed_scale = 1.0;
+    if (a_window && glfwGetKey(a_window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS){
+        speed_scale = 0.1;
+    }
+    cVector3d camVelAlongLook(speed_scale * 0.1 * (-y_pos), 0, 0);
+    cVector3d pos = m_mainCamera->getLocalPos();
+    cVector3d delta = m_mainCamera->getLocalRot() * camVelAlongLook;
+    m_mainCamera->setLocalPos(pos - delta);
+}
+
+namespace {
+string trimCopy(const string& s)
+{
+    size_t a = s.find_first_not_of(" \t\r\n");
+    if (a == string::npos){
+        return string();
+    }
+    size_t b = s.find_last_not_of(" \t\r\n");
+    return s.substr(a, b - a + 1);
+}
+
+string unquoteCopy(const string& s)
+{
+    string t = trimCopy(s);
+    if (t.size() >= 2 && ((t.front() == '"' && t.back() == '"') || (t.front() == '\'' && t.back() == '\''))){
+        return t.substr(1, t.size() - 2);
+    }
+    return t;
+}
+
+vector<double> parseYamlArray(const string& s)
+{
+    vector<double> out;
+    string inner = s;
+    size_t lb = inner.find('[');
+    size_t rb = inner.rfind(']');
+    if (lb != string::npos && rb != string::npos && rb > lb){
+        inner = inner.substr(lb + 1, rb - lb - 1);
+    }
+    for (char& c : inner){
+        if (c == ','){
+            c = ' ';
+        }
+    }
+    istringstream ss(inner);
+    double x;
+    while (ss >> x){
+        out.push_back(x);
+    }
+    return out;
+}
+
+bool parseYamlBool(const string& s)
+{
+    string t = unquoteCopy(s);
+    for (char& c : t){
+        c = static_cast<char>(::tolower(c));
+    }
+    return t == "true" || t == "1" || t == "yes";
+}
+
+string yamlQuote(const string& s)
+{
+    bool need = s.empty();
+    for (char c : s){
+        if (c == ':' || c == '#' || c == '"' || c == '\'' || c == ' ' || c == '\t'){
+            need = true;
+            break;
+        }
+    }
+    if (!need){
+        return s;
+    }
+    string out = "\"";
+    for (char c : s){
+        if (c == '"' || c == '\\'){
+            out.push_back('\\');
+        }
+        out.push_back(c);
+    }
+    out.push_back('"');
+    return out;
+}
+} // namespace
+
+string afVolmetricDrillingPlugin::canonicalViewsPath()
+{
+    fs::path p = fs::path(__FILE__).parent_path() / ".." / ".." / "ADF" / "world" / "canonical_views.yaml";
+    return fs::weakly_canonical(p).string();
+}
+
+void afVolmetricDrillingPlugin::loadCanonicalViews()
+{
+    m_canonicalViews.clear();
+    ifstream in(canonicalViewsPath());
+    if (!in.is_open()){
+        cerr << "INFO! No canonical views at " << canonicalViewsPath() << endl;
+        return;
+    }
+
+    CanonicalView cur;
+    bool have = false;
+    auto flush = [&](){
+        if (have && !cur.id.empty()){
+            m_canonicalViews.push_back(cur);
+        }
+        cur = CanonicalView();
+        have = false;
+    };
+
+    string line;
+    while (getline(in, line)){
+        string raw = trimCopy(line);
+        if (raw.empty() || raw[0] == '#'){
+            continue;
+        }
+        if (raw == "views:"){
+            continue;
+        }
+        bool newItem = false;
+        if (raw.size() >= 2 && raw[0] == '-' && (raw[1] == ' ' || raw[1] == '\t')){
+            flush();
+            have = true;
+            newItem = true;
+            raw = trimCopy(raw.substr(1));
+        }
+        size_t colon = raw.find(':');
+        if (colon == string::npos){
+            continue;
+        }
+        if (!have && !newItem){
+            continue;
+        }
+        have = true;
+        string key = trimCopy(raw.substr(0, colon));
+        string val = trimCopy(raw.substr(colon + 1));
+        if (key == "id"){
+            cur.id = unquoteCopy(val);
+        }
+        else if (key == "label"){
+            cur.label = unquoteCopy(val);
+        }
+        else if (key == "laterality"){
+            string lat = unquoteCopy(val);
+            for (char& c : lat){
+                c = static_cast<char>(::tolower(c));
+            }
+            cur.laterality = lat;
+        }
+        else if (key == "valid"){
+            cur.valid = parseYamlBool(val);
+        }
+        else if (key == "t"){
+            vector<double> arr = parseYamlArray(val);
+            if (arr.size() >= 3){
+                cur.T_rel.setLocalPos(cVector3d(arr[0], arr[1], arr[2]));
+            }
+        }
+        else if (key == "q"){
+            vector<double> arr = parseYamlArray(val);
+            if (arr.size() >= 4){
+                cQuaternion quat(arr[3], arr[0], arr[1], arr[2]); // qw, qx, qy, qz
+                cMatrix3d rot;
+                quat.toRotMat(rot);
+                cur.T_rel.setLocalRot(rot);
+            }
+        }
+    }
+    flush();
+    cerr << "INFO! Loaded " << m_canonicalViews.size() << " canonical views from "
+         << canonicalViewsPath() << endl;
+}
+
+void afVolmetricDrillingPlugin::saveCanonicalViews()
+{
+    ofstream out(canonicalViewsPath());
+    if (!out.is_open()){
+        showNotice("ERROR: could not write " + canonicalViewsPath(), 4.0);
+        return;
+    }
+    out << "# T_world_camera = T_world_home * T_home_view\n";
+    out << "# Volume is never moved. Quaternion is qx qy qz qw.\n";
+    out << "# Add new labeled slots here (valid: false) and overwrite them from the pause menu.\n";
+    out << "views:\n";
+    for (const CanonicalView& v : m_canonicalViews){
+        cQuaternion q;
+        q.fromRotMat(v.T_rel.getLocalRot());
+        cVector3d p = v.T_rel.getLocalPos();
+        out << "  - id: " << v.id << "\n";
+        out << "    label: " << yamlQuote(v.label.empty() ? v.id : v.label) << "\n";
+        out << "    laterality: " << v.laterality << "\n";
+        out << "    valid: " << (v.valid ? "true" : "false") << "\n";
+        out << "    t: [" << p.x() << ", " << p.y() << ", " << p.z() << "]\n";
+        out << "    q: [" << q.x << ", " << q.y << ", " << q.z << ", " << q.w << "]\n";
+    }
+    out.flush();
+    if (!out.good()){
+        showNotice("ERROR: failed writing " + canonicalViewsPath(), 4.0);
+        return;
+    }
+    cerr << "INFO! Wrote file " << canonicalViewsPath() << endl;
+}
+
+afVolmetricDrillingPlugin::CanonicalView* afVolmetricDrillingPlugin::findCanonicalView(const string& id)
+{
+    for (CanonicalView& v : m_canonicalViews){
+        if (v.id == id){
+            return &v;
+        }
+    }
+    return nullptr;
+}
+
+void afVolmetricDrillingPlugin::saveCurrentIntoView(const string& id)
+{
+    if (!m_mainCamera){
+        return;
+    }
+    if (id.empty() || id == "home" || id == "default"){
+        showNotice("Cannot save into Home / Default");
+        return;
+    }
+    CanonicalView* v = findCanonicalView(id);
+    if (!v){
+        showNotice("Unknown view id: " + id);
+        return;
+    }
+    cTransform T_home_inv = m_originalCameraTransform;
+    T_home_inv.invert();
+    v->T_rel = T_home_inv * m_mainCamera->getLocalTransform();
+    v->valid = true;
+    m_customViewActive = true;
+    m_activeCameraRollDeg = 0.0;
+    saveCanonicalViews();
+    string name = v->label.empty() ? v->id : v->label;
+    showNotice("Saved view: " + name + "\n" + canonicalViewsPath());
+}
+
+bool afVolmetricDrillingPlugin::applyNamedView(const string& id)
+{
+    if (!m_mainCamera){
+        return false;
+    }
+    if (id == "home"){
+        applyHomeView();
+        return true;
+    }
+    CanonicalView* v = findCanonicalView(id);
+    if (!v){
+        showNotice("Unknown view id: " + id);
+        return false;
+    }
+    if (!v->valid){
+        showNotice("View \"" + (v->label.empty() ? v->id : v->label) + "\" is empty.\n"
+                   "Frame the camera, pause, highlight it, Shift+Enter to save.");
+        return false;
+    }
+    m_mainCamera->setLocalTransform(m_originalCameraTransform * v->T_rel);
+    m_customViewActive = true;
+    m_activeCameraRollDeg = 0.0;
+    showNotice("Applied view: " + (v->label.empty() ? v->id : v->label));
+    return true;
+}
+
+void afVolmetricDrillingPlugin::applyHomeView()
+{
+    if (!m_mainCamera){
+        return;
+    }
+    m_mainCamera->setLocalTransform(m_originalCameraTransform);
+    m_customViewActive = false;
+    m_activeCameraRollDeg = 0.0;
+    showNotice("Applied Home view");
+}
+
+void afVolmetricDrillingPlugin::applyStartupView()
+{
+    string id = m_startupViewId;
+    if (id.empty() || id == "default"){
+        applyLateralityStartupView();
+        return;
+    }
+    if (id == "home"){
+        applyHomeView();
+        return;
+    }
+    if (!applyNamedView(id)){
+        applyLateralityStartupView();
+    }
+}
+
+vector<afVolmetricDrillingPlugin::PauseViewEntry> afVolmetricDrillingPlugin::buildPauseViewList() const
+{
+    vector<PauseViewEntry> items;
+    for (const CanonicalView& v : m_canonicalViews){
+        if (!m_anatomyLaterality.empty()
+            && (v.laterality == "left" || v.laterality == "right")
+            && v.laterality != m_anatomyLaterality){
+            continue;
+        }
+        PauseViewEntry e;
+        e.id = v.id;
+        e.label = v.label.empty() ? v.id : v.label;
+        e.valid = v.valid;
+        e.isHome = false;
+        items.push_back(e);
+    }
+    PauseViewEntry home;
+    home.id = "home";
+    home.label = "Home";
+    home.valid = true;
+    home.isHome = true;
+    items.push_back(home);
+    return items;
+}
+
+void afVolmetricDrillingPlugin::cyclePauseViewHighlight(int delta)
+{
+    int n = static_cast<int>(buildPauseViewList().size());
+    if (n <= 0){
+        m_pauseViewIndex = 0;
+        return;
+    }
+    int idx = m_pauseViewIndex % n;
+    if (idx < 0){
+        idx += n;
+    }
+    m_pauseViewIndex = (idx + delta % n + n) % n;
+}
+
+void afVolmetricDrillingPlugin::applyHighlightedPauseView()
+{
+    vector<PauseViewEntry> items = buildPauseViewList();
+    if (items.empty()){
+        return;
+    }
+    if (m_pauseViewIndex < 0){
+        m_pauseViewIndex = 0;
+    }
+    if (m_pauseViewIndex >= static_cast<int>(items.size())){
+        m_pauseViewIndex = static_cast<int>(items.size()) - 1;
+    }
+    applyNamedView(items[m_pauseViewIndex].id);
+}
+
+void afVolmetricDrillingPlugin::saveHighlightedPauseView()
+{
+    vector<PauseViewEntry> items = buildPauseViewList();
+    if (items.empty()){
+        return;
+    }
+    if (m_pauseViewIndex < 0){
+        m_pauseViewIndex = 0;
+    }
+    if (m_pauseViewIndex >= static_cast<int>(items.size())){
+        m_pauseViewIndex = static_cast<int>(items.size()) - 1;
+    }
+    const PauseViewEntry& e = items[m_pauseViewIndex];
+    if (e.isHome){
+        showNotice("Cannot save into Home");
+        return;
+    }
+    saveCurrentIntoView(e.id);
+}
+
+void afVolmetricDrillingPlugin::showNotice(const string& text, double durationSec)
+{
+    cerr << text << endl;
+    if (!m_noticeLabel){
+        return;
+    }
+    m_panelManager.setText(m_noticeLabel, text);
+    // Desktop: upper-right. VR: center (set in applyStereoCenteredHud; keep it there).
+    m_panelManager.setPosForCamera(m_noticeLabel, m_mainCamera, 0.985, 0.97,
+                                   PanelReferenceOrigin::UPPER_RIGHT, PanelReferenceType::NORMALIZED);
+    if (m_stereoCamera){
+        m_panelManager.setPosForCamera(m_noticeLabel, m_stereoCamera, 0.5, 0.72,
+                                       PanelReferenceOrigin::CENTER, PanelReferenceType::NORMALIZED);
+    }
+    m_panelManager.setVisible(m_noticeLabel, true);
+    m_noticeTimer = durationSec;
+}
+
+void afVolmetricDrillingPlugin::applyStereoCenteredHud()
+{
+    ensurePauseMenuLabel();
+
+    if (m_stereoCamera){
+        // Desktop corner labels stay on main_camera only; hide their stereo copies.
+        m_panelManager.setVisibleForCamera(m_drillManager.m_sizeLabel, m_stereoCamera, false);
+        m_panelManager.setVisibleForCamera(m_drillManager.m_controlModeLabel, m_stereoCamera, false);
+        m_panelManager.setVisibleForCamera(m_volumeSmoothingLabel, m_stereoCamera, false);
+        m_panelManager.setVisibleForCamera(m_cameraPresetLabel, m_stereoCamera, false);
+
+        // Notices: larger + centered on VR (still event-driven, not part of the toggle HUD).
+        m_panelManager.setPosForCamera(m_noticeLabel, m_stereoCamera, 0.5, 0.72,
+                                       PanelReferenceOrigin::CENTER, PanelReferenceType::NORMALIZED);
+        m_panelManager.setFontScaleForCamera(m_noticeLabel, m_stereoCamera, 1.1);
+    }
+
+    setVrHudVisible(false);
+}
+
+void afVolmetricDrillingPlugin::ensurePauseMenuLabel()
+{
+    if (m_vrHudLabel){
+        return;
+    }
+    cFontPtr font = NEW_CFONTCALIBRI40();
+    m_vrHudLabel = new cLabel(font);
+    m_vrHudLabel->m_fontColor.setBlack();
+    m_vrHudLabel->setFontScale(0.75);
+    m_vrHudLabel->setColor(cColorf(1.0, 1.0, 1.0));
+    m_vrHudLabel->setTransparencyLevel(0.88);
+    m_vrHudLabel->setCornerRadius(12, 12, 12, 12);
+    m_vrHudLabel->setMargins(20, 20, 20, 20);
+    m_vrHudLabel->setShowPanel(true);
+    refreshVrHudText();
+    m_panelManager.addPanel(m_vrHudLabel, 0.5, 0.48, PanelReferenceOrigin::CENTER, PanelReferenceType::NORMALIZED);
+    // Start hidden on every camera; setVrHudVisible toggles visibility.
+    if (m_mainCamera){
+        m_panelManager.setVisibleForCamera(m_vrHudLabel, m_mainCamera, false);
+        m_panelManager.setFontScaleForCamera(m_vrHudLabel, m_mainCamera, 0.65);
+    }
+    if (m_stereoCamera){
+        m_panelManager.setVisibleForCamera(m_vrHudLabel, m_stereoCamera, false);
+        m_panelManager.setFontScaleForCamera(m_vrHudLabel, m_stereoCamera, 0.85);
+    }
+}
+
+void afVolmetricDrillingPlugin::refreshVrHudText()
+{
+    if (!m_vrHudLabel){
+        return;
+    }
+
+    string user = m_sessionUser.empty() ? "(none)" : m_sessionUser;
+    string anatomy = m_sessionAnatomy.empty() ? "(unknown)" : m_sessionAnatomy;
+    string laterality = m_anatomyLaterality.empty() ? "unknown" : m_anatomyLaterality;
+    string drill = "unknown";
+    if (m_drillManager.m_activeDrill){
+        drill = m_drillManager.m_activeDrill->m_name;
+    }
+    else if (m_drillManager.m_sizeLabel){
+        drill = m_drillManager.m_sizeLabel->getText();
+    }
+
+    string status = m_simPaused ? "PAUSED\n\n" : "PAUSE MENU\n\n";
+
+    string session =
+        "SESSION\n"
+        "  User          " + user + "\n"
+        "  Anatomy       " + anatomy + "\n"
+        "  Side          " + laterality + "\n"
+        "  Drill         " + drill + "\n";
+
+    string viewsHeader = "\nVIEWS";
+    if (!m_anatomyLaterality.empty()){
+        string lat = m_anatomyLaterality;
+        for (char& c : lat){
+            c = static_cast<char>(::toupper(c));
+        }
+        viewsHeader += "  (" + lat + ")";
+    }
+    viewsHeader += "\n";
+
+    vector<PauseViewEntry> items = buildPauseViewList();
+    if (items.empty()){
+        m_pauseViewIndex = 0;
+    }
+    else if (m_pauseViewIndex < 0){
+        m_pauseViewIndex = 0;
+    }
+    else if (m_pauseViewIndex >= static_cast<int>(items.size())){
+        m_pauseViewIndex = static_cast<int>(items.size()) - 1;
+    }
+    string viewList;
+    for (int i = 0; i < static_cast<int>(items.size()); i++){
+        const PauseViewEntry& e = items[i];
+        string marker = (i == m_pauseViewIndex) ? "  > " : "    ";
+        string state = e.isHome ? "" : (e.valid ? "  saved" : "  empty");
+        viewList += marker + e.label + state + "\n";
+    }
+    string text = status + session + viewsHeader + viewList + "\n" + controlHelpText(true);
+    m_vrHudLabel->setText(text);
+    m_panelManager.setText(m_vrHudLabel, text);
+}
+
+string afVolmetricDrillingPlugin::controlHelpText(bool paused) const
+{
+    // Action on the left, binding on the right — same pattern as a game
+    // pause / controls screen. Pause menu lists the keyboard debug recenter;
+    // the always-on overlay does not.
+    string s;
+    if (paused){
+        s +=
+            "MENU\n"
+            "  Select                 Up / Down  or  Stylus 2\n"
+            "  Confirm                Enter  or  Shift + Stylus 2\n"
+            "  Save to slot           Shift + Enter\n"
+            "  Resume                 Double-tap Stylus 1  or  Ctrl + P\n"
+            "  Recenter drill (debug) F9\n"
+            "\n";
+    }
+    s += "CONTROLS\n";
+    if (!paused){
+        s += "  Pause / Resume         Double-tap Stylus 1  or  Ctrl + P\n";
+    }
+    s +=
+        "  Camera clutch          Hold Stylus 1\n"
+        "  Device clutch          Hold Stylus 2\n"
+        "  Look                   Arrow Keys\n"
+        "  Roll                   Ctrl + Mouse Wheel\n"
+        "  Zoom in / out          Ctrl + Stylus 2 / 1\n"
+        "  Orbit around burr      Shift + Hold Stylus 2\n"
+        "  Recenter drill         Shift + Stylus 1\n"
+        "  Left / Right view      F3 / F4\n"
+        "  Quick roll L / R       F1 / F2\n"
+        "  Specular legacy/new    F5\n"
+        "  Shininess / strength   [ ]   /   - =\n"
+        "  Attenuation none/mild  F6        , . linear\n"
+        "  Beam narrower / wider  F7 / F8\n"
+        "  Beam softer / tighter  ; / '\n";
+    return s;
+}
+
+void afVolmetricDrillingPlugin::setVrHudVisible(bool visible)
+{
+    m_vrHudVisible = visible;
+    m_simPaused = visible;
+
+    // Freeze AMBF Sim Time via pausePhysics. Wall Time keeps ticking during the
+    // pause for the HUD, but on resume we rewind wall by the pause duration so
+    // computeStepSize() does not catch Sim Time up through the paused interval
+    // (which would put pause time back into simulated task time).
+    if (m_worldPtr){
+        if (m_simPaused){
+            m_wallTimeAtPause = m_worldPtr->getWallTime();
+            m_worldPtr->pausePhysics(true);
+        }
+        else{
+            m_worldPtr->pausePhysics(false);
+            if (m_wallTimeAtPause >= 0.0){
+                double now = m_worldPtr->getWallTime();
+                double pauseDur = now - m_wallTimeAtPause;
+                if (pauseDur > 0.0){
+                    m_worldPtr->m_wallClock.stop();
+                    m_worldPtr->m_wallClock.reset(now - pauseDur);
+                    m_worldPtr->m_wallClock.start(false);
+                }
+                m_wallTimeAtPause = -1.0;
+            }
+        }
+    }
+
+    ensurePauseMenuLabel();
+    if (!m_vrHudLabel){
+        cerr << "INFO! Simulator " << (m_simPaused ? "PAUSED" : "RESUMED")
+             << " (pause menu label unavailable)" << endl;
+        return;
+    }
+
+    if (visible){
+        vector<PauseViewEntry> items = buildPauseViewList();
+        if (items.empty()){
+            m_pauseViewIndex = 0;
+        }
+        else if (m_pauseViewIndex < 0 || m_pauseViewIndex >= static_cast<int>(items.size())){
+            m_pauseViewIndex = 0;
+        }
+        refreshVrHudText();
+    }
+
+    // Show on desktop AMBF window and VR headset when available.
+    if (m_mainCamera){
+        m_panelManager.setVisibleForCamera(m_vrHudLabel, m_mainCamera, visible);
+    }
+    if (m_stereoCamera){
+        m_panelManager.setVisibleForCamera(m_vrHudLabel, m_stereoCamera, visible);
+        // Keep individual stereo corner copies hidden; the combined panel is the menu.
+        m_panelManager.setVisibleForCamera(m_drillManager.m_sizeLabel, m_stereoCamera, false);
+        m_panelManager.setVisibleForCamera(m_drillManager.m_controlModeLabel, m_stereoCamera, false);
+        m_panelManager.setVisibleForCamera(m_volumeSmoothingLabel, m_stereoCamera, false);
+        m_panelManager.setVisibleForCamera(m_cameraPresetLabel, m_stereoCamera, false);
+    }
+
+    cerr << "INFO! Simulator " << (m_simPaused ? "PAUSED" : "RESUMED")
+         << " sim=" << (m_worldPtr ? m_worldPtr->getSimulationTime() : -1.0)
+         << " | Pause menu " << (visible ? "ON" : "OFF")
+         << " (Ctrl+P or dbl-click stylus button 1)" << endl;
+}
+
+string afVolmetricDrillingPlugin::findAnatomyAdfPathFromArgs(int argc, char** argv) const
+{
+    for (int i = 0; i < argc - 1; i++){
+        string arg = argv[i] ? argv[i] : "";
+        if (arg == "-a" || arg == "--adf" || arg == "--anatomy"){
+            return argv[i + 1] ? string(argv[i + 1]) : string();
+        }
+        // Combined form: -a/path/to.yaml is uncommon; skip.
+    }
+    return string();
+}
+
+string afVolmetricDrillingPlugin::readLateralityFromAdf(const string& adfPath) const
+{
+    if (adfPath.empty()){
+        return string();
+    }
+    ifstream in(adfPath);
+    if (!in.is_open()){
+        cerr << "WARNING! Could not open anatomy ADF for laterality: " << adfPath << endl;
+        return string();
+    }
+    string line;
+    while (getline(in, line)){
+        size_t first = line.find_first_not_of(" \t");
+        if (first == string::npos || line[first] == '#'){
+            continue;
+        }
+        // Match: laterality: left|right
+        const string key = "laterality:";
+        size_t pos = line.find(key);
+        if (pos == string::npos){
+            continue;
+        }
+        string value = line.substr(pos + key.size());
+        size_t v0 = value.find_first_not_of(" \t");
+        if (v0 == string::npos){
+            continue;
+        }
+        size_t v1 = value.find_first_of(" \t#\r", v0);
+        string lat = value.substr(v0, v1 == string::npos ? string::npos : v1 - v0);
+        for (char& c : lat){
+            c = static_cast<char>(::tolower(c));
+        }
+        if (lat == "left" || lat == "right"){
+            return lat;
+        }
+    }
+    return string();
+}
+
+void afVolmetricDrillingPlugin::applyLateralityStartupView()
+{
+    if (m_anatomyLaterality != "left" && m_anatomyLaterality != "right"){
+        return;
+    }
+    const string id = m_anatomyLaterality;
+    CanonicalView* v = findCanonicalView(id);
+    if (v && v->valid){
+        applyNamedView(id);
+        return;
+    }
+    // Rough transtemporal presets (same as Fn+F1 / Fn+F2).
+    const bool left = (m_anatomyLaterality == "left");
+    setCameraRoll(left ? 45.0 : 315.0);
+    showNotice(string("Applied rough ") + (left ? "LEFT" : "RIGHT")
+               + " view (no saved view; laterality=" + m_anatomyLaterality + ")");
+}
+
+void afVolmetricDrillingPlugin::mousePosUpdate(GLFWwindow *a_window, double x_pos, double y_pos)
+{
+    if (!m_mainCamera || !m_customViewActive){
+        return;
+    }
+
+    // Middle-mouse: AMBF arcball forces world-Z up; restore the current view's up.
+    if (m_arcballMouseDown){
+        m_mainCamera->setView(m_mainCamera->getLocalPos(),
+                              m_mainCamera->getTargetPosLocal(),
+                              m_preservedUp);
+        return;
+    }
+
+    // Right-mouse: undo FPS snap; do not remap to a new action.
+    if (m_rightMouseDown){
+        m_mainCamera->setLocalRot(m_rightDragRot);
+    }
+}
+
+void afVolmetricDrillingPlugin::applyVolumeLightingUniforms()
+{
+    if (!m_volumeObject){
+        return;
+    }
+    cShaderProgramPtr shader = m_volumeObject->getShaderProgram();
+    if (shader == nullptr){
+        return;
+    }
+
+    shader->setUniformi("uAttenuationMode", m_attenuationMode);
+    shader->setUniformf("uAttConstant", (float)m_attConstant);
+    shader->setUniformf("uAttLinear", (float)m_attLinear);
+    shader->setUniformf("uAttQuadratic", (float)m_attQuadratic);
+    shader->setUniformf("uAttClampMin", (float)m_attClampMin);
+    shader->setUniformf("uAttClampMax", (float)m_attClampMax);
+    shader->setUniformi("uUseRevisedSpecular", m_revisedSpecular ? 1 : 0);
+    shader->setUniformf("uSpecularStrength", (float)m_specularStrength);
+    shader->setUniformf("uShininess", (float)m_shininess);
+    shader->setUniformf("uSpotFocus", (float)m_spotFocus);
+
+    if (m_worldPtr){
+        afLightPtr light = m_worldPtr->getLight("light1", true);
+        if (light){
+            light->setCutOffAngle(m_spotCutoffRad);
+        }
+    }
+}
+
+void afVolmetricDrillingPlugin::dollyCamera(double distanceTowardVolume)
+{
+    if (!m_mainCamera){
+        return;
+    }
+
+    cVector3d look = m_mainCamera->getLookVector();
+    if (look.length() < 1e-6){
+        return;
+    }
+    look.normalize();
+
+    cVector3d pos = m_mainCamera->getLocalPos();
+    cVector3d newPos = pos + look * distanceTowardVolume;
+
+    // Keep a usable range vs the volume origin; do not re-aim the camera.
+    const double minDist = 0.5;
+    const double maxDist = 25.0;
+    double distToVolume = (m_volumeLookAt - newPos).length();
+    if (distToVolume < minDist || distToVolume > maxDist){
+        return;
+    }
+
+    m_mainCamera->setLocalPos(newPos);
 }
 
 void afVolmetricDrillingPlugin::initializeLabels()
@@ -472,11 +1673,67 @@ void afVolmetricDrillingPlugin::initializeLabels()
     m_volumeSmoothingLabel->setText("[ALT+S] Volume Smoothing: DISABLED");
 
     m_panelManager.addPanel(m_volumeSmoothingLabel, 20, 10, PanelReferenceOrigin::LOWER_LEFT, PanelReferenceType::PIXEL);
+
+    m_cameraPresetLabel = new cLabel(font);
+    m_cameraPresetLabel->m_fontColor.setBlack();
+    m_cameraPresetLabel->setFontScale(.45);
+    m_cameraPresetLabel->setColor(cColorf(1, 1, 1));
+    m_cameraPresetLabel->setTransparencyLevel(0.8);
+    m_cameraPresetLabel->setCornerRadius(8, 8, 8, 8);
+    m_cameraPresetLabel->setShowPanel(true);
+    m_cameraPresetLabel->setText(controlHelpText(false));
+    m_panelManager.addPanel(m_cameraPresetLabel, 0.985, 0.03, PanelReferenceOrigin::LOWER_RIGHT, PanelReferenceType::NORMALIZED);
+
+    m_noticeLabel = new cLabel(font);
+    m_noticeLabel->m_fontColor.setGreen();
+    m_noticeLabel->setFontScale(0.55);
+    m_noticeLabel->setColor(cColorf(0.85, 1.0, 0.7));
+    m_noticeLabel->setTransparencyLevel(0.9);
+    m_noticeLabel->setCornerRadius(8, 8, 8, 8);
+    m_noticeLabel->setShowPanel(true);
+    m_noticeLabel->setText("");
+    m_panelManager.addPanel(m_noticeLabel, 0.985, 0.97, PanelReferenceOrigin::UPPER_RIGHT, PanelReferenceType::NORMALIZED);
+    m_panelManager.setVisible(m_noticeLabel, false);
 }
 
 
 void afVolmetricDrillingPlugin::keyboardUpdate(GLFWwindow *a_window, int a_key, int a_scancode, int a_action, int a_mods) {
-    if (a_mods == GLFW_MOD_CONTROL){
+    const bool ctrl = (a_mods & GLFW_MOD_CONTROL) != 0;
+    const bool shift = (a_mods & GLFW_MOD_SHIFT) != 0;
+    const bool alt = (a_mods & GLFW_MOD_ALT) != 0;
+
+    if (a_action == GLFW_PRESS && a_key == GLFW_KEY_F9 && !ctrl && !alt){
+        requestDrillReposition();
+        return;
+    }
+
+    if (m_vrHudVisible && !ctrl && !alt){
+        if (a_action == GLFW_PRESS &&
+            (a_key == GLFW_KEY_UP || a_key == GLFW_KEY_DOWN ||
+             a_key == GLFW_KEY_LEFT || a_key == GLFW_KEY_RIGHT)){
+            int delta = (a_key == GLFW_KEY_UP || a_key == GLFW_KEY_LEFT) ? -1 : 1;
+            cyclePauseViewHighlight(delta);
+            refreshVrHudText();
+            return;
+        }
+        if (a_action == GLFW_PRESS && (a_key == GLFW_KEY_ENTER || a_key == GLFW_KEY_KP_ENTER)){
+            if (shift){
+                saveHighlightedPauseView();
+            }
+            else{
+                applyHighlightedPauseView();
+            }
+            refreshVrHudText();
+            return;
+        }
+    }
+
+    if (ctrl && !alt){
+        if (a_action == GLFW_PRESS && a_key == GLFW_KEY_P){
+            // Ctrl+P: pause / session menu on desktop + VR.
+            setVrHudVisible(!m_vrHudVisible);
+            return;
+        }
 
         double rate = m_drillManager.m_drillRate;
         // controls linear motion of tool
@@ -532,6 +1789,19 @@ void afVolmetricDrillingPlugin::keyboardUpdate(GLFWwindow *a_window, int a_key, 
             }
         }
 
+        // option - polygonize model and save to file
+        else if (a_key == GLFW_KEY_P) {
+            cMultiMesh *surface = new cMultiMesh;
+            m_voxelObj->polygonize(surface, 0.01, 0.01, 0.01);
+            double SCALE = 0.1;
+            double METERS_TO_MILLIMETERS = 1000.0;
+            surface->scale(SCALE * METERS_TO_MILLIMETERS);
+            surface->setUseVertexColors(true);
+            surface->saveToFile("volume.obj");
+            cout << "> Volume has been polygonized and saved to disk                            \r";
+            delete surface;
+        }
+
         // toggles size of drill burr/tip tool cursor
         else if (a_key == GLFW_KEY_N){
             cerr << "INFO! RESETTING THE VOLUME" << endl;
@@ -540,6 +1810,70 @@ void afVolmetricDrillingPlugin::keyboardUpdate(GLFWwindow *a_window, int a_key, 
 
         else if (a_key == GLFW_KEY_G){
             m_gazeMarkerController.restart();
+            m_timeSinceLastCalibration = 0;
+            // commands for video_recording_controller
+            // Fetch the recording path from the environment variable or a pre-defined location
+            m_isRecording = !m_isRecording;
+            if (m_isRecording) {
+                // Prefer study GUI sidecar file next to this source tree, then env, then ~/recordings.
+                std::string tempPath;
+                if (const char* envTmp = std::getenv("VOLDRILL_RECORDING_PATH_FILE")) {
+                    tempPath = envTmp;
+                } else {
+                    // plugin/volumetric_drilling -> repo/scripts/study_gui/Simulator_Recordings/tmp/...
+                    fs::path sidecar = fs::path(__FILE__).parent_path().parent_path().parent_path()
+                        / "scripts" / "study_gui" / "Simulator_Recordings" / "tmp" / "recording_path.txt";
+                    tempPath = sidecar.string();
+                }
+                std::string recordingPath;
+                std::ifstream inputFile(tempPath);
+                if (inputFile.is_open()) {
+                    std::getline(inputFile, recordingPath);
+                    inputFile.close();
+                    cerr << "Read recording path from file: " << recordingPath << std::endl;
+                } else {
+                    cerr << "Failed to open temp file: " << tempPath << std::endl;
+                    if (const char* envRec = std::getenv("VOLDRILL_RECORDING_DIR")) {
+                        recordingPath = envRec;
+                    } else if (const char* home = std::getenv("HOME")) {
+                        recordingPath = std::string(home) + "/Volumetric_Drilling_Userstudy/";
+                    } else {
+                        recordingPath = "/tmp/Volumetric_Drilling_Userstudy/";
+                    }
+                }
+                // Ensure the directory exists
+                if (!fs::exists(recordingPath)) {
+                    if (!fs::create_directories(recordingPath)) {
+                        cerr << "Failed to create recording directory: " << recordingPath << endl;
+                        return;
+                    }
+                }
+                m_videoRecordingController.init(m_worldPtr, recordingPath);
+                // Set the save directory and proceed with video recording logic
+                m_videoRecordingController.start_recording(m_worldPtr->getCurrentTimeStamp());
+                // Visual or log confirmation for the user
+                cout << "Video recording started at: " << recordingPath << endl;
+            }
+        }
+
+
+        else if (a_key == GLFW_KEY_M) { // Toggle between hiding and showing the Gaze Marker (only if recording 1) Data + 2) Pupils)
+            if (m_isRecording) {
+                m_gazeMarkerController.toggleMarker();
+                
+                if (m_gazeMarkerController.isMarkerVisible()) {
+                    cerr << "INFO! Gaze marker shown at camera center" << endl;
+                } else {
+                    cerr << "INFO! Gaze marker hidden" << endl;
+                }
+            } else {
+                cerr << "WARNING! Cannot toggle gaze marker - recording is not active" << endl;
+            }
+        }
+        
+        else if (a_key == GLFW_KEY_Y){ // Stop recording key
+            m_videoRecordingController.close();    
+            m_isRecording = false;
         }
 
         else if (a_key == GLFW_KEY_E){
@@ -571,70 +1905,19 @@ void afVolmetricDrillingPlugin::keyboardUpdate(GLFWwindow *a_window, int a_key, 
             cerr << "INFO! REMOVAL THRESHOLD " << val << endl;
         }
 
+        else if (a_key == GLFW_KEY_V){
+            m_activeCameraRollDeg = 0.0;
+            m_customViewActive = false;
+            cerr << "INFO! CAMERA ROLL CLEARED" << endl;
+        }
+
         // Reset the drill pose
         if (a_key == GLFW_KEY_R){
             cerr << "INFO! RESETTING THE DRILL" << endl;
             m_drillManager.reset();
         }
-
-        else if (a_key == GLFW_KEY_L) {
-            chai3d::cImagePtr multiImage = m_voxelObj->m_texture->m_image;
-
-            // Get the dimensions of the volumetric data
-            int sizeX = multiImage->getWidth();
-            int sizeY = multiImage->getHeight();
-            int sizeZ = multiImage->getImageCount(); // Slices along Z;
-            string volumeName = m_volumeObject->getName();
-            char date[20];
-            std::time_t t = std::time(nullptr);
-            std::strftime(date, sizeof date, "%Y-%m-%d_%H%M%S", std::localtime(&t));
-
-            // Get current file path 
-            string file_path = __FILE__;
-            string current_filepath = file_path.substr(0, file_path.rfind("/"));
-
-            // Go back to directory up from the current file path
-            current_filepath = current_filepath.substr(0, current_filepath.rfind("/"));
-            current_filepath = current_filepath.substr(0, current_filepath.rfind("/"));
-            
-            mode_t mode = 0755; // Permissions: rwxr-xr-x (owner: read, write, execute; group, others: read, execute)
-            string dir_name = current_filepath + "/resources/intermediate_volumes/" + volumeName + "/" + date;
-            
-            mkdir((current_filepath + "/resources/intermediate_volumes/").c_str(), mode);
-            mkdir((current_filepath + "/resources/intermediate_volumes/" + volumeName).c_str(), mode);
-            mkdir(dir_name.c_str(), mode);
-
-            // Loop through each Z-slice and save it as a 2D image
-            for (int z = 0; z < sizeZ; z++){
-                // Create a new cImage to hold the 2D slice
-                chai3d::cImage* imageSlice = new chai3d::cImage();
-                imageSlice->allocate(sizeX, sizeY, GL_RGBA);
-
-                // Copy the voxel data for the current slice into the new 2D image
-                for (int y = 0; y < sizeY; y++){
-                    for (int x = 0; x < sizeX; x++){
-                        // Get the color of the voxel at (x, y, z)
-                        chai3d::cColorb color;
-                        multiImage->getVoxelColor(x, y, z, color);
-                        // Assign the color to the corresponding pixel in the slice image
-                        imageSlice->setPixelColor(x, y, color);
-                    }
-                }
-
-                // Construct a filename for the slice (e.g., "slice_000.png")
-                std::string filename = dir_name + "/slice_00" + std::to_string(z) + ".png";
-
-                // Save the 2D image to a file
-                bool success = chai3d::cSaveFilePNG(imageSlice, filename);
-
-                // Clean up the temporary image
-                delete imageSlice;
-            }
-            cout << "INFO! SAVED INTERMIDIATE VOLUME SLICES in " << dir_name << endl;
-        }
-
     }
-    else if(a_mods == GLFW_MOD_ALT){
+    else if (alt && !ctrl){
         // Toggle Volume Smoothing
         if (a_key == GLFW_KEY_S){
             m_enableVolumeSmoothing = !m_enableVolumeSmoothing;
@@ -660,21 +1943,6 @@ void afVolmetricDrillingPlugin::keyboardUpdate(GLFWwindow *a_window, int a_key, 
             cerr << "INFO! REMOVAL THRESHOLD " << val << endl;
         }
 
-
-        // option - polygonize model and save to file
-        else if (a_key == GLFW_KEY_P) {
-            cMultiMesh *surface = new cMultiMesh;
-            m_voxelObj->polygonize(surface);
-            surface->setUseVertexColors(true);
-            std::string volume_filename = "volume.stl";
-            surface->saveToFile(volume_filename);
-            int buff_size = 512;
-            char current_dir[buff_size];
-            getcwd(current_dir, buff_size);
-            cout << "INFO! Volume has been polygonized and saved to disk as " << current_dir <<  "/" << volume_filename << "\n";
-            delete surface;
-        }
-
         std::string text = "[ALT+S] Volume Smoothing: " + std::string(m_enableVolumeSmoothing ? "ENABLED" : "DISABLED");
         cColorf color;
         color.setRed();
@@ -687,8 +1955,134 @@ void afVolmetricDrillingPlugin::keyboardUpdate(GLFWwindow *a_window, int a_key, 
     }
     else{
 
+        // Roll main_camera about the camera-to-volume axis (volume stays fixed)
+        if (a_action == GLFW_PRESS && a_key == GLFW_KEY_F1) {
+            setCameraRoll(45);
+        }
+        else if (a_action == GLFW_PRESS && a_key == GLFW_KEY_F2) {
+            setCameraRoll(315);
+        }
+        else if (a_action == GLFW_PRESS && a_key == GLFW_KEY_F3) {
+            applyNamedView("left");
+        }
+        else if (a_action == GLFW_PRESS && a_key == GLFW_KEY_F4) {
+            applyNamedView("right");
+        }
+        else if (a_action == GLFW_PRESS && a_key == GLFW_KEY_F5) {
+            m_revisedSpecular = !m_revisedSpecular;
+            if (m_revisedSpecular){
+                ostringstream msg;
+                msg << "Specular revised  strength " << fixed << setprecision(2)
+                    << m_specularStrength << "  shininess " << setprecision(0) << m_shininess;
+                showNotice(msg.str());
+            }
+            else{
+                showNotice("Specular legacy  strength 1  shininess 64");
+            }
+        }
+        else if (a_action == GLFW_PRESS && a_key == GLFW_KEY_F6) {
+            m_attenuationMode = (m_attenuationMode == 0) ? 1 : 0;
+            if (m_attenuationMode == 0){
+                showNotice("Attenuation none  (brightness does not change with distance)");
+            }
+            else{
+                ostringstream msg;
+                msg << "Attenuation mild  linear " << fixed << setprecision(3) << m_attLinear
+                    << "  clamp " << setprecision(2) << m_attClampMin << " to " << m_attClampMax;
+                showNotice(msg.str());
+            }
+        }
+        else if ((a_action == GLFW_PRESS || a_action == GLFW_REPEAT) && a_key == GLFW_KEY_LEFT_BRACKET) {
+            m_shininess = cClamp(m_shininess - 4.0, 1.0, 128.0);
+            m_revisedSpecular = true;
+            ostringstream msg;
+            msg << "Shininess " << fixed << setprecision(0) << m_shininess
+                << "  (higher = tighter hotspot)";
+            showNotice(msg.str(), 1.5);
+        }
+        else if ((a_action == GLFW_PRESS || a_action == GLFW_REPEAT) && a_key == GLFW_KEY_RIGHT_BRACKET) {
+            m_shininess = cClamp(m_shininess + 4.0, 1.0, 128.0);
+            m_revisedSpecular = true;
+            ostringstream msg;
+            msg << "Shininess " << fixed << setprecision(0) << m_shininess
+                << "  (higher = tighter hotspot)";
+            showNotice(msg.str(), 1.5);
+        }
+        else if ((a_action == GLFW_PRESS || a_action == GLFW_REPEAT) && a_key == GLFW_KEY_MINUS) {
+            m_specularStrength = cClamp(m_specularStrength - 0.05, 0.0, 2.0);
+            m_revisedSpecular = true;
+            ostringstream msg;
+            msg << "Specular strength " << fixed << setprecision(2) << m_specularStrength;
+            showNotice(msg.str(), 1.5);
+        }
+        else if ((a_action == GLFW_PRESS || a_action == GLFW_REPEAT) && a_key == GLFW_KEY_EQUAL) {
+            m_specularStrength = cClamp(m_specularStrength + 0.05, 0.0, 2.0);
+            m_revisedSpecular = true;
+            ostringstream msg;
+            msg << "Specular strength " << fixed << setprecision(2) << m_specularStrength;
+            showNotice(msg.str(), 1.5);
+        }
+        else if ((a_action == GLFW_PRESS || a_action == GLFW_REPEAT) && a_key == GLFW_KEY_COMMA) {
+            m_attLinear = cClamp(m_attLinear - 0.01, 0.0, 0.5);
+            m_attenuationMode = 1;
+            ostringstream msg;
+            msg << "Attenuation linear " << fixed << setprecision(3) << m_attLinear
+                << "  (higher = dimmer when farther)";
+            showNotice(msg.str(), 1.5);
+        }
+        else if ((a_action == GLFW_PRESS || a_action == GLFW_REPEAT) && a_key == GLFW_KEY_PERIOD) {
+            m_attLinear = cClamp(m_attLinear + 0.01, 0.0, 0.5);
+            m_attenuationMode = 1;
+            ostringstream msg;
+            msg << "Attenuation linear " << fixed << setprecision(3) << m_attLinear
+                << "  (higher = dimmer when farther)";
+            showNotice(msg.str(), 1.5);
+        }
+        else if ((a_action == GLFW_PRESS || a_action == GLFW_REPEAT) && a_key == GLFW_KEY_F7) {
+            m_spotCutoffRad = cClamp(m_spotCutoffRad - 0.01, 0.04, 0.60);
+            ostringstream msg;
+            msg << "Beam half-angle " << fixed << setprecision(1)
+                << (m_spotCutoffRad * 180.0 / 3.1416) << " deg";
+            showNotice(msg.str(), 1.5);
+        }
+        else if ((a_action == GLFW_PRESS || a_action == GLFW_REPEAT) && a_key == GLFW_KEY_F8) {
+            m_spotCutoffRad = cClamp(m_spotCutoffRad + 0.01, 0.04, 0.60);
+            ostringstream msg;
+            msg << "Beam half-angle " << fixed << setprecision(1)
+                << (m_spotCutoffRad * 180.0 / 3.1416) << " deg";
+            showNotice(msg.str(), 1.5);
+        }
+        else if ((a_action == GLFW_PRESS || a_action == GLFW_REPEAT) && a_key == GLFW_KEY_SEMICOLON) {
+            m_spotFocus = cClamp(m_spotFocus - 0.25, 0.25, 8.0);
+            ostringstream msg;
+            msg << "Beam focus " << fixed << setprecision(2) << m_spotFocus
+                << "  (lower = broader inside the cone)";
+            showNotice(msg.str(), 1.5);
+        }
+        else if ((a_action == GLFW_PRESS || a_action == GLFW_REPEAT) && a_key == GLFW_KEY_APOSTROPHE) {
+            m_spotFocus = cClamp(m_spotFocus + 0.25, 0.25, 8.0);
+            ostringstream msg;
+            msg << "Beam focus " << fixed << setprecision(2) << m_spotFocus
+                << "  (higher = tighter core)";
+            showNotice(msg.str(), 1.5);
+        }
+
+        // Orbit around the current look-at. Hold for GLFW_REPEAT.
+        else if ((a_action == GLFW_PRESS || a_action == GLFW_REPEAT) && a_key == GLFW_KEY_UP) {
+            nudgeCameraOrbitPitch(2.5);
+        }
+        else if ((a_action == GLFW_PRESS || a_action == GLFW_REPEAT) && a_key == GLFW_KEY_DOWN) {
+            nudgeCameraOrbitPitch(-2.5);
+        }
+        else if ((a_action == GLFW_PRESS || a_action == GLFW_REPEAT) && a_key == GLFW_KEY_RIGHT) {
+            nudgeCameraOrbitYaw(2.5);
+        }
+        else if ((a_action == GLFW_PRESS || a_action == GLFW_REPEAT) && a_key == GLFW_KEY_LEFT) {
+            nudgeCameraOrbitYaw(-2.5);
+        }
+
         // option - reduce size along X axis
-        if (a_key == GLFW_KEY_4) {
+        else if (a_key == GLFW_KEY_4) {
             sliceVolume(0, -0.005);
         }
 
@@ -728,38 +2122,6 @@ void afVolmetricDrillingPlugin::keyboardUpdate(GLFWwindow *a_window, int a_key, 
             double value = m_voxelObj->getQuality();
             m_voxelObj->setQuality(value + 0.01);
             cout << "> Quality set to " << cStr(m_voxelObj->getQuality(), 1) << "                            \r";
-        }
-
-        // option - toggle vertical mirroring
-        else if (a_key == GLFW_KEY_UP) {
-            double value = m_voxelObj->getOpacityThreshold();
-            m_voxelObj->setOpacityThreshold(value + 0.01);
-            cout << "> Opacity Threshold set to " << cStr(m_voxelObj->getOpacityThreshold(), 1)
-                 << "                            \n";
-        }
-
-        // option - toggle vertical mirroring
-        else if (a_key == GLFW_KEY_DOWN) {
-            double value = m_voxelObj->getOpacityThreshold();
-            m_voxelObj->setOpacityThreshold(value - 0.01);
-            cout << "> Opacity Threshold set to " << cStr(m_voxelObj->getOpacityThreshold(), 1)
-                 << "                            \n";
-        }
-
-        // option - toggle vertical mirroring
-        else if (a_key == GLFW_KEY_RIGHT) {
-            double value = m_voxelObj->getIsosurfaceValue();
-            m_voxelObj->setIsosurfaceValue(value + 0.01);
-            cout << "> Isosurface Threshold set to " << cStr(m_voxelObj->getIsosurfaceValue(), 1)
-                 << "                            \n";
-        }
-
-        // option - toggle vertical mirroring
-        else if (a_key == GLFW_KEY_LEFT) {
-            double value = m_voxelObj->getIsosurfaceValue();
-            m_voxelObj->setIsosurfaceValue(value - 0.01);
-            cout << "> Isosurface Threshold set to " << cStr(m_voxelObj->getIsosurfaceValue(), 1)
-                 << "                            \n";
         }
 
         // option - toggle vertical mirroring
@@ -900,15 +2262,42 @@ void afVolmetricDrillingPlugin::keyboardUpdate(GLFWwindow *a_window, int a_key, 
 
 
 void afVolmetricDrillingPlugin::mouseBtnsUpdate(GLFWwindow *a_window, int a_button, int a_action, int a_modes){
-
+    (void)a_window;
+    (void)a_modes;
+    if (a_button == GLFW_MOUSE_BUTTON_MIDDLE){
+        m_arcballMouseDown = (a_action == GLFW_PRESS);
+        if (m_arcballMouseDown && m_mainCamera){
+            m_preservedUp = m_mainCamera->getUpVector();
+        }
+    }
+    else if (a_button == GLFW_MOUSE_BUTTON_RIGHT){
+        m_rightMouseDown = (a_action == GLFW_PRESS);
+        if (m_rightMouseDown && m_mainCamera){
+            m_rightDragRot = m_mainCamera->getLocalRot();
+        }
+    }
 }
 
-void afVolmetricDrillingPlugin::mouseScrollUpdate(GLFWwindow *a_window, double x_pos, double y_pos){
-
+void afVolmetricDrillingPlugin::mouseScrollUpdate(GLFWwindow *a_window, double x_pos, double y_pos)
+{
+    (void)x_pos;
+    if (!isCtrlHeld() || m_vrHudVisible){
+        return;
+    }
+    if (fabs(y_pos) < 1e-6){
+        return;
+    }
+    // AMBF already dollied along look; undo that so roll keeps position.
+    undoAmbfWheelDolly(a_window, y_pos);
+    nudgeCameraRoll(-5.0 * y_pos);
 }
 
 void afVolmetricDrillingPlugin::reset(){
     cerr << "INFO! PLUGIN RESET CALLED" << endl;
+    m_activeCameraRollDeg = 0.0;
+    m_customViewActive = false;
+    m_arcballMouseDown = false;
+    m_rightMouseDown = false;
     m_drillManager.reset();
 }
 
