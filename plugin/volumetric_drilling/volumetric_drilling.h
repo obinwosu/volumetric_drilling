@@ -138,6 +138,14 @@ protected:
     bool isCtrlHeld() const;
     // True if Shift is held system-wide (works even when study_gui / VR has focus).
     bool isShiftHeld() const;
+    // True if Alt is held — used as cam-clutch when an HMD eyepiece is loaded.
+    bool isAltHeld() const;
+    // True if digit "1" is held (SayoDevice macro key → camera clutch).
+    bool isDigit1Held() const;
+    // X11 keymap helpers (work without /dev/input permission).
+    bool isXKeycodeHeld(unsigned int keycode) const;
+    // True if letter key is held system-wide (Ikkegol a/b/c pedals).
+    bool isLetterKeyHeld(int glfwKey) const;
 
     void requestDrillReposition();
 
@@ -167,6 +175,18 @@ private:
 
     // camera to render the world
     afCameraPtr m_mainCamera, m_cameraL, m_cameraR, m_stereoCamera;
+    // Present when ADF 14 (OpenVR) or ADF 15 (OpenXR eyepiece) is loaded.
+    afCameraPtr m_openvrCamera = nullptr;
+    afCameraPtr m_openxrEyepieceCamera = nullptr;
+    typedef void (*HmdCamClutchFn)(int);
+    typedef void (*OpenxrVoidFn)(void);
+    typedef void (*OpenxrIntFn)(int);
+    HmdCamClutchFn m_openvrSetCamClutch = nullptr;
+    HmdCamClutchFn m_openxrSetCamClutch = nullptr;
+    OpenxrVoidFn m_openxrRecenterToHead = nullptr;
+    OpenxrVoidFn m_openxrRecenterLap = nullptr;
+    OpenxrIntFn m_openxrSetPlaceDrag = nullptr;
+    void ensureOpenxrPlacementFns();
 
     map<string, afCameraPtr> m_cameras;
 
@@ -210,6 +230,10 @@ private:
 
     FootPedal m_footpedal;
 
+    // Rising-edge trackers for X11 FootSwitch fallback (linux KEY_F17/18/19 + 8).
+    bool m_xFootStylePrev = false;
+    bool m_xFootSizePrev = false;
+
     WaveGenerator m_waveGenerator;
 
     GazeMarkerController m_gazeMarkerController;
@@ -248,6 +272,7 @@ private:
     bool m_btn1Prev = false;
     double m_btn1LastClickTime = -1.0;
     bool m_btn2Prev = false;
+    double m_btn2LastClickTime = -1.0;
 };
 
 

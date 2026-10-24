@@ -314,6 +314,26 @@
            </widget>
           </item>
           <item>
+           <widget class="QCheckBox" name="check_openvr_hmd">
+            <property name="toolTip">
+             <string>Legacy: ALVR + SteamVR + OpenVR scene Submit (ADF 14). Prefer OpenXR eyepiece for microscope clutch.</string>
+            </property>
+            <property name="text">
+             <string>OpenVR HMD (legacy)</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QCheckBox" name="check_openxr_eyepiece">
+            <property name="toolTip">
+             <string>Recommended: WiVRn + OpenXR head-locked stereo eyepiece (ADF 15). HMD 6DoF moves main_camera only while cam-clutch (stylus btn 1) is held.</string>
+            </property>
+            <property name="text">
+             <string>OpenXR eyepiece (WiVRn)</string>
+            </property>
+           </widget>
+          </item>
+          <item>
            <spacer name="recordingSpacer">
             <property name="orientation">
              <enum>Qt::Horizontal</enum>

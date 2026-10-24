@@ -41,44 +41,54 @@
 //==============================================================================
 #include "footpedal.h"
 
+bool FootPedal::risingEdge(bool curr, bool& prev)
+{
+    bool edged = (!prev && curr);
+    prev = curr;
+    return edged;
+}
+
 bool FootPedal::isDrillOn()
 {
+    // Surgical hold-to-run: drill is active only while the pedal is depressed.
     if (m_isKeyboard) {
-        return getButtonState(static_cast<int>(FootPedalKeyboardMap::BURR_STATE));
+        return getButtonState(static_cast<int>(FootPedalKeyboardMap::DRILL_ON));
     }
 
-    // Hold the big analog pedal. Rest is about -1; a reading of 0 is not a press.
-    return getPedalState(0) > 0.0;
+    bool drillPedalHeld = getButtonState(static_cast<int>(FootPedalJoystickMap::DRILL_ON));
+    // Analog pedal rest is about -1; require a clear press past 0.
+    bool analogHeld = getPedalState(0) > 0.0;
+    return drillPedalHeld || analogHeld;
 }
 
-bool FootPedal::isChangeBurrSizePressed(){
-    bool val = false;
-    bool burrChangeBtnCurrState;
-
+bool FootPedal::isChangeBurrSizePressed()
+{
+    bool curr;
     if (m_isKeyboard) {
-        burrChangeBtnCurrState = getButtonState(static_cast<int>(FootPedalKeyboardMap::CHANGE_BURR_SIZE));
+        curr = getButtonState(static_cast<int>(FootPedalKeyboardMap::CHANGE_BURR_SIZE));
     } else {
-        // Left = drill type, middle = drill size; this sim only cycles 1/2/4/6 mm burrs.
-        burrChangeBtnCurrState =
-            getButtonState(static_cast<int>(FootPedalJoystickMap::DRILL_TYPE)) ||
-            getButtonState(static_cast<int>(FootPedalJoystickMap::CHANGE_BURR_SIZE));
+        curr = getButtonState(static_cast<int>(FootPedalJoystickMap::CHANGE_BURR_SIZE));
     }
-
-    if (m_burrChangeBtnPrevState == false && burrChangeBtnCurrState == true){
-        val = true;
-    }
-    m_burrChangeBtnPrevState = burrChangeBtnCurrState;
-    return val;
+    return risingEdge(curr, m_burrChangeBtnPrevState);
 }
 
-bool FootPedal::isCamClutchPressed(){
+bool FootPedal::isChangeBurrStylePressed()
+{
+    bool curr;
     if (m_isKeyboard) {
-        return getButtonState(static_cast<int>(FootPedalKeyboardMap::CAM_CLUTCH));
+        curr = getButtonState(static_cast<int>(FootPedalKeyboardMap::BURR_STYLE));
+    } else {
+        curr = getButtonState(static_cast<int>(FootPedalJoystickMap::BURR_STYLE));
     }
-    // Floor unit buttons are drill type / size / start-stop, not camera clutch.
+    return risingEdge(curr, m_burrStyleBtnPrevState);
+}
+
+bool FootPedal::isCamClutchPressed()
+{
     return false;
 }
 
-bool FootPedal::isDeviceClutchPressed(){
+bool FootPedal::isDeviceClutchPressed()
+{
     return false;
 }

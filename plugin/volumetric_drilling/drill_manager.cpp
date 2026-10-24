@@ -43,6 +43,7 @@
 #include "drill_manager.h"
 #include <boost/program_options.hpp>
 #include <cmath>
+#include "graphics/CPrimitives.h"
 
 DrillManager::DrillManager(){
     m_units_mmToSim = 0.01007;
@@ -137,7 +138,6 @@ int DrillManager::init(afWorldPtr a_worldPtr, CameraPanelManager* a_panelManager
         // Keep the authored hard edge normals. Smoothing them rounds the cutting lips
         // and makes the head look smaller than the old sphere.
         m_burrVisualRadius = 1.0;
-        applyBurrVisualScale();
         cerr << "INFO! LOADED FLUTED BURR " << burrMeshPath << endl;
     }
     else{
@@ -147,8 +147,25 @@ int DrillManager::init(afWorldPtr a_worldPtr, CameraPanelManager* a_panelManager
     m_burrMesh->m_material->m_specular.set(0.75, 0.75, 0.75);
     m_burrMesh->m_material->setShininess(80);
     m_burrMesh->setShowEnabled(true);
-
     a_worldPtr->addSceneObjectToWorld(m_burrMesh);
+
+    // Diamond tip: unit-radius sphere (matches fluted apex radius of 1).
+    m_diamondBurrMesh = new cMultiMesh();
+    cMesh* diamondMesh = m_diamondBurrMesh->newMesh();
+    cCreateSphere(diamondMesh, 1.0, 32, 32);
+    diamondMesh->computeAllNormals();
+    diamondMesh->m_material->setWhite();
+    diamondMesh->m_material->m_specular.set(0.9, 0.9, 0.9);
+    diamondMesh->m_material->setShininess(120);
+    m_diamondBurrMesh->m_material->setWhite();
+    m_diamondBurrMesh->m_material->m_specular.set(0.9, 0.9, 0.9);
+    m_diamondBurrMesh->m_material->setShininess(120);
+    m_diamondVisualRadius = 1.0;
+    m_diamondBurrMesh->setShowEnabled(false);
+    a_worldPtr->addSceneObjectToWorld(m_diamondBurrMesh);
+
+    applyBurrVisualScale();
+    showOnlyActive();
 
     initializeLabels();
 
@@ -173,28 +190,31 @@ int DrillManager::init(afWorldPtr a_worldPtr, CameraPanelManager* a_panelManager
                 m_drills[di]->m_rigidBody->getShaderProgram()->setUniformi("uMatcapMap", C_TU_METALLIC);
             }
         }
-        if (m_burrMesh){
-            cShaderProgramPtr burrShader = nullptr;
-            for (int di = 0; di < (int)m_drills.size(); di++){
-                burrShader = m_drills[di]->m_rigidBody->getShaderProgram();
-                if (burrShader){
-                    break;
-                }
-            }
+        cShaderProgramPtr burrShader = nullptr;
+        for (int di = 0; di < (int)m_drills.size(); di++){
+            burrShader = m_drills[di]->m_rigidBody->getShaderProgram();
             if (burrShader){
-                m_burrMesh->setShaderProgram(burrShader, true);
-                burrShader->setUniformi("uMatcapMap", C_TU_METALLIC);
-                for (int mi = 0; mi < m_burrMesh->getNumMeshes(); mi++){
-                    cMesh* mesh = m_burrMesh->getMesh(mi);
-                    if (!mesh){
-                        continue;
-                    }
-                    mesh->setShaderProgram(burrShader);
-                    mesh->m_metallicTexture = drillMatCap;
-                    mesh->m_metallicTexture->setTextureUnit(GL_TEXTURE3);
-                }
+                break;
             }
         }
+        auto applyMatcap = [&](cMultiMesh* tip){
+            if (!tip || !burrShader){
+                return;
+            }
+            tip->setShaderProgram(burrShader, true);
+            burrShader->setUniformi("uMatcapMap", C_TU_METALLIC);
+            for (int mi = 0; mi < tip->getNumMeshes(); mi++){
+                cMesh* mesh = tip->getMesh(mi);
+                if (!mesh){
+                    continue;
+                }
+                mesh->setShaderProgram(burrShader);
+                mesh->m_metallicTexture = drillMatCap;
+                mesh->m_metallicTexture->setTextureUnit(GL_TEXTURE3);
+            }
+        };
+        applyMatcap(m_burrMesh);
+        applyMatcap(m_diamondBurrMesh);
     }
     else{
         cerr << "FAILED TO LOAD DRILL'S MATCAP TEXTURE" << endl;
@@ -227,7 +247,16 @@ int DrillManager::init(afWorldPtr a_worldPtr, CameraPanelManager* a_panelManager
     m_deviceHandler = new cHapticDeviceHandler();
 
     // get access to the first available haptic device found
+    // (Geomagic Touch / Phantom via OpenHaptics + libhdPhantom; keep AMBF --ndevs 0)
     m_deviceHandler->getDevice(m_hapticDevice, 0);
+    if (m_deviceHandler->getNumDevices() > 0 && m_hapticDevice){
+        cHapticDeviceInfo info = m_hapticDevice->getSpecifications();
+        cout << "INFO! Haptic device [" << info.m_modelName << "] from "
+             << info.m_manufacturerName << " ready for drill control." << endl;
+    }
+    else{
+        cout << "WARNING! No haptic device found; use keyboard (Ctrl+WASD/IK) or Ctrl+O for ROS." << endl;
+    }
 
     // Initializing tool cursors
     toolCursorInit(a_worldPtr);
@@ -247,10 +276,19 @@ void DrillManager::update(double dt)
     else if(m_hapticDevice->isDeviceAvailable()){
         m_hapticDevice->getTransform(m_T_i);
         m_hapticDevice->getLinearVelocity(m_V_i);
+        // Reject startup/noise spikes (OpenHaptics can report huge first samples).
+        if (!std::isfinite(m_V_i.x()) || !std::isfinite(m_V_i.y()) || !std::isfinite(m_V_i.z())
+            || m_V_i.length() > 5.0){
+            m_V_i.zero();
+        }
         // cMatrix3d extraRotation;
         // extraRotation.setExtrinsicEulerRotationDeg(0, 90, 0, C_EULER_ORDER_XYZ);
         // m_V_i = T_c_w.getLocalRot() * extraRotation * (m_V_i / m_toolCursorList[0]->getWorkspaceScaleFactor());
-        m_V_i = T_c_w.getLocalRot() * (m_V_i / m_toolCursorList[0]->getWorkspaceScaleFactor());
+        double ws = m_toolCursorList[0]->getWorkspaceScaleFactor();
+        if (ws < 1e-6){
+            ws = 1.0;
+        }
+        m_V_i = T_c_w.getLocalRot() * (m_V_i / ws);
         m_T_d.setLocalPos(m_T_d.getLocalPos() + (m_V_i * 0.8 * !m_deviceClutch * !m_camClutch * !m_camOrbitBurr));
         m_T_d.setLocalRot(T_c_w.getLocalRot() *  m_T_i.getLocalRot());
 
@@ -259,8 +297,9 @@ void DrillManager::update(double dt)
         if (m_deviceClutch || m_camClutch || m_camOrbitBurr){
             if (m_camOrbitBurr){
                 cVector3d pivot = m_T_d.getLocalPos();
-                if (m_burrMesh){
-                    pivot = m_burrMesh->getLocalPos();
+                cMultiMesh* tip = (m_burrStyle == BurrStyle::DIAMOND) ? m_diamondBurrMesh : m_burrMesh;
+                if (tip){
+                    pivot = tip->getLocalPos();
                 }
                 else if (m_activeDrill && m_activeDrill->m_rigidBody){
                     pivot = m_activeDrill->m_rigidBody->getLocalPos();
@@ -308,7 +347,7 @@ void DrillManager::update(double dt)
                     }
                 }
             }
-            else if (m_camClutch){
+            else if (m_camClutch && !m_vrHmdOwnsCamClutch){
                 m_mainCamera->setView(T_c_w.getLocalPos() + m_V_i * !m_deviceClutch, m_mainCamera->getTargetPosLocal(), m_mainCamera->getUpVector());
             }
             m_toolCursorList[0]->setDeviceLocalForce(0.0, 0.0, 0.0);
@@ -326,7 +365,8 @@ void DrillManager::update(double dt)
         updatePoseFromCursors();
 //    }
 
-    if (m_burrMesh && m_activeDrill && m_activeDrill->m_rigidBody){
+    cMultiMesh* activeTip = (m_burrStyle == BurrStyle::DIAMOND) ? m_diamondBurrMesh : m_burrMesh;
+    if (activeTip && m_activeDrill && m_activeDrill->m_rigidBody){
         if (m_isOn){
             // Four visible turns per second. Real burr RPM would alias at this frame rate.
             const double spinRadPerSec = 4.0 * 6.283185307179586;
@@ -339,7 +379,7 @@ void DrillManager::update(double dt)
         cMatrix3d spin;
         spin.setAxisAngleRotationRad(cVector3d(1.0, 0.0, 0.0), m_burrSpinAngle);
         burrPose.setLocalRot(burrPose.getLocalRot() * spin);
-        m_burrMesh->setLocalTransform(burrPose);
+        activeTip->setLocalTransform(burrPose);
     }
 
     if (m_isOn && m_audioSource){
@@ -363,7 +403,7 @@ void DrillManager::initializeLabels(){
     m_sizeLabel = new cLabel(font);
     m_sizeLabel->setLocalPos(10, 10); // Relative to Panel
     m_sizeLabel->m_fontColor.setBlack();
-    m_sizeLabel->setText("Drill Type: " + m_activeDrill->m_name);
+    m_sizeLabel->setText("Burr: " + burrStyleName() + " " + m_activeDrill->m_name);
     m_sizeLabel->setColor(cColorf(1, 1, 1));
     m_sizeLabel->setTransparencyLevel(0.8);
     m_sizeLabel->setCornerRadius(10, 10, 10, 10);
@@ -443,9 +483,12 @@ void DrillManager::toolCursorInit(const afWorldPtr a_afWorld){
         }
      }
 
-    // Initialize the start pose of the tool cursors
+    // Seed cursors at the operative drill pose. Do NOT finish with chai3d's
+    // tool->initialize() on the tip cursor: that calls updateFromDevice() and
+    // snaps the tip to the physical Touch workspace (drill "disappears").
     toolCursorsPosUpdate(m_T_d);
     toolCursorsInitialize();
+    updatePoseFromCursors();
 }
 
 
@@ -474,7 +517,22 @@ void DrillManager::incrementDeviceRot(cVector3d a_rot){
 ///
 void DrillManager::toolCursorsInitialize(){
     for (int i = 0 ;  i < m_toolCursorList.size() ; i++){
-        m_toolCursorList[i]->initialize();
+        cToolCursor* cursor = m_toolCursorList[i];
+        if (!cursor){
+            continue;
+        }
+        // Tip cursor owns the Geomagic/Touch. chai3d::cGenericTool::initialize()
+        // always calls updateFromDevice(), which overwrites the virtual drill
+        // pose with the scaled physical device pose and throws the mesh out of
+        // the camera frustum. Re-init only the proxy model at the seeded pose.
+        if (i == 0 && cursor->getHapticDevice()){
+            if (cursor->m_hapticPoint){
+                cursor->m_hapticPoint->initialize(cursor->getDeviceGlobalPos());
+            }
+        }
+        else{
+            cursor->initialize();
+        }
     }
 }
 
@@ -772,11 +830,10 @@ bool DrillManager::setDrillSizeMm(int burrSizeMm)
             if (!m_toolCursorList.empty() && m_toolCursorList[0]){
                 m_toolCursorList[0]->setRadius(m_activeDrill->m_size * 0.5);
             }
-            if (m_panelManager && m_sizeLabel){
-                m_panelManager->setText(m_sizeLabel, "Drill Type: " + m_activeDrill->m_name);
-            }
             showOnlyActive();
-            cerr << "INFO! Starting burr set to " << m_activeDrill->m_name << endl;
+            updateBurrLabel();
+            cerr << "INFO! Starting burr set to " << burrStyleName()
+                 << " " << m_activeDrill->m_name << endl;
             return true;
         }
     }
@@ -788,8 +845,8 @@ void DrillManager::cycleDrillTypes(){
     m_activeDrill = m_drills[m_activeDrillIdx];
     m_toolCursorList[0]->setRadius(m_activeDrill->m_size * 0.5);
     applyBurrVisualScale();
-    cout << "Drill Type changed to " << m_activeDrill->m_name << endl;
-    m_panelManager->setText(m_sizeLabel, "Drill Type: " + m_activeDrill->m_name);
+    cout << "Burr size changed to " << m_activeDrill->m_name << endl;
+    updateBurrLabel();
 
     updatePoseFromCursors();
     showOnlyActive();
@@ -798,28 +855,66 @@ void DrillManager::cycleDrillTypes(){
     m_drillingPub->publishDrillSize((int)(m_activeDrill->m_size / m_units_mmToSim), sim_time);
 }
 
+void DrillManager::toggleBurrStyle(){
+    m_burrStyle = (m_burrStyle == BurrStyle::CUTTING) ? BurrStyle::DIAMOND : BurrStyle::CUTTING;
+    showOnlyActive();
+    updateBurrLabel();
+    cout << "Burr style changed to " << burrStyleName() << endl;
+}
+
+string DrillManager::burrStyleName() const{
+    return (m_burrStyle == BurrStyle::DIAMOND) ? "Diamond" : "Cutting";
+}
+
+void DrillManager::updateBurrLabel(){
+    if (!m_panelManager || !m_sizeLabel || !m_activeDrill){
+        return;
+    }
+    string text = "Burr: " + burrStyleName() + " " + m_activeDrill->m_name
+                + (m_isOn ? "   DRILL ON" : "   drill off");
+    m_panelManager->setText(m_sizeLabel, text);
+    cColorf color;
+    if (m_isOn){
+        color.setGreenDark();
+    }
+    else{
+        color.setBlack();
+    }
+    m_panelManager->setFontColor(m_sizeLabel, color);
+}
+
 void DrillManager::applyBurrVisualScale()
 {
-    if (!m_burrMesh || !m_activeDrill){
+    if (!m_activeDrill){
         return;
     }
     double newR = m_activeDrill->m_size * 0.5;
-    if (newR < 1e-8 || m_burrVisualRadius < 1e-8){
+    if (newR < 1e-8){
         return;
     }
-    if (fabs(newR - m_burrVisualRadius) > 1e-8){
-        m_burrMesh->scale(newR / m_burrVisualRadius);
+
+    auto scaleTip = [&](cMultiMesh* tip, double& visualRadius){
+        if (!tip || visualRadius < 1e-8){
+            return;
+        }
+        if (fabs(newR - visualRadius) <= 1e-8){
+            return;
+        }
+        tip->scale(newR / visualRadius);
         // The matcap shader draws a vertex buffer. scale() updates CPU
-        // positions only; the buffer must be flagged or the flutes stay put.
-        for (int mi = 0; mi < m_burrMesh->getNumMeshes(); mi++){
-            cMesh* mesh = m_burrMesh->getMesh(mi);
+        // positions only; the buffer must be flagged or the geometry stays put.
+        for (int mi = 0; mi < tip->getNumMeshes(); mi++){
+            cMesh* mesh = tip->getMesh(mi);
             if (mesh && mesh->m_vertices){
                 mesh->m_vertices->m_flagPositionData = true;
                 mesh->markForUpdate(false);
             }
         }
-        m_burrVisualRadius = newR;
-    }
+        visualRadius = newR;
+    };
+
+    scaleTip(m_burrMesh, m_burrVisualRadius);
+    scaleTip(m_diamondBurrMesh, m_diamondVisualRadius);
 }
 
 void DrillManager::showOnlyActive(){
@@ -829,5 +924,11 @@ void DrillManager::showOnlyActive(){
             show = true;
         }
         m_drills[di]->m_rigidBody->getVisualObject()->setShowEnabled(show);
+    }
+    if (m_burrMesh){
+        m_burrMesh->setShowEnabled(m_show && m_burrStyle == BurrStyle::CUTTING);
+    }
+    if (m_diamondBurrMesh){
+        m_diamondBurrMesh->setShowEnabled(m_show && m_burrStyle == BurrStyle::DIAMOND);
     }
 }

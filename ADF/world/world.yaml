@@ -2,7 +2,8 @@ enclosure size: {length: 10.0, width: 10.0, height: 3.0}
 lights: [light1]
 cameras: [main_camera]
 # cameras: [main_camera, cameraL, cameraR]
-environment: ./checkered_floor.yaml
+# Dark OR: empty environment (no checkered floor). Spotlight-only lighting.
+environment: ./dark_room.yaml
 namespace: /ambf/env/
 max iterations: 50
 gravity: {x: 0.0, y: 0.0, z: -0.0}

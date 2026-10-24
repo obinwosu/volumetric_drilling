@@ -44,42 +44,41 @@
 
 #include "joystick.h"
 
-// VOXEL-MAN / Code Mercenaries floor unit (js0): analog pedal + 3 labeled buttons.
+// Ikkegol / PCsensor 3-pedal unit: left→a, middle→b, right→c (factory mapping).
+// Also used for joystick button indices when a true js device is present.
 enum class FootPedalJoystickMap{
-    DRILL_TYPE = 0,       // Left button
-    CHANGE_BURR_SIZE = 1, // Middle button
-    START_STOP = 2        // Right button (not used to run the drill)
+    BURR_STYLE = 0,       // Left  (key a): diamond <-> cutting
+    DRILL_ON = 1,         // Middle (key b): hold-to-run drill
+    CHANGE_BURR_SIZE = 2  // Right (key c): cycle burr size
 };
 
-// Keyboard button mappings (for FootSwitch) - using high key codes to avoid conflicts
+// Slots filled from KEY_A/B/C (or legacy F17/F18/F19) in joystick.cpp.
 enum class FootPedalKeyboardMap{
-    BURR_STATE = 3,        // Custom high key code (mapped from B key)
-    CHANGE_BURR_SIZE = 4,  // Custom high key code (mapped from C key)
-    CAM_CLUTCH = 5      // Custom high key code (for future use)
+    BURR_STYLE = 3,        // Left  = a
+    DRILL_ON = 4,          // Middle = b
+    CHANGE_BURR_SIZE = 5   // Right = c
 };
 
 class FootPedal: public JoyStick{
 public:
+    // True only while the drill pedal is held (surgical hold-to-run).
     bool isDrillOn();
 
+    // Rising edge on far-right pedal (cycle 1/2/4/6 mm).
     bool isChangeBurrSizePressed();
+
+    // Rising edge on left pedal (diamond <-> cutting).
+    bool isChangeBurrStylePressed();
 
     bool isCamClutchPressed();
 
     bool isDeviceClutchPressed();
 
-     // Getters that work for both joystick and keyboard
-    bool getCamClutchState();
-    bool getChangeBurrSizeState(); 
-    bool getDeviceClutchState();
-
 private:
+    bool risingEdge(bool curr, bool& prev);
+
     bool m_burrChangeBtnPrevState = false;
-    
-    // Current states for both joystick and keyboard mappings
-    bool m_camClutchState = false;
-    bool m_changeBurrSizeState = false;
-    bool m_deviceClutchState = false;
+    bool m_burrStyleBtnPrevState = false;
 };
 
 #endif

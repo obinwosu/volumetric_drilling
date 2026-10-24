@@ -29,3 +29,33 @@ hdf5_files
 
 # Local study GUI temp
 scripts/study_gui/Simulator_Recordings/tmp/
+
+# Regenerable isosurface cache for graphics trials
+middle_ear/tests/surface_cache/
+
+# Python
+__pycache__/
+.venv/
+venv/
+.env
+.env.*
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Newton caches, local viewer state, and review captures
+middle_ear_newton/cache/
+middle_ear_newton/review/
+*.xwd
+imgui.ini
+
+# Runtime logs
+*.log
+middle_ear/tests/release_log.txt
+
+# Editor and agent local state
+.cursor/
+
+# Native / CUDA build leftovers
+cmake-build-*/
+CMakeFiles/

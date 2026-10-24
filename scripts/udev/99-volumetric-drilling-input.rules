@@ -1,0 +1,12 @@
+# Grant the active seat access to surgical foot switches used by volumetric_drilling.
+# Install:
+#   sudo cp scripts/udev/99-volumetric-drilling-input.rules /etc/udev/rules.d/
+#   sudo usermod -aG input "$USER"
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+# Then log out and back in (or reboot) so the input group membership applies.
+
+# PCsensor FootSwitch (3-pedal keyboard HID)
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3553", ATTRS{idProduct}=="b001", MODE="0660", GROUP="input", TAG+="uaccess"
+
+# VOXEL-MAN / Code Mercenaries joystick pedals (js*)
+KERNEL=="js*", SUBSYSTEM=="input", MODE="0660", GROUP="input", TAG+="uaccess"

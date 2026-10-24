@@ -114,8 +114,12 @@ data["ambf_executable"] = "ambf_simulator"
 data["launch_file"] = str((Path("${VD_DIR}") / "launch.yaml").resolve())
 data["recording_base_path"] = str(Path.home() / "Volumetric_Drilling_Userstudy")
 data["recording_script_executable"] = str((Path("${VD_DIR}") / "scripts" / "data_record.py").resolve())
-# Footpedal: prefer VOXEL-MAN by-id symlink, else js0/js1
-candidates = sorted(glob.glob("/dev/input/by-id/*Pedal*joystick")) + ["/dev/input/js0", "/dev/input/js1"]
+# Footpedal: VOXEL-MAN joystick, else PCsensor FootSwitch, else js0/js1
+candidates = (
+    sorted(glob.glob("/dev/input/by-id/*Pedal*joystick"))
+    + sorted(glob.glob("/dev/input/by-id/*FootSwitch*event-kbd"))
+    + ["/dev/input/js0", "/dev/input/js1"]
+)
 for c in candidates:
     if Path(c).exists():
         data["footpedal_device"] = c
@@ -126,6 +130,19 @@ print("  ambf_executable:", data["ambf_executable"])
 print("  footpedal_device:", data.get("footpedal_device"))
 print("  launch_file:", data["launch_file"])
 PY
+fi
+
+log "Footpedal /dev/input permissions"
+UDEV_SRC="${VD_DIR}/scripts/udev/99-volumetric-drilling-input.rules"
+if [[ -f "${UDEV_SRC}" ]]; then
+  cat <<EOF
+Install footpedal udev rules (one-time, requires sudo + re-login):
+
+  sudo cp ${UDEV_SRC} /etc/udev/rules.d/
+  sudo usermod -aG input "\$USER"
+  sudo udevadm control --reload-rules && sudo udevadm trigger
+  # then log out and back in
+EOF
 fi
 
 log "Smoke hints"
@@ -140,7 +157,8 @@ Source the workspace, then launch the study GUI:
 Select Anatomy A (RT143), start simulation, then check:
   - camera nav / pause menu (Ctrl+P)
   - DVR / beam lighting
-  - footpedal (if device present)
+  - footpedal hold-to-run drill (middle pedal) — HUD shows DRILL ON
+  - camera clutch via hold key 1 (SayoDevice)
   - video record checkbox
   - volume list
 EOF

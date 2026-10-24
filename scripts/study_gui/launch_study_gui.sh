@@ -20,11 +20,25 @@ if [[ -f "${WS_ROOT}/install/setup.bash" ]]; then
 fi
 set -u
 
+# Geomagic / 3D Systems Touch HID + OpenHaptics (chai3d libhdPhantom bridge)
+# shellcheck disable=SC1091
+source "${REPO_ROOT}/scripts/setup_haptic_env.sh"
+
+# Use NVIDIA GL for AMBF. On this A51 the display is already on the NVIDIA GPU
+# (prime on-demand + nvidia-auto-select). Do NOT set __NV_PRIME_RENDER_OFFLOAD
+# here — offload-while-already-on-NVIDIA breaks the desktop GL window into a
+# frozen "see-through" copy of whatever is underneath.
+export __GLX_VENDOR_LIBRARY_NAME="${__GLX_VENDOR_LIBRARY_NAME:-nvidia}"
+export VK_DRIVER_FILES="${VK_DRIVER_FILES:-/usr/share/vulkan/icd.d/nvidia_icd.json}"
+unset __NV_PRIME_RENDER_OFFLOAD __VK_LAYER_NV_optimus 2>/dev/null || true
+
 cd "${SCRIPT_DIR}"
 
 # ROS 2 does not use roscore. Ensure ambf_simulator is on PATH when installed via colcon.
 if ! command -v ambf_simulator >/dev/null 2>&1; then
-    if [[ -x "${WS_ROOT}/install/ambf_simulator/lib/ambf_simulator/ambf_simulator" ]]; then
+    if [[ -x "${WS_ROOT}/install/AMBF/bin/ambf_simulator" ]]; then
+        export PATH="${WS_ROOT}/install/AMBF/bin:${PATH}"
+    elif [[ -x "${WS_ROOT}/install/ambf_simulator/lib/ambf_simulator/ambf_simulator" ]]; then
         export PATH="${WS_ROOT}/install/ambf_simulator/lib/ambf_simulator:${PATH}"
     elif [[ -x "${HOME}/ros_ambf_ws/src/ambf/bin/lin-x86_64/ambf_simulator" ]]; then
         export PATH="${HOME}/ros_ambf_ws/src/ambf/bin/lin-x86_64:${PATH}"

@@ -1,6 +1,6 @@
 from PyQt5 import QtWidgets, uic
 from PyQt5.QtGui import QPixmap, QFont
-from PyQt5.QtCore import Qt, QProcess
+from PyQt5.QtCore import Qt, QProcess, QProcessEnvironment
 from PyQt5.QtWidgets import QVBoxLayout, QButtonGroup, QFileDialog, QInputDialog, QMessageBox
 import sys
 from study_manager import StudyManager, RecordOptions
@@ -9,13 +9,44 @@ from user_profiles import UserProfileStore, DEFAULT_BURR_MM, VALID_BURR_SIZES
 import datetime
 from enum import Enum
 import json
+import os
 import pathlib
+import re
 import yaml
 
 
 class DialogType(Enum):
     FILE = 0
     FOLDER = 1
+
+
+def wivrn_nvidia_extension_problem():
+    """WiVRn Flatpak only uses NVIDIA when its GL extension matches the host driver.
+
+    A mismatch makes the server start on the Intel GPU. AMBF still renders on
+    NVIDIA, the OpenXR submit then crashes, and the Quest stays blank.
+    """
+    version_file = pathlib.Path("/proc/driver/nvidia/version")
+    if not version_file.is_file():
+        return None
+    match = re.search(r"\b(\d+\.\d+\.\d+)\b", version_file.read_text(errors="replace"))
+    if not match:
+        return None
+    version = match.group(1)
+    ext_id = "org.freedesktop.Platform.GL.nvidia-" + version.replace(".", "-")
+    roots = (
+        pathlib.Path("/var/lib/flatpak/runtime") / ext_id,
+        pathlib.Path.home() / ".local/share/flatpak/runtime" / ext_id,
+    )
+    if any(path.exists() for path in roots):
+        return None
+    return (
+        f"ERROR! WiVRn cannot use the NVIDIA GPU. Host driver is {version}, "
+        f"but Flatpak runtime {ext_id} is not installed, so the server falls back "
+        "to the Intel GPU, the sim crashes, and the Quest stays blank. "
+        "Run this, then quit and reopen the WiVRn dashboard and reconnect the Quest:\n"
+        f"  flatpak install -y flathub {ext_id}"
+    )
 
 
 def read_adf_laterality(adf_path):
@@ -286,6 +317,8 @@ class Ui(QtWidgets.QWidget):
 
         self.check_stream_stereo = self.findChild(QtWidgets.QCheckBox, "check_stream_stereo")
         self.check_stream_depth = self.findChild(QtWidgets.QCheckBox, "check_stream_depth")
+        self.check_openvr_hmd = self.findChild(QtWidgets.QCheckBox, "check_openvr_hmd")
+        self.check_openxr_eyepiece = self.findChild(QtWidgets.QCheckBox, "check_openxr_eyepiece")
         self.check_video_record = self.findChild(QtWidgets.QCheckBox, "check_video_record")
         self.check_pupil_capture = self.findChild(QtWidgets.QCheckBox, "check_pupil_capture")
         self.check_pupil_capture.toggled.connect(self.pupil_capture_toggled)
@@ -337,6 +370,7 @@ class Ui(QtWidgets.QWidget):
         self._ambf_process.readyReadStandardOutput.connect(self.handle_stdout)
         self._ambf_process.readyReadStandardError.connect(self.handle_stderr)
         self._ambf_process.finished.connect(self._simulation_closed)
+        self._ambf_process.errorOccurred.connect(self._ambf_process_error)
         self._pupil_process = QProcess()
         self._recording_process = QProcess()
         self._current_args = []
@@ -481,11 +515,27 @@ class Ui(QtWidgets.QWidget):
                 self.print_info("ERROR! Select an anatomy before starting")
                 return
             self._current_args = []
-            # Always launch VR (ADF index 6). Base: drills(0) + gaze_marker(7).
-            launch_file_adf_indices = "0,7,6"
-            if self.check_stream_depth.isChecked():
+            # Base: drills(0) + gaze_marker(7). World main_camera is the on-screen view.
+            # OpenXR eyepiece (WiVRn) = ADF 15. Legacy OpenVR/SteamVR = ADF 14.
+            use_openxr = bool(
+                self.check_openxr_eyepiece is not None
+                and self.check_openxr_eyepiece.isChecked()
+            )
+            use_openvr = bool(
+                not use_openxr
+                and self.check_openvr_hmd is not None
+                and self.check_openvr_hmd.isChecked()
+            )
+            launch_file_adf_indices = "0,7"
+            if use_openxr:
+                launch_file_adf_indices = launch_file_adf_indices + ",15"
+            elif use_openvr:
+                launch_file_adf_indices = launch_file_adf_indices + ",14"
+            use_hmd = use_openxr or use_openvr
+            use_wivrn = use_openxr
+            if not use_hmd and self.check_stream_depth.isChecked():
                 launch_file_adf_indices = launch_file_adf_indices + ",4"
-            if self.check_stream_stereo.isChecked():
+            if not use_hmd and self.check_stream_stereo.isChecked():
                 launch_file_adf_indices = launch_file_adf_indices + ",5"
             args = [
                 "--launch_file",
@@ -523,9 +573,71 @@ class Ui(QtWidgets.QWidget):
                 self.start_pupil_capture()
             print("--fp", str(self.gui_configuration.footpedal_device.get()))
             print(f"Starting simulation with arguments: {self._current_args}")
-            self._ambf_process.start(
-                str(self.gui_configuration.ambf_executable.get()), self._current_args
-            )
+            # Ensure Geomagic/OpenHaptics env is present even if the GUI was
+            # started without scripts/setup_haptic_env.sh.
+            env = QProcessEnvironment.systemEnvironment()
+            if not env.value("GTDD_HOME"):
+                env.insert("GTDD_HOME", "/usr/share/3DSystems")
+            if not env.value("OH_SDK_BASE"):
+                env.insert("OH_SDK_BASE", "/opt/OpenHaptics/Developer/3.4-0")
+            ld = env.value("LD_LIBRARY_PATH") or ""
+            for p in ("/usr/local/lib", "/usr/lib"):
+                if p not in ld.split(":"):
+                    ld = f"{p}:{ld}" if ld else p
+            env.insert("LD_LIBRARY_PATH", ld)
+            # AMBF + VR on NVIDIA. Avoid PRIME offload when the desktop is
+            # already driven by NVIDIA (causes see-through/frozen GL windows).
+            if use_hmd:
+                env.insert("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
+                env.insert(
+                    "VK_DRIVER_FILES",
+                    "/usr/share/vulkan/icd.d/nvidia_icd.json",
+                )
+                env.remove("__NV_PRIME_RENDER_OFFLOAD")
+                env.remove("__VK_LAYER_NV_optimus")
+            if use_wivrn:
+                gpu_problem = wivrn_nvidia_extension_problem()
+                if gpu_problem:
+                    self.print_info(gpu_problem)
+                    return
+                # Prefer active runtime written by WiVRn dashboard when connected.
+                runtime = pathlib.Path.home() / ".config/openxr/1/active_runtime.json"
+                if runtime.is_file():
+                    env.insert("XR_RUNTIME_JSON", str(runtime.resolve()))
+                else:
+                    self.print_info(
+                        "ERROR! No ~/.config/openxr/1/active_runtime.json — "
+                        "start WiVRn and connect the Quest first"
+                    )
+                    return
+                ipc = pathlib.Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "wivrn" / "comp_ipc"
+                if not ipc.exists():
+                    self.print_info(
+                        f"WARNING! WiVRn IPC missing ({ipc}) — is the WiVRn server running?"
+                    )
+            # ADF paths in launch.yaml are relative to the repo root.
+            repo_root = pathlib.Path(self.gui_configuration.launch_file.get()).expanduser().resolve().parent
+            self._ambf_process.setWorkingDirectory(str(repo_root))
+            self._ambf_process.setProcessEnvironment(env)
+            if use_openxr:
+                mode = "OpenXR eyepiece (WiVRn)"
+            elif use_openvr:
+                mode = "OpenVR legacy"
+            else:
+                mode = "desktop"
+            ambf_bin = str(self.gui_configuration.ambf_executable.get())
+            self.print_info(f"Starting AMBF [{mode}] cwd={repo_root} -l {launch_file_adf_indices}")
+            if use_wivrn:
+                self.print_info(
+                    f"XR_RUNTIME_JSON={env.value('XR_RUNTIME_JSON') or '(unset)'} — "
+                    "Quest WiVRn must show Connection ready before HMD can stream"
+                )
+            self._ambf_process.start(ambf_bin, self._current_args)
+            if not self._ambf_process.waitForStarted(5000):
+                self.print_info(f"ERROR! Failed to start AMBF: {ambf_bin}")
+                self.button_start_simulation.setText("Start Simulation")
+                self._set_sim_running_style(False)
+                return
             self.button_start_simulation.setText("Close Simulation")
             self._set_sim_running_style(True)
         else:
@@ -557,14 +669,24 @@ class Ui(QtWidgets.QWidget):
         self.check_log_study_data.setProperty("loggingActive", active)
         self._refresh_widget_style(self.check_log_study_data)
 
-    def _simulation_closed(self):
+    def _simulation_closed(self, exit_code=0, exit_status=None):
         if self._recording_study:
             self._stop_study_logging(save_metadata=True)
             self._updating_log_checkbox = True
             self.check_log_study_data.setChecked(False)
             self._updating_log_checkbox = False
+        if exit_code not in (0, None) and exit_status != QProcess.CrashExit:
+            self.print_info(f"AMBF exited with code {exit_code}")
+        if exit_status == QProcess.CrashExit:
+            self.print_info(
+                "AMBF crashed — check Debug pane for OpenXR/WiVRn errors "
+                "(session READY / xrCreateSession / BadWindow)"
+            )
         self.button_start_simulation.setText("Start Simulation")
         self._set_sim_running_style(False)
+
+    def _ambf_process_error(self, error):
+        self.print_info(f"ERROR! AMBF process: {self._ambf_process.errorString()} ({error})")
 
     def pupil_capture_toggled(self, checked):
         if checked and self._pupil_process.state() != QProcess.Running:

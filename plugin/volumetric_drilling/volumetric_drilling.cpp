@@ -45,13 +45,25 @@
 
 #include "volumetric_drilling.h"
 #include <boost/program_options.hpp>
+#include <atomic>
 #include <cctype>
 #include <cstdlib>
+#include <dlfcn.h>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+
+namespace {
+std::atomic<int> g_drillingCamClutch{0};
+afVolmetricDrillingPlugin* g_drillingPlugin = nullptr;
+}
+
+// Polled by ambf_openvr_plugin when setter linkage fails (RTLD_LOCAL plugins).
+extern "C" int ambf_drilling_cam_clutch(void){
+    return g_drillingCamClutch.load();
+}
 
 #define GLFW_EXPOSE_NATIVE_X11
 #include <GLFW/glfw3native.h>
@@ -71,7 +83,7 @@ namespace p_opt = boost::program_options;
 
 
 afVolmetricDrillingPlugin::afVolmetricDrillingPlugin(){
-
+    g_drillingPlugin = this;
 }
 
 int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_afWorld){
@@ -153,6 +165,8 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
     m_cameraL = findAndAppendCamera("cameraL");
     m_cameraR = findAndAppendCamera("cameraR");
     m_stereoCamera = findAndAppendCamera("stereoLR");
+    m_openvrCamera = findAndAppendCamera("openvr_cam");
+    m_openxrEyepieceCamera = findAndAppendCamera("openxr_eyepiece");
 
     if (m_cameras.size() == 0){
         cerr << "ERROR! NO CAMERAS FOUND. " << endl;
@@ -164,6 +178,17 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
         m_mainCamera = m_worldPtr->getCameras()[0];
     }
 
+    if (m_openvrCamera || m_openxrEyepieceCamera){
+        // HMD plugins often load after simulator init — resolve clutch exports lazily.
+        m_drillManager.m_vrHmdOwnsCamClutch = true;
+        if (m_openxrEyepieceCamera){
+            cerr << "INFO! OpenXR eyepiece present — cam-clutch gates HMD→main_camera" << endl;
+        }
+        if (m_openvrCamera){
+            cerr << "INFO! OpenVR camera present — cam-clutch gates HMD→main_camera" << endl;
+        }
+    }
+
     if (m_stereoCamera){
         makeVRWindowFullscreen(m_stereoCamera);
     }
@@ -172,6 +197,13 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
     if (m_stereoCamera){
         m_stereoCamera->getInternalCamera()->m_stereoOffsetW = 0.1;
         m_panelManager.addCamera(m_stereoCamera);
+    }
+    // HMD eyepiece cameras need panels too — pause menu / notices render into their FBOs.
+    if (m_openvrCamera){
+        m_panelManager.addCamera(m_openvrCamera);
+    }
+    if (m_openxrEyepieceCamera){
+        m_panelManager.addCamera(m_openxrEyepieceCamera);
     }
 
     if (!m_drillManager.init(a_afWorld, &m_panelManager, var_map)){
@@ -232,31 +264,41 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
 
 
 
-    // Dark operating room. The microscope beam is the only light, so empty
-    // space around the bone stays black at every working distance.
-    cBackground* background = new cBackground();
-    background->setCornerColors(cColorf(0.0f, 0.0f, 0.0f),
-                                cColorf(0.0f, 0.0f, 0.0f),
-                                cColorf(0.0f, 0.0f, 0.0f),
-                                cColorf(0.0f, 0.0f, 0.0f));
-    m_mainCamera->getBackLayer()->addChild(background);
-    if (m_stereoCamera){
-        cBackground* stereoBackground = new cBackground();
-        stereoBackground->setCornerColors(cColorf(0.0f, 0.0f, 0.0f),
-                                          cColorf(0.0f, 0.0f, 0.0f),
-                                          cColorf(0.0f, 0.0f, 0.0f),
-                                          cColorf(0.0f, 0.0f, 0.0f));
-        m_stereoCamera->getBackLayer()->addChild(stereoBackground);
+    // Dark operating room. Microscope beam is the only light; empty space = black.
+    if (m_worldPtr && m_worldPtr->getChaiWorld()){
+        m_worldPtr->getChaiWorld()->setBackgroundColor(0.0f, 0.0f, 0.0f);
+    }
+    auto addBlackBackdrop = [](afCameraPtr cam){
+        if (!cam){
+            return;
+        }
+        cBackground* background = new cBackground();
+        background->setCornerColors(cColorf(0.0f, 0.0f, 0.0f),
+                                    cColorf(0.0f, 0.0f, 0.0f),
+                                    cColorf(0.0f, 0.0f, 0.0f),
+                                    cColorf(0.0f, 0.0f, 0.0f));
+        cam->getBackLayer()->addChild(background);
+    };
+    addBlackBackdrop(m_mainCamera);
+    addBlackBackdrop(m_stereoCamera);
+    addBlackBackdrop(m_openvrCamera);
+    addBlackBackdrop(m_openxrEyepieceCamera);
+    // Hide legacy checkered floor / bright planes if an older world ADF still loads them.
+    if (afRigidBodyPtr floor = m_worldPtr->getRigidBody("Plane", true)){
+        if (floor->getVisualObject()){
+            floor->getVisualObject()->setShowEnabled(false);
+        }
     }
 
     if (m_footpedal.init(footpedal_fd) != -1){
         cerr << "INFO! FOUND FOOTPEDAL INTERFACE " << footpedal_fd << endl;
-        cerr << "INFO! Pedal map: hold analog pedal = drill and sound on; "
-             << "left/middle buttons cycle burr size" << endl;
+        cerr << "INFO! Pedal map (Ikkegol a/b/c): a=style, b=hold-to-run drill, c=size" << endl;
     }
     else{
-        cerr << "WARNING! NO FOOTPEDAL INTERFACE FOUND \n";
+        cerr << "WARNING! NO FOOTPEDAL /dev/input DEVICE OPEN "
+             << "(using keyboard a/b/c + key 1 cam-clutch)\n";
     }
+    cerr << "INFO! Ikkegol pedals: a=diamond/cutting, b=hold drill, c=size; key 1=cam clutch" << endl;
 
     m_gazeMarkerController.init(m_worldPtr, &m_panelManager);
     cerr << "INFO! GAZE MARKER INITIALIZED \n";
@@ -573,11 +615,28 @@ void afVolmetricDrillingPlugin::makeVRWindowFullscreen(afCameraPtr vrCam, int mo
 void afVolmetricDrillingPlugin::updateButtons(){
     m_footpedal.poll();
 
-    if (m_footpedal.isChangeBurrSizePressed()){
+    // Ikkegol footpedal workaround: left/middle/right emit keyboard a/b/c.
+    // Poll via X11 so this works even when /dev/input is not readable.
+    const bool xStyleHeld = isLetterKeyHeld(GLFW_KEY_A);
+    const bool xDrillHeld = isLetterKeyHeld(GLFW_KEY_B);
+    const bool xSizeHeld  = isLetterKeyHeld(GLFW_KEY_C);
+
+    const bool styleEdge = (!m_xFootStylePrev && xStyleHeld);
+    const bool sizeEdge  = (!m_xFootSizePrev && xSizeHeld);
+    m_xFootStylePrev = xStyleHeld;
+    m_xFootSizePrev = xSizeHeld;
+
+    if (m_footpedal.isChangeBurrStylePressed() || styleEdge){
+        m_drillManager.toggleBurrStyle();
+    }
+
+    if (m_footpedal.isChangeBurrSizePressed() || sizeEdge){
         m_drillManager.cycleDrillTypes();
     }
 
-    m_drillManager.m_isOn = m_footpedal.isDrillOn();
+    // Hold-to-run drill (device pedal and/or keyboard 'b' from middle pedal).
+    m_drillManager.m_isOn = m_footpedal.isDrillOn() || xDrillHeld;
+    m_drillManager.updateBurrLabel();
 
     m_drillManager.m_camClutch = false;
     m_drillManager.m_deviceClutch = false;
@@ -587,6 +646,16 @@ void afVolmetricDrillingPlugin::updateButtons(){
         m_drillManager.m_camClutch = m_footpedal.isCamClutchPressed();
         m_drillManager.m_deviceClutch = m_footpedal.isDeviceClutchPressed();
 
+    }
+
+    // SayoDevice macro key programmed as "1": hold = camera clutch.
+    if (isDigit1Held()){
+        m_drillManager.m_camClutch = true;
+    }
+
+    // Hold Left Alt = cam-clutch when HMD is present (works without Geomagic).
+    if ((m_openxrEyepieceCamera || m_openvrCamera) && isAltHeld()){
+        m_drillManager.m_camClutch = true;
     }
 
     if (m_drillManager.m_hapticDevice->isDeviceAvailable()){
@@ -618,10 +687,6 @@ void afVolmetricDrillingPlugin::updateButtons(){
             double now = glfwGetTime();
 
             if (shiftHeld){
-                // Shift + button 1: snap drill into view. Not clutch, not a double-tap.
-                if (btn1 && !m_btn1Prev){
-                    requestDrillReposition();
-                }
                 if (m_vrHudVisible){
                     // Paused: Shift + button 2 applies the highlighted canonical view.
                     if (btn2 && !m_btn2Prev){
@@ -636,6 +701,7 @@ void afVolmetricDrillingPlugin::updateButtons(){
                 m_btn1Prev = btn1;
                 m_btn2Prev = btn2;
                 m_btn1LastClickTime = -1.0;
+                m_btn2LastClickTime = -1.0;
             }
             else{
                 if (btn1 && !m_btn1Prev){
@@ -656,14 +722,114 @@ void afVolmetricDrillingPlugin::updateButtons(){
                         refreshVrHudText();
                     }
                     m_btn2Prev = btn2;
+                    m_btn2LastClickTime = -1.0;
                 }
                 else{
+                    // Double-tap button 2: snap drill burr into main_camera view.
+                    bool btn2DoubleTapped = false;
+                    if (btn2 && !m_btn2Prev){
+                        if (m_btn2LastClickTime >= 0.0 && (now - m_btn2LastClickTime) <= doubleClickSec){
+                            requestDrillReposition();
+                            m_btn2LastClickTime = -1.0;
+                            btn2DoubleTapped = true;
+                        }
+                        else{
+                            m_btn2LastClickTime = now;
+                        }
+                    }
                     m_btn2Prev = btn2;
                     m_drillManager.m_camClutch |= btn1;
-                    m_drillManager.m_deviceClutch |= btn2;
+                    // Hold btn2 = device clutch; skip the double-tap edge so it does not
+                    // briefly clutch while recentering.
+                    if (btn2 && !btn2DoubleTapped){
+                        m_drillManager.m_deviceClutch |= btn2;
+                    }
                 }
             }
         }
+    }
+
+    g_drillingCamClutch.store(m_drillManager.m_camClutch ? 1 : 0);
+
+    auto linkClutch = [&](HmdCamClutchFn& fn, const char* symbol, const char* soName, const string& absSo){
+        if (fn){
+            return;
+        }
+        fn = reinterpret_cast<HmdCamClutchFn>(dlsym(RTLD_DEFAULT, symbol));
+        if (fn){
+            cerr << "INFO! Linked " << symbol << endl;
+            return;
+        }
+        const char* paths[] = { soName, absSo.c_str() };
+        for (const char* path : paths){
+            void* handle = dlopen(path, RTLD_NOLOAD | RTLD_LAZY);
+            if (!handle){
+                handle = dlopen(path, RTLD_LAZY | RTLD_GLOBAL);
+            }
+            if (!handle){
+                continue;
+            }
+            fn = reinterpret_cast<HmdCamClutchFn>(dlsym(handle, symbol));
+            if (fn){
+                cerr << "INFO! Linked " << symbol << " via " << path << endl;
+                return;
+            }
+        }
+    };
+
+    const string home = getenv("HOME") ? getenv("HOME") : "";
+    if (m_openvrCamera){
+        linkClutch(m_openvrSetCamClutch, "ambf_openvr_set_cam_clutch", "libambf_openvr_camera.so",
+                   home + "/ros_ambf_ws/src/ambf_openvr_plugin/build/libambf_openvr_camera.so");
+        if (m_openvrSetCamClutch){
+            m_openvrSetCamClutch(m_drillManager.m_camClutch ? 1 : 0);
+        }
+    }
+    if (m_openxrEyepieceCamera){
+        linkClutch(m_openxrSetCamClutch, "ambf_openxr_set_cam_clutch", "libambf_openxr_eyepiece.so",
+                   home + "/ros_ambf_ws/src/ambf_openxr_eyepiece/build/libambf_openxr_eyepiece.so");
+        if (m_openxrSetCamClutch){
+            m_openxrSetCamClutch(m_drillManager.m_camClutch ? 1 : 0);
+        }
+        ensureOpenxrPlacementFns();
+    }
+}
+
+void afVolmetricDrillingPlugin::ensureOpenxrPlacementFns(){
+    if (m_openxrRecenterToHead && m_openxrRecenterLap && m_openxrSetPlaceDrag){
+        return;
+    }
+    const string home = getenv("HOME") ? getenv("HOME") : "";
+    const string absSo = home + "/ros_ambf_ws/src/ambf_openxr_eyepiece/build/libambf_openxr_eyepiece.so";
+    auto resolve = [&](const char* symbol) -> void* {
+        void* sym = dlsym(RTLD_DEFAULT, symbol);
+        if (sym){
+            return sym;
+        }
+        for (const char* path : { "libambf_openxr_eyepiece.so", absSo.c_str() }){
+            void* handle = dlopen(path, RTLD_NOLOAD | RTLD_LAZY);
+            if (!handle){
+                handle = dlopen(path, RTLD_LAZY | RTLD_GLOBAL);
+            }
+            if (!handle){
+                continue;
+            }
+            sym = dlsym(handle, symbol);
+            if (sym){
+                cerr << "INFO! Linked " << symbol << " via " << path << endl;
+                return sym;
+            }
+        }
+        return nullptr;
+    };
+    if (!m_openxrRecenterToHead){
+        m_openxrRecenterToHead = reinterpret_cast<OpenxrVoidFn>(resolve("ambf_openxr_recenter_to_head"));
+    }
+    if (!m_openxrRecenterLap){
+        m_openxrRecenterLap = reinterpret_cast<OpenxrVoidFn>(resolve("ambf_openxr_recenter_lap"));
+    }
+    if (!m_openxrSetPlaceDrag){
+        m_openxrSetPlaceDrag = reinterpret_cast<OpenxrIntFn>(resolve("ambf_openxr_set_place_drag"));
     }
 }
 
@@ -741,6 +907,138 @@ bool afVolmetricDrillingPlugin::isShiftHeld() const
     }
     for (const auto& kv : m_cameras){
         if (kv.second && winShift(kv.second->m_window)){
+            return true;
+        }
+    }
+    return false;
+}
+
+bool afVolmetricDrillingPlugin::isAltHeld() const
+{
+    Display* dpy = glfwGetX11Display();
+    if (dpy){
+        char keys[32];
+        XQueryKeymap(dpy, keys);
+        auto keyDown = [&](KeySym sym) -> bool {
+            KeyCode code = XKeysymToKeycode(dpy, sym);
+            if (code == 0){
+                return false;
+            }
+            return (keys[code / 8] & (1 << (code % 8))) != 0;
+        };
+        if (keyDown(XK_Alt_L) || keyDown(XK_Alt_R)){
+            return true;
+        }
+    }
+
+    auto winAlt = [](GLFWwindow* win) -> bool {
+        if (!win){
+            return false;
+        }
+        return (glfwGetKey(win, GLFW_KEY_LEFT_ALT) == GLFW_PRESS)
+            || (glfwGetKey(win, GLFW_KEY_RIGHT_ALT) == GLFW_PRESS);
+    };
+    if (m_mainCamera && winAlt(m_mainCamera->m_window)){
+        return true;
+    }
+    if (m_stereoCamera && winAlt(m_stereoCamera->m_window)){
+        return true;
+    }
+    for (const auto& kv : m_cameras){
+        if (kv.second && winAlt(kv.second->m_window)){
+            return true;
+        }
+    }
+    return false;
+}
+
+bool afVolmetricDrillingPlugin::isXKeycodeHeld(unsigned int keycode) const
+{
+    if (keycode == 0){
+        return false;
+    }
+    Display* dpy = glfwGetX11Display();
+    if (!dpy){
+        return false;
+    }
+    char keys[32];
+    XQueryKeymap(dpy, keys);
+    return (keys[keycode / 8] & (1 << (keycode % 8))) != 0;
+}
+
+bool afVolmetricDrillingPlugin::isDigit1Held() const
+{
+    Display* dpy = glfwGetX11Display();
+    if (dpy){
+        char keys[32];
+        XQueryKeymap(dpy, keys);
+        auto keyDown = [&](KeySym sym) -> bool {
+            KeyCode code = XKeysymToKeycode(dpy, sym);
+            if (code == 0){
+                return false;
+            }
+            return (keys[code / 8] & (1 << (code % 8))) != 0;
+        };
+        // Main "1" key and keypad 1 — SayoDevice macro programmed as digit 1.
+        if (keyDown(XK_1) || keyDown(XK_KP_1)){
+            return true;
+        }
+    }
+
+    auto win1 = [](GLFWwindow* win) -> bool {
+        if (!win){
+            return false;
+        }
+        return (glfwGetKey(win, GLFW_KEY_1) == GLFW_PRESS)
+            || (glfwGetKey(win, GLFW_KEY_KP_1) == GLFW_PRESS);
+    };
+    if (m_mainCamera && win1(m_mainCamera->m_window)){
+        return true;
+    }
+    if (m_stereoCamera && win1(m_stereoCamera->m_window)){
+        return true;
+    }
+    for (const auto& kv : m_cameras){
+        if (kv.second && win1(kv.second->m_window)){
+            return true;
+        }
+    }
+    return false;
+}
+
+bool afVolmetricDrillingPlugin::isLetterKeyHeld(int glfwKey) const
+{
+    KeySym sym = 0;
+    switch (glfwKey){
+        case GLFW_KEY_A: sym = XK_a; break;
+        case GLFW_KEY_B: sym = XK_b; break;
+        case GLFW_KEY_C: sym = XK_c; break;
+        default: return false;
+    }
+
+    Display* dpy = glfwGetX11Display();
+    if (dpy){
+        KeyCode code = XKeysymToKeycode(dpy, sym);
+        if (code != 0){
+            char keys[32];
+            XQueryKeymap(dpy, keys);
+            if ((keys[code / 8] & (1 << (code % 8))) != 0){
+                return true;
+            }
+        }
+    }
+
+    auto winKey = [&](GLFWwindow* win) -> bool {
+        return win && (glfwGetKey(win, glfwKey) == GLFW_PRESS);
+    };
+    if (m_mainCamera && winKey(m_mainCamera->m_window)){
+        return true;
+    }
+    if (m_stereoCamera && winKey(m_stereoCamera->m_window)){
+        return true;
+    }
+    for (const auto& kv : m_cameras){
+        if (kv.second && winKey(kv.second->m_window)){
             return true;
         }
     }
@@ -1294,6 +1592,16 @@ void afVolmetricDrillingPlugin::showNotice(const string& text, double durationSe
         m_panelManager.setPosForCamera(m_noticeLabel, m_stereoCamera, 0.5, 0.72,
                                        PanelReferenceOrigin::CENTER, PanelReferenceType::NORMALIZED);
     }
+    if (m_openvrCamera){
+        m_panelManager.setPosForCamera(m_noticeLabel, m_openvrCamera, 0.5, 0.72,
+                                       PanelReferenceOrigin::CENTER, PanelReferenceType::NORMALIZED);
+        m_panelManager.setFontScaleForCamera(m_noticeLabel, m_openvrCamera, 1.1);
+    }
+    if (m_openxrEyepieceCamera){
+        m_panelManager.setPosForCamera(m_noticeLabel, m_openxrEyepieceCamera, 0.5, 0.72,
+                                       PanelReferenceOrigin::CENTER, PanelReferenceType::NORMALIZED);
+        m_panelManager.setFontScaleForCamera(m_noticeLabel, m_openxrEyepieceCamera, 1.1);
+    }
     m_panelManager.setVisible(m_noticeLabel, true);
     m_noticeTimer = durationSec;
 }
@@ -1342,6 +1650,18 @@ void afVolmetricDrillingPlugin::ensurePauseMenuLabel()
     if (m_stereoCamera){
         m_panelManager.setVisibleForCamera(m_vrHudLabel, m_stereoCamera, false);
         m_panelManager.setFontScaleForCamera(m_vrHudLabel, m_stereoCamera, 0.85);
+    }
+    if (m_openvrCamera){
+        m_panelManager.setVisibleForCamera(m_vrHudLabel, m_openvrCamera, false);
+        m_panelManager.setFontScaleForCamera(m_vrHudLabel, m_openvrCamera, 1.0);
+        m_panelManager.setPosForCamera(m_vrHudLabel, m_openvrCamera, 0.5, 0.48,
+                                       PanelReferenceOrigin::CENTER, PanelReferenceType::NORMALIZED);
+    }
+    if (m_openxrEyepieceCamera){
+        m_panelManager.setVisibleForCamera(m_vrHudLabel, m_openxrEyepieceCamera, false);
+        m_panelManager.setFontScaleForCamera(m_vrHudLabel, m_openxrEyepieceCamera, 1.0);
+        m_panelManager.setPosForCamera(m_vrHudLabel, m_openxrEyepieceCamera, 0.5, 0.48,
+                                       PanelReferenceOrigin::CENTER, PanelReferenceType::NORMALIZED);
     }
 }
 
@@ -1416,7 +1736,7 @@ string afVolmetricDrillingPlugin::controlHelpText(bool paused) const
             "  Confirm                Enter  or  Shift + Stylus 2\n"
             "  Save to slot           Shift + Enter\n"
             "  Resume                 Double-tap Stylus 1  or  Ctrl + P\n"
-            "  Recenter drill (debug) F9\n"
+            "  Recenter drill         Double-tap Stylus 2  or  F9\n"
             "\n";
     }
     s += "CONTROLS\n";
@@ -1424,20 +1744,23 @@ string afVolmetricDrillingPlugin::controlHelpText(bool paused) const
         s += "  Pause / Resume         Double-tap Stylus 1  or  Ctrl + P\n";
     }
     s +=
-        "  Camera clutch          Hold Stylus 1\n"
-        "  Device clutch          Hold Stylus 2\n"
-        "  Look                   Arrow Keys\n"
-        "  Roll                   Ctrl + Mouse Wheel\n"
-        "  Zoom in / out          Ctrl + Stylus 2 / 1\n"
-        "  Orbit around burr      Shift + Hold Stylus 2\n"
-        "  Recenter drill         Shift + Stylus 1\n"
-        "  Left / Right view      F3 / F4\n"
-        "  Quick roll L / R       F1 / F2\n"
-        "  Specular legacy/new    F5\n"
-        "  Shininess / strength   [ ]   /   - =\n"
-        "  Attenuation none/mild  F6        , . linear\n"
-        "  Beam narrower / wider  F7 / F8\n"
-        "  Beam softer / tighter  ; / '\n";
+            "  Camera clutch          Hold 1  or  Stylus 1  or  Alt (HMD)\n"
+            "  Drill (hold-to-run)    Middle pedal (b)\n"
+            "  Burr style / size      Left pedal (a) / Right pedal (c)\n"
+            "  Place WiVRn scene      Hold F10 (drag) / F11 lap / F12 look\n"
+            "  Device clutch          Hold Stylus 2\n"
+            "  Look                   Arrow Keys\n"
+            "  Roll                   Ctrl + Mouse Wheel\n"
+            "  Zoom in / out          Ctrl + Stylus 2 / 1\n"
+            "  Orbit around burr      Shift + Hold Stylus 2\n"
+            "  Recenter drill         Double-tap Stylus 2  or  F9\n"
+            "  Left / Right view      F3 / F4\n"
+            "  Quick roll L / R       F1 / F2\n"
+            "  Specular legacy/new    F5\n"
+            "  Shininess / strength   [ ]   /   - =\n"
+            "  Attenuation none/mild  F6        , . linear\n"
+            "  Beam narrower / wider  F7 / F8\n"
+            "  Beam softer / tighter  ; / '\n";
     return s;
 }
 
@@ -1499,6 +1822,12 @@ void afVolmetricDrillingPlugin::setVrHudVisible(bool visible)
         m_panelManager.setVisibleForCamera(m_drillManager.m_controlModeLabel, m_stereoCamera, false);
         m_panelManager.setVisibleForCamera(m_volumeSmoothingLabel, m_stereoCamera, false);
         m_panelManager.setVisibleForCamera(m_cameraPresetLabel, m_stereoCamera, false);
+    }
+    if (m_openvrCamera){
+        m_panelManager.setVisibleForCamera(m_vrHudLabel, m_openvrCamera, visible);
+    }
+    if (m_openxrEyepieceCamera){
+        m_panelManager.setVisibleForCamera(m_vrHudLabel, m_openxrEyepieceCamera, visible);
     }
 
     cerr << "INFO! Simulator " << (m_simPaused ? "PAUSED" : "RESUMED")
@@ -1702,9 +2031,34 @@ void afVolmetricDrillingPlugin::keyboardUpdate(GLFWwindow *a_window, int a_key, 
     const bool shift = (a_mods & GLFW_MOD_SHIFT) != 0;
     const bool alt = (a_mods & GLFW_MOD_ALT) != 0;
 
+    // Ikkegol pedals emit bare a/b/c — owned by updateButtons(), not these bindings.
+    if (!ctrl && !alt && !shift &&
+        (a_key == GLFW_KEY_A || a_key == GLFW_KEY_B || a_key == GLFW_KEY_C)){
+        return;
+    }
+
     if (a_action == GLFW_PRESS && a_key == GLFW_KEY_F9 && !ctrl && !alt){
         requestDrillReposition();
         return;
+    }
+
+    // WiVRn / OpenXR eyepiece scene placement (LOCAL panel): drag + snap.
+    if (m_openxrEyepieceCamera && !ctrl && !alt){
+        ensureOpenxrPlacementFns();
+        if (a_key == GLFW_KEY_F10 && m_openxrSetPlaceDrag){
+            m_openxrSetPlaceDrag((a_action == GLFW_RELEASE) ? 0 : 1);
+            return;
+        }
+        if (a_action == GLFW_PRESS && a_key == GLFW_KEY_F11 && m_openxrRecenterLap){
+            m_openxrRecenterLap();
+            showNotice("WiVRn scene → lap (down + forward)");
+            return;
+        }
+        if (a_action == GLFW_PRESS && a_key == GLFW_KEY_F12 && m_openxrRecenterToHead){
+            m_openxrRecenterToHead();
+            showNotice("WiVRn scene → look direction");
+            return;
+        }
     }
 
     if (m_vrHudVisible && !ctrl && !alt){
@@ -2217,17 +2571,10 @@ void afVolmetricDrillingPlugin::keyboardUpdate(GLFWwindow *a_window, int a_key, 
             m_drillManager.m_suddenJump = !m_drillManager.m_suddenJump;
         }
 
-        // toggles the visibility of drill mesh in the scene
-        else if (a_key == GLFW_KEY_B){
+        // toggles the visibility of drill mesh (Shift+B; bare B is Ikkegol drill pedal)
+        else if (shift && a_key == GLFW_KEY_B){
             m_drillManager.m_show = !m_drillManager.m_show;
-            m_drillManager.m_activeDrill->m_rigidBody->m_visualMesh->setShowEnabled(m_drillManager.m_show);
-            m_drillManager.m_burrMesh->setShowEnabled(m_drillManager.m_show);
-
-        }
-
-        // toggles size of drill burr/tip tool cursor
-        else if (a_key == GLFW_KEY_C){
-            m_drillManager.cycleDrillTypes();
+            m_drillManager.showOnlyActive();
         }
 
         else if (a_key == GLFW_KEY_KP_ADD){

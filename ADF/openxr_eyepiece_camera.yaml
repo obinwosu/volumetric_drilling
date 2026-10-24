@@ -1,0 +1,32 @@
+# OpenXR eyepiece camera for Meta Quest via WiVRn (head-locked stereo of main_camera).
+# Requires: WiVRn running + Quest connected, and
+#   ~/ros_ambf_ws/src/ambf_openxr_eyepiece/build/libambf_openxr_eyepiece.so
+# See docs/QUEST_OPENXR_EYEPIECE.md
+bodies: []
+joints: []
+cameras: [openxr_eyepiece]
+high resolution path: ./meshes/high_res/
+low resolution path: ./meshes/low_res/
+ignore inter-collision: false
+namespace: /ambf/env/
+
+openxr_eyepiece:
+  namespace: cameras/
+  name: openxr_eyepiece
+  # Parent = main_camera. Dolly along look (-X) for HMD FOV vs desktop telephoto.
+  # Closer → more negative X. Cam-clutch (stylus btn 1) moves main_camera with HMD 6DoF.
+  location: {x: -3.20, y: 0.0, z: 0.0}
+  look at: {x: -4.20, y: 0.0, z: 0.0}
+  up: {x: 0.0, y: 0.0, z: 1.0}
+  clipping plane: {near: 0.01, far: 100}
+  field view angle: 0.7 # overridden by OpenXR FOV per eye
+  monitor: 0
+  visible: false
+  parent: main_camera
+  plugins: [
+    {
+      name: openxr_eyepiece_plugin,
+      path: ../../ambf_openxr_eyepiece/build/,
+      filename: libambf_openxr_eyepiece.so
+    }
+  ]

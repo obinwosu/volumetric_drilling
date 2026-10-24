@@ -1,9 +1,14 @@
 [Desktop Entry]
+Version=1.0
 Type=Application
-Name=Volumetric Drilling Study GUI
-Comment=AMBF3 volumetric drilling study launcher
+Name=Volumetric Drilling
+GenericName=Study GUI
+Comment=AMBF3 volumetric drilling study GUI and simulator launcher
 Exec=/home/obihome/ros_ambf_ws/src/volumetric_drilling/scripts/study_gui/launch_study_gui.sh
 Path=/home/obihome/ros_ambf_ws/src/volumetric_drilling/scripts/study_gui
 Icon=/home/obihome/ros_ambf_ws/src/volumetric_drilling/scripts/study_gui/assets/fivrs_icon.png
 Terminal=false
+StartupNotify=true
 Categories=Education;Science;
+Keywords=AMBF;drilling;simulator;VRE;study;
+StartupWMClass=study_gui.py

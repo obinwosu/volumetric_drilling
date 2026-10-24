@@ -1,0 +1,8 @@
+# Empty dark OR environment — no floor/walls so empty space stays black
+# under the microscope spotlight (see world.yaml).
+bodies: []
+joints: []
+high resolution path: ./high_res/
+low resolution path: ./low_res/
+ignore inter-collision: false
+namespace: /ambf/env/

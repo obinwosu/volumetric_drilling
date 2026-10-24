@@ -52,6 +52,11 @@ enum class AudioState{
     PLAYING = 1
 };
 
+enum class BurrStyle{
+    CUTTING = 0,  // Fluted / metal cutting burr
+    DIAMOND = 1   // Smooth diamond sphere
+};
+
 
 struct Drill{
 public:
@@ -101,16 +106,24 @@ public:
     // check for shaft collision
     void checkShaftCollision(void);
 
-    // cycle between drill types
+    // Cycle burr diameter (1/2/4/6 mm).
     void cycleDrillTypes();
+
+    // Toggle cutting (fluted) <-> diamond (sphere) tip visual.
+    void toggleBurrStyle();
 
     // Select drill by physical burr diameter in mm (1, 2, 4, or 6).
     bool setDrillSizeMm(int burrSizeMm);
 
     void showOnlyActive();
 
-    // Scale the unit-radius fluted burr mesh to the active drill diameter.
+    // Scale active tip meshes to the active drill diameter.
     void applyBurrVisualScale();
+
+    // Update HUD text for size + style.
+    void updateBurrLabel();
+
+    string burrStyleName() const;
 
     bool getOverrideControl(){return m_overrideControl;}
 
@@ -153,10 +166,14 @@ public:
     double m_units_mmToSim;
 
     // Visual only. Cutting radius stays on the tool cursor sphere.
-    cMultiMesh* m_burrMesh = nullptr;
+    cMultiMesh* m_burrMesh = nullptr;          // Cutting / fluted tip
+    cMultiMesh* m_diamondBurrMesh = nullptr;   // Diamond sphere tip
 
-    // Geometric radius of m_burrMesh after the last applyBurrVisualScale().
+    BurrStyle m_burrStyle = BurrStyle::CUTTING;
+
+    // Geometric radius of tip meshes after the last applyBurrVisualScale().
     double m_burrVisualRadius = 1.0;
+    double m_diamondVisualRadius = 1.0;
 
     // Accumulated spin about the drill +X axis, in radians.
     double m_burrSpinAngle = 0.0;
@@ -175,6 +192,9 @@ public:
     double m_maxError = 0;
 
     bool m_camClutch = false;
+
+    // When true, OpenVR HMD owns cam-clutch motion; stylus velocity must not call setView.
+    bool m_vrHmdOwnsCamClutch = false;
 
     bool m_deviceClutch = false;
 

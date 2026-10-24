@@ -26,3 +26,5 @@ multibody configs:
   - "ADF/volume_EMMJ5MW1_114334_nodura.yaml" #11
   - "ADF/volume_EMMJ5MW1_114334_raw.yaml" #12
   - "ADF/volume_EMMJ5MW1_114334_smoothed.yaml" #13
+  - "ADF/openvr_camera.yaml" #14 — Meta Quest / SteamVR via ambf_openvr_plugin
+  - "ADF/openxr_eyepiece_camera.yaml" #15 — Meta Quest / WiVRn OpenXR head-locked eyepiece

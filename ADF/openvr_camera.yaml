@@ -1,0 +1,37 @@
+# OpenVR / SteamVR camera for Meta Quest via ALVR.
+# Requires: SteamVR running, Quest connected through ALVR, and
+#   ~/ros_ambf_ws/src/ambf_openvr_plugin/build/libambf_openvr_camera.so
+# See docs/QUEST_OPENVR_SETUP.md
+bodies: []
+joints: []
+cameras: [openvr_cam]
+high resolution path: ./meshes/high_res/
+low resolution path: ./meshes/low_res/
+ignore inter-collision: false
+namespace: /ambf/env/
+
+openvr_cam:
+  namespace: cameras/
+  name: openvr_cam
+  # Parent = main_camera. Local pose is a dolly along look (-X) so the ~90° HMD
+  # FOV fills similarly to the desktop telephoto. Plugin keeps this ADF offset.
+  # Closer  → more negative location.x / look at.x  (e.g. -3.5 / -4.5)
+  # Farther → less negative (e.g. -1.5 / -2.5)
+  # NOTE: positive X moves AWAY from the volume (looks farther).
+  location: {x: -3.20, y: 0.0, z: 0.0}
+  look at: {x: -4.20, y: 0.0, z: 0.0}
+  up: {x: 0.0, y: 0.0, z: 1.0}
+  clipping plane: {near: 0.01, far: 100}
+  field view angle: 0.7 # overridden by OpenVR plugin from the HMD
+  # Off-screen: plugin renders to FBOs and submits to SteamVR.
+  monitor: 0
+  visible: false
+  parent: main_camera
+  plugins: [
+    {
+      name: openvr_plugin,
+      # Relative to this ADF file: src/volumetric_drilling/ADF -> src/ambf_openvr_plugin/build
+      path: ../../ambf_openvr_plugin/build/,
+      filename: libambf_openvr_camera.so
+    }
+  ]

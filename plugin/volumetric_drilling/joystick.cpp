@@ -170,34 +170,58 @@ std::string JoyStick::findFootSwitchDevice() {
 /// \return
 ///
 int JoyStick::init(string dev_name){
+    auto isKeyboardPath = [](const string& path) -> bool {
+        return path.find("event-kbd") != string::npos
+            || path.find("FootSwitch") != string::npos
+            || path.find("/event") != string::npos;
+    };
+    auto printAccessHint = [](){
+        std::cout << "ERROR! No permission to read the footpedal. Drill pedals need /dev/input access.\n"
+                  << "       Fix with:\n"
+                  << "         sudo cp scripts/udev/99-volumetric-drilling-input.rules /etc/udev/rules.d/\n"
+                  << "         sudo usermod -aG input \"$USER\"\n"
+                  << "         sudo udevadm control --reload-rules && sudo udevadm trigger\n"
+                  << "       then log out and back in. Falling back to X11 key polling." << std::endl;
+    };
+
     m_js = open(dev_name.c_str(), O_RDONLY | O_NONBLOCK);
 
-    if (m_js == -1){
-        std::cout << "Could not open " << dev_name << ", looking for FootSwitch..." << std::endl;
-        
-        // If joystick fails, look for FootSwitch
-        std::string footSwitchDevice = findFootSwitchDevice();
-        if (!footSwitchDevice.empty()) {
-            m_js = open(footSwitchDevice.c_str(), O_RDONLY | O_NONBLOCK);
-            if (m_js != -1) {
-                std::cout << "Successfully opened FootSwitch device: " << footSwitchDevice << std::endl;
-                m_isKeyboard = true; // Mark as keyboard device
-                return 1;
-            } else {
-                std::cout << "Failed to open FootSwitch device " << footSwitchDevice << " (error: " << strerror(errno) << ")" << std::endl;
-            }
-        }
-        
-        // If both attempts fail, keep analog at released (-1) so the drill stays off.
-        std::cout << "Could not find any input device, using default state." << std::endl;
-        m_state.m_axes[0] = -1.0;
-        return -1;
-    }
-    else{
-        std::cout << "Successfully opened joystick device: " << dev_name << std::endl;
-        m_isKeyboard = false;
+    if (m_js != -1){
+        m_isKeyboard = isKeyboardPath(dev_name);
+        std::cout << "Successfully opened "
+                  << (m_isKeyboard ? "keyboard footpedal" : "joystick")
+                  << " device: " << dev_name << std::endl;
         return 1;
     }
+
+    const int openErrno = errno;
+    std::cout << "Could not open " << dev_name
+              << " (" << strerror(openErrno) << ")" << std::endl;
+    if (openErrno == EACCES){
+        printAccessHint();
+    }
+
+    // If configured path failed, look for PCsensor FootSwitch keyboard HID.
+    std::string footSwitchDevice = findFootSwitchDevice();
+    if (!footSwitchDevice.empty() && footSwitchDevice != dev_name) {
+        m_js = open(footSwitchDevice.c_str(), O_RDONLY | O_NONBLOCK);
+        if (m_js != -1) {
+            std::cout << "Successfully opened FootSwitch device: " << footSwitchDevice << std::endl;
+            m_isKeyboard = true;
+            return 1;
+        }
+        const int fsErrno = errno;
+        std::cout << "Failed to open FootSwitch device " << footSwitchDevice
+                  << " (error: " << strerror(fsErrno) << ")" << std::endl;
+        if (fsErrno == EACCES){
+            printAccessHint();
+        }
+    }
+
+    // Keep analog at released (-1) so the drill stays off until a pedal is held.
+    std::cout << "Could not open a footpedal device; X11 key fallback may still work." << std::endl;
+    m_state.m_axes[0] = -1.0;
+    return -1;
 }
 
 bool JoyStick::isAvailable(){
@@ -215,7 +239,7 @@ int JoyStick::readEvent(int fd, struct js_event *event){
     ssize_t bytes;
     bytes = read(fd, event, sizeof(*event));
 
-    if (bytes == sizeof(event))
+    if (bytes == (ssize_t)sizeof(*event))
         return 0;
 
     /* Error, could not read full event. */
@@ -268,27 +292,28 @@ double JoyStick::getPedalState(int pedal_index){
 void JoyStick::poll()
 {
     if (m_isKeyboard) {
-        if (readKeyboardEvent(m_js, &m_keyboard_event) == 0) {
-            if (m_keyboard_event.type == EV_KEY) {
-                int button_index = -1;
-                
-                // Map FootSwitch keys to non-conflicting custom key codes
-                if (m_keyboard_event.code == KEY_F18) { // Fn23 key from FootSwitch
-                    button_index = 3; // Custom high key code instead of B
-                }
-                else if (m_keyboard_event.code == KEY_F19) { // Fn24 key from FootSwitch
-                    button_index = 4; // Custom high key code instead of C
-                }
-                // Add more mappings if needed
-                else if (m_keyboard_event.code == KEY_F17) { // Fn22 key from FootSwitch
-                    button_index = 5; // Custom high key code instead of A
-                }
-                
-                if (button_index != -1 && button_index < m_state.m_buttons.size()) {
-                    m_state.m_buttons[button_index] = m_keyboard_event.value;
-                }
+        // Drain the keyboard event queue (same idea as joystick).
+        for (int n = 0; n < 32; n++){
+            if (readKeyboardEvent(m_js, &m_keyboard_event) != 0) {
+                break;
             }
-            fflush(stdout);
+            if (m_keyboard_event.type != EV_KEY) {
+                continue;
+            }
+            int button_index = -1;
+            // Ikkegol factory map: left=a, middle=b, right=c.
+            if (m_keyboard_event.code == KEY_A) {
+                button_index = static_cast<int>(3); // FootPedalKeyboardMap::BURR_STYLE
+            }
+            else if (m_keyboard_event.code == KEY_B) {
+                button_index = static_cast<int>(4); // FootPedalKeyboardMap::DRILL_ON
+            }
+            else if (m_keyboard_event.code == KEY_C) {
+                button_index = static_cast<int>(5); // FootPedalKeyboardMap::CHANGE_BURR_SIZE
+            }
+            if (button_index != -1 && button_index < (int)m_state.m_buttons.size()) {
+                m_state.m_buttons[button_index] = m_keyboard_event.value;
+            }
         }
     }
     else {
