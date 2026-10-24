@@ -1,0 +1,32 @@
+# OpenXR Desk MR camera — SEPARATE trial from the OpenXR eyepiece (ADF 15).
+# World-locked stereo + WiVRn passthrough. Does not use cam-clutch / lap panel.
+# Requires: WiVRn + Quest connected, and
+#   ~/ros_ambf_ws/src/ambf_openxr_desk_mr/build/libambf_openxr_desk_mr.so
+# See docs/QUEST_DESK_MR.md
+bodies: []
+joints: []
+cameras: [openxr_desk_mr]
+high resolution path: ./meshes/high_res/
+low resolution path: ./meshes/low_res/
+ignore inter-collision: false
+namespace: /ambf/env/
+
+openxr_desk_mr:
+  namespace: cameras/
+  name: openxr_desk_mr
+  # Identity dolly under main_camera. Plugin drives main_camera from HMD at 1:1 scale.
+  location: {x: 0.0, y: 0.0, z: 0.0}
+  look at: {x: -1.0, y: 0.0, z: 0.0}
+  up: {x: 0.0, y: 0.0, z: 1.0}
+  clipping plane: {near: 0.01, far: 100}
+  field view angle: 1.0 # overridden by OpenXR FOV per eye
+  monitor: 0
+  visible: false
+  parent: main_camera
+  plugins: [
+    {
+      name: openxr_desk_mr_plugin,
+      path: ../../ambf_openxr_desk_mr/build/,
+      filename: libambf_openxr_desk_mr.so
+    }
+  ]

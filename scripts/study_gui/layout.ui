@@ -334,6 +334,16 @@
            </widget>
           </item>
           <item>
+           <widget class="QCheckBox" name="check_openxr_desk_mr">
+            <property name="toolTip">
+             <string>SEPARATE trial: WiVRn passthrough + world-locked volume on desk (ADF 16). Does not use the eyepiece plugin. Mutually exclusive with OpenVR / OpenXR eyepiece.</string>
+            </property>
+            <property name="text">
+             <string>Desk MR passthrough (trial)</string>
+            </property>
+           </widget>
+          </item>
+          <item>
            <spacer name="recordingSpacer">
             <property name="orientation">
              <enum>Qt::Horizontal</enum>

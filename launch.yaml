@@ -28,3 +28,4 @@ multibody configs:
   - "ADF/volume_EMMJ5MW1_114334_smoothed.yaml" #13
   - "ADF/openvr_camera.yaml" #14 — Meta Quest / SteamVR via ambf_openvr_plugin
   - "ADF/openxr_eyepiece_camera.yaml" #15 — Meta Quest / WiVRn OpenXR head-locked eyepiece
+  - "ADF/openxr_desk_mr_camera.yaml" #16 — SEPARATE trial: Desk MR passthrough (ambf_openxr_desk_mr)

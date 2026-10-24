@@ -319,6 +319,7 @@ class Ui(QtWidgets.QWidget):
         self.check_stream_depth = self.findChild(QtWidgets.QCheckBox, "check_stream_depth")
         self.check_openvr_hmd = self.findChild(QtWidgets.QCheckBox, "check_openvr_hmd")
         self.check_openxr_eyepiece = self.findChild(QtWidgets.QCheckBox, "check_openxr_eyepiece")
+        self.check_openxr_desk_mr = self.findChild(QtWidgets.QCheckBox, "check_openxr_desk_mr")
         self.check_video_record = self.findChild(QtWidgets.QCheckBox, "check_video_record")
         self.check_pupil_capture = self.findChild(QtWidgets.QCheckBox, "check_pupil_capture")
         self.check_pupil_capture.toggled.connect(self.pupil_capture_toggled)
@@ -517,22 +518,30 @@ class Ui(QtWidgets.QWidget):
             self._current_args = []
             # Base: drills(0) + gaze_marker(7). World main_camera is the on-screen view.
             # OpenXR eyepiece (WiVRn) = ADF 15. Legacy OpenVR/SteamVR = ADF 14.
+            # Desk MR passthrough trial = ADF 16 (SEPARATE plugin; mutually exclusive).
+            use_desk_mr = bool(
+                self.check_openxr_desk_mr is not None and self.check_openxr_desk_mr.isChecked()
+            )
             use_openxr = bool(
-                self.check_openxr_eyepiece is not None
+                not use_desk_mr
+                and self.check_openxr_eyepiece is not None
                 and self.check_openxr_eyepiece.isChecked()
             )
             use_openvr = bool(
-                not use_openxr
+                not use_desk_mr
+                and not use_openxr
                 and self.check_openvr_hmd is not None
                 and self.check_openvr_hmd.isChecked()
             )
             launch_file_adf_indices = "0,7"
-            if use_openxr:
+            if use_desk_mr:
+                launch_file_adf_indices = launch_file_adf_indices + ",16"
+            elif use_openxr:
                 launch_file_adf_indices = launch_file_adf_indices + ",15"
             elif use_openvr:
                 launch_file_adf_indices = launch_file_adf_indices + ",14"
-            use_hmd = use_openxr or use_openvr
-            use_wivrn = use_openxr
+            use_hmd = use_desk_mr or use_openxr or use_openvr
+            use_wivrn = use_desk_mr or use_openxr
             if not use_hmd and self.check_stream_depth.isChecked():
                 launch_file_adf_indices = launch_file_adf_indices + ",4"
             if not use_hmd and self.check_stream_stereo.isChecked():
@@ -615,11 +624,21 @@ class Ui(QtWidgets.QWidget):
                     self.print_info(
                         f"WARNING! WiVRn IPC missing ({ipc}) — is the WiVRn server running?"
                     )
+            if use_desk_mr:
+                # Separate trial defaults: passthrough on; punch fixed via ping-pong in plugin.
+                env.insert("AMBF_OPENXR_PASSTHROUGH", "1")
+                # If Quest is still blank, relaunch with AMBF_OPENXR_PASSTHROUGH=0 for opaque VR.
+                self.print_info(
+                    "Desk MR trial: volume snaps in front of HMD on first track; "
+                    "desktop preview uses ~35° FOV + 6x scale"
+                )
             # ADF paths in launch.yaml are relative to the repo root.
             repo_root = pathlib.Path(self.gui_configuration.launch_file.get()).expanduser().resolve().parent
             self._ambf_process.setWorkingDirectory(str(repo_root))
             self._ambf_process.setProcessEnvironment(env)
-            if use_openxr:
+            if use_desk_mr:
+                mode = "Desk MR passthrough (trial)"
+            elif use_openxr:
                 mode = "OpenXR eyepiece (WiVRn)"
             elif use_openvr:
                 mode = "OpenVR legacy"

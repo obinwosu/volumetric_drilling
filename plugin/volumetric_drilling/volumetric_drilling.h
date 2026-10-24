@@ -69,6 +69,9 @@ public:
     virtual void reset() override;
     virtual bool close() override;
 
+    /// Desk MR: put drill tip beside the volume (also called from openxr_desk_mr via C export).
+    void placeDeskMrDrillNearVolume();
+
 protected:
     void sliceVolume(int axisIdx, double delta);
 
@@ -149,6 +152,15 @@ protected:
 
     void requestDrillReposition();
 
+    // Desk MR trial only (ADF 16 / openxr_desk_mr). No-ops unless that camera is loaded.
+    bool deskMrActive() const { return m_openxrDeskMrCamera != nullptr; }
+    string deskMrPosePath() const;
+    void applyDeskMrDefaultVolumePose();
+    bool loadDeskMrVolumePose();
+    bool saveDeskMrVolumePose();
+    void nudgeDeskMrVolume(const cVector3d& deltaAu, double yawDeg, double scaleMul);
+    void handleDeskMrPlacementKeys(GLFWwindow* a_window, int a_key, int a_action, int a_mods);
+
 private:
 
     cVoxelObject* m_voxelObj;
@@ -178,6 +190,10 @@ private:
     // Present when ADF 14 (OpenVR) or ADF 15 (OpenXR eyepiece) is loaded.
     afCameraPtr m_openvrCamera = nullptr;
     afCameraPtr m_openxrEyepieceCamera = nullptr;
+    // SEPARATE trial: ADF 16 Desk MR passthrough (does not alter eyepiece behavior).
+    afCameraPtr m_openxrDeskMrCamera = nullptr;
+    double m_deskMrMetersPerAu = 0.049664;
+    double m_deskMrVolumeScale = 1.0;
     typedef void (*HmdCamClutchFn)(int);
     typedef void (*OpenxrVoidFn)(void);
     typedef void (*OpenxrIntFn)(int);

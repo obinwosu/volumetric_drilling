@@ -65,6 +65,13 @@ extern "C" int ambf_drilling_cam_clutch(void){
     return g_drillingCamClutch.load();
 }
 
+/// Called by ambf_openxr_desk_mr after it snaps the volume in front of the HMD.
+extern "C" void ambf_desk_mr_place_drill_near_volume(void){
+    if (g_drillingPlugin){
+        g_drillingPlugin->placeDeskMrDrillNearVolume();
+    }
+}
+
 #define GLFW_EXPOSE_NATIVE_X11
 #include <GLFW/glfw3native.h>
 #include <X11/Xlib.h>
@@ -167,6 +174,7 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
     m_stereoCamera = findAndAppendCamera("stereoLR");
     m_openvrCamera = findAndAppendCamera("openvr_cam");
     m_openxrEyepieceCamera = findAndAppendCamera("openxr_eyepiece");
+    m_openxrDeskMrCamera = findAndAppendCamera("openxr_desk_mr");
 
     if (m_cameras.size() == 0){
         cerr << "ERROR! NO CAMERAS FOUND. " << endl;
@@ -178,14 +186,29 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
         m_mainCamera = m_worldPtr->getCameras()[0];
     }
 
+    if (m_openxrEyepieceCamera && m_openxrDeskMrCamera){
+        cerr << "WARNING! Both OpenXR eyepiece and Desk MR cameras loaded — "
+             << "prefer launching only one (ADF 15 or 16)" << endl;
+    }
+
     if (m_openvrCamera || m_openxrEyepieceCamera){
         // HMD plugins often load after simulator init — resolve clutch exports lazily.
+        // Desk MR is world-locked (no clutch); do not fold it into eyepiece clutch ownership.
         m_drillManager.m_vrHmdOwnsCamClutch = true;
         if (m_openxrEyepieceCamera){
             cerr << "INFO! OpenXR eyepiece present — cam-clutch gates HMD→main_camera" << endl;
         }
         if (m_openvrCamera){
             cerr << "INFO! OpenVR camera present — cam-clutch gates HMD→main_camera" << endl;
+        }
+    }
+    if (m_openxrDeskMrCamera){
+        cerr << "INFO! OpenXR Desk MR present (SEPARATE trial) — passthrough + world-locked volume" << endl;
+        if (const char* mpu = getenv("AMBF_OPENXR_M_PER_AU")){
+            const double v = atof(mpu);
+            if (v > 1e-6 && v < 10.0){
+                m_deskMrMetersPerAu = v;
+            }
         }
     }
 
@@ -204,6 +227,9 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
     }
     if (m_openxrEyepieceCamera){
         m_panelManager.addCamera(m_openxrEyepieceCamera);
+    }
+    if (m_openxrDeskMrCamera){
+        m_panelManager.addCamera(m_openxrDeskMrCamera);
     }
 
     if (!m_drillManager.init(a_afWorld, &m_panelManager, var_map)){
@@ -283,6 +309,8 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
     addBlackBackdrop(m_stereoCamera);
     addBlackBackdrop(m_openvrCamera);
     addBlackBackdrop(m_openxrEyepieceCamera);
+    // Desk MR: leave HMD FBO clear (no opaque black) so passthrough shows through.
+    // Do NOT add a black backdrop to m_openxrDeskMrCamera.
     // Hide legacy checkered floor / bright planes if an older world ADF still loads them.
     if (afRigidBodyPtr floor = m_worldPtr->getRigidBody("Plane", true)){
         if (floor->getVisualObject()){
@@ -308,7 +336,20 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
     m_volumeLookAt = m_volumeObject->getLocalTransform().getLocalPos();
     m_cameraHomeUp = m_mainCamera->getUpVector();
     loadCanonicalViews();
-    applyStartupView();
+    // Desk MR trial: place volume in seated LOCAL space (saved pose or default).
+    // Eyepiece / desktop keep ADF + canonical startup views unchanged.
+    if (deskMrActive()){
+        if (!loadDeskMrVolumePose()){
+            applyDeskMrDefaultVolumePose();
+        }
+        m_volumeLookAt = m_volumeObject->getLocalTransform().getLocalPos();
+        placeDeskMrDrillNearVolume();
+        cerr << "INFO! Desk MR volume placement active — Ctrl+Shift+Arrows nudge, "
+             << "Ctrl+Shift+S save, Ctrl+Shift+L reload/default, F9 resnap drill" << endl;
+    }
+    else{
+        applyStartupView();
+    }
     cFontPtr font = NEW_CFONTCALIBRI36();
     m_calibrationWarningLabel = new cLabel(font);
     m_calibrationWarningLabel->m_fontColor.setBlack();
@@ -1045,6 +1086,290 @@ bool afVolmetricDrillingPlugin::isLetterKeyHeld(int glfwKey) const
     return false;
 }
 
+string afVolmetricDrillingPlugin::deskMrPosePath() const
+{
+    const char* home = getenv("HOME");
+    fs::path p = fs::path(home ? home : ".") / ".config" / "fivrs" / "desk_mr_volume_pose.yaml";
+    return p.string();
+}
+
+void afVolmetricDrillingPlugin::applyDeskMrDefaultVolumePose()
+{
+    if (!m_volumeObject || !m_mainCamera){
+        return;
+    }
+    // CT ADF voxels are ~1 AU ≈ 5 cm. At 0.5 m + 60° FOV they look tiny ("zoomed out").
+    // Preview: large volume, close camera, moderate FOV. HMD plugin re-snaps on first track.
+    const double s = (m_deskMrMetersPerAu > 1e-9) ? (1.0 / m_deskMrMetersPerAu) : 1.0;
+    const double wantScale = 6.0;
+    if (fabs(m_deskMrVolumeScale - 1.0) < 1e-6){
+        m_volumeObject->scaleSceneObjects(wantScale);
+        m_deskMrVolumeScale = wantScale;
+    }
+    const cVector3d camPos(0.0, 0.0, 0.22 * s);
+    const cVector3d lookDir(-1.0, 0.0, 0.0);
+    const cVector3d up(0.0, 0.0, 1.0);
+    const cVector3d volPos = camPos + lookDir * (0.28 * s) + cVector3d(0.0, 0.0, -0.06 * s);
+
+    cTransform T = m_volumeObject->getLocalTransform();
+    T.setLocalPos(volPos);
+    m_volumeObject->setLocalTransform(T);
+    m_volumeLookAt = volPos;
+
+    m_mainCamera->setView(camPos, volPos, up);
+    if (m_mainCamera->getInternalCamera()){
+        // ~35° — fills the desktop with the scaled volume without microscope telephoto.
+        m_mainCamera->getInternalCamera()->setFieldViewAngleDeg(35.0);
+    }
+    m_originalCameraTransform = m_mainCamera->getLocalTransform();
+
+    m_spotCutoffRad = 0.9;
+    m_spotFocus = 1.0;
+    applyVolumeLightingUniforms();
+    if (afLightPtr L = m_worldPtr->getLight("light1", true)){
+        L->setCutOffAngle(m_spotCutoffRad);
+    }
+
+    cerr << "INFO! Desk MR default volume at AMBF " << volPos.str()
+         << " scale x" << m_deskMrVolumeScale
+         << " (cam " << camPos.str() << ", ~0.28 m, 35° FOV)" << endl;
+}
+
+bool afVolmetricDrillingPlugin::loadDeskMrVolumePose()
+{
+    if (!m_volumeObject){
+        return false;
+    }
+    ifstream in(deskMrPosePath());
+    if (!in.is_open()){
+        return false;
+    }
+    auto trim = [](string s){
+        while (!s.empty() && isspace((unsigned char)s.front())) s.erase(s.begin());
+        while (!s.empty() && isspace((unsigned char)s.back())) s.pop_back();
+        return s;
+    };
+    auto parseArr = [&](const string& s){
+        vector<double> out;
+        string cur;
+        for (char c : s){
+            if (c == '[' || c == ']' || c == ','){
+                if (!cur.empty()){
+                    out.push_back(atof(cur.c_str()));
+                    cur.clear();
+                }
+            }
+            else if (!isspace((unsigned char)c)){
+                cur.push_back(c);
+            }
+        }
+        if (!cur.empty()){
+            out.push_back(atof(cur.c_str()));
+        }
+        return out;
+    };
+
+    cVector3d pos = m_volumeObject->getLocalTransform().getLocalPos();
+    cQuaternion quat;
+    quat.fromRotMat(m_volumeObject->getLocalTransform().getLocalRot());
+    double scale = 1.0;
+    string line;
+    while (getline(in, line)){
+        string raw = trim(line);
+        if (raw.empty() || raw[0] == '#'){
+            continue;
+        }
+        size_t colon = raw.find(':');
+        if (colon == string::npos){
+            continue;
+        }
+        string key = trim(raw.substr(0, colon));
+        string val = trim(raw.substr(colon + 1));
+        if (key == "t"){
+            vector<double> arr = parseArr(val);
+            if (arr.size() >= 3){
+                pos.set(arr[0], arr[1], arr[2]);
+            }
+        }
+        else if (key == "q"){
+            vector<double> arr = parseArr(val);
+            if (arr.size() >= 4){
+                quat = cQuaternion(arr[3], arr[0], arr[1], arr[2]); // w,x,y,z from x,y,z,w file
+            }
+        }
+        else if (key == "scale"){
+            scale = atof(val.c_str());
+            if (scale < 0.05){
+                scale = 0.05;
+            }
+            if (scale > 20.0){
+                scale = 20.0;
+            }
+        }
+    }
+    cMatrix3d R;
+    quat.toRotMat(R);
+    cTransform T;
+    T.set(pos, R);
+    if (m_deskMrVolumeScale > 1e-6 && fabs(scale - m_deskMrVolumeScale) > 1e-6){
+        m_volumeObject->scaleSceneObjects(scale / m_deskMrVolumeScale);
+    }
+    m_deskMrVolumeScale = scale;
+    m_volumeObject->setLocalTransform(T);
+    m_volumeLookAt = pos;
+
+    // Preview camera: sit ~0.5 m back along +X from volume, look at it.
+    if (m_mainCamera){
+        const double s = (m_deskMrMetersPerAu > 1e-9) ? (1.0 / m_deskMrMetersPerAu) : 1.0;
+        cVector3d camPos = pos + cVector3d(0.50 * s, 0.0, 0.18 * s);
+        m_mainCamera->setView(camPos, pos, cVector3d(0.0, 0.0, 1.0));
+        if (m_mainCamera->getInternalCamera()){
+            m_mainCamera->getInternalCamera()->setFieldViewAngleDeg(60.0);
+        }
+        m_originalCameraTransform = m_mainCamera->getLocalTransform();
+        m_spotCutoffRad = 0.7;
+        m_spotFocus = 1.0;
+        applyVolumeLightingUniforms();
+        if (m_worldPtr){
+            if (afLightPtr L = m_worldPtr->getLight("light1", true)){
+                L->setCutOffAngle(m_spotCutoffRad);
+            }
+        }
+    }
+
+    cerr << "INFO! Desk MR volume pose loaded from " << deskMrPosePath() << endl;
+    return true;
+}
+
+bool afVolmetricDrillingPlugin::saveDeskMrVolumePose()
+{
+    if (!m_volumeObject){
+        return false;
+    }
+    fs::path path(deskMrPosePath());
+    std::error_code ec;
+    fs::create_directories(path.parent_path(), ec);
+    ofstream out(path);
+    if (!out.is_open()){
+        cerr << "ERROR! Desk MR could not write " << path << endl;
+        return false;
+    }
+    cTransform T = m_volumeObject->getLocalTransform();
+    cVector3d p = T.getLocalPos();
+    cQuaternion q;
+    q.fromRotMat(T.getLocalRot());
+    out << "# FIVRS Desk MR volume pose (AMBF units). SEPARATE trial from eyepiece.\n";
+    out << "t: [" << p.x() << ", " << p.y() << ", " << p.z() << "]\n";
+    out << "q: [" << q.x << ", " << q.y << ", " << q.z << ", " << q.w << "]\n";
+    out << "scale: " << m_deskMrVolumeScale << "\n";
+    cerr << "INFO! Desk MR volume pose saved to " << path << endl;
+    showNotice("Desk MR pose saved");
+    return true;
+}
+
+void afVolmetricDrillingPlugin::nudgeDeskMrVolume(const cVector3d& deltaAu, double yawDeg, double scaleMul)
+{
+    if (!m_volumeObject){
+        return;
+    }
+    cTransform T = m_volumeObject->getLocalTransform();
+    T.setLocalPos(T.getLocalPos() + deltaAu);
+    if (fabs(yawDeg) > 1e-9){
+        cMatrix3d R;
+        R.setExtrinsicEulerRotationDeg(0.0, 0.0, yawDeg, C_EULER_ORDER_XYZ);
+        T.setLocalRot(T.getLocalRot() * R);
+    }
+    if (fabs(scaleMul - 1.0) > 1e-9){
+        double newScale = m_deskMrVolumeScale * scaleMul;
+        if (newScale < 0.05) newScale = 0.05;
+        if (newScale > 20.0) newScale = 20.0;
+        m_volumeObject->scaleSceneObjects(newScale / m_deskMrVolumeScale);
+        m_deskMrVolumeScale = newScale;
+    }
+    m_volumeObject->setLocalTransform(T);
+    m_volumeLookAt = T.getLocalPos();
+}
+
+void afVolmetricDrillingPlugin::handleDeskMrPlacementKeys(GLFWwindow*, int a_key, int a_action, int)
+{
+    if (a_action != GLFW_PRESS && a_action != GLFW_REPEAT){
+        return;
+    }
+    // ~2 cm per nudge at conversion factor 0.049664 m/AU.
+    const double step = 0.02 / m_deskMrMetersPerAu;
+    if (a_key == GLFW_KEY_UP){
+        nudgeDeskMrVolume(cVector3d(-step, 0, 0), 0, 1.0); // forward (-X look convention)
+        showNotice("Desk MR: nudge forward");
+    }
+    else if (a_key == GLFW_KEY_DOWN){
+        nudgeDeskMrVolume(cVector3d(step, 0, 0), 0, 1.0);
+        showNotice("Desk MR: nudge back");
+    }
+    else if (a_key == GLFW_KEY_LEFT){
+        nudgeDeskMrVolume(cVector3d(0, -step, 0), 0, 1.0);
+        showNotice("Desk MR: nudge left");
+    }
+    else if (a_key == GLFW_KEY_RIGHT){
+        nudgeDeskMrVolume(cVector3d(0, step, 0), 0, 1.0);
+        showNotice("Desk MR: nudge right");
+    }
+    else if (a_key == GLFW_KEY_PAGE_UP){
+        nudgeDeskMrVolume(cVector3d(0, 0, step), 0, 1.0);
+        showNotice("Desk MR: raise");
+    }
+    else if (a_key == GLFW_KEY_PAGE_DOWN){
+        nudgeDeskMrVolume(cVector3d(0, 0, -step), 0, 1.0);
+        showNotice("Desk MR: lower");
+    }
+    else if (a_key == GLFW_KEY_COMMA){
+        nudgeDeskMrVolume(cVector3d(0, 0, 0), 5.0, 1.0);
+        showNotice("Desk MR: yaw -5°");
+    }
+    else if (a_key == GLFW_KEY_PERIOD){
+        nudgeDeskMrVolume(cVector3d(0, 0, 0), -5.0, 1.0);
+        showNotice("Desk MR: yaw +5°");
+    }
+    else if (a_key == GLFW_KEY_MINUS || a_key == GLFW_KEY_KP_SUBTRACT){
+        nudgeDeskMrVolume(cVector3d(0, 0, 0), 0, 0.95);
+        showNotice("Desk MR: scale down");
+    }
+    else if (a_key == GLFW_KEY_EQUAL || a_key == GLFW_KEY_KP_ADD){
+        nudgeDeskMrVolume(cVector3d(0, 0, 0), 0, 1.05);
+        showNotice("Desk MR: scale up");
+    }
+    else if (a_key == GLFW_KEY_S){
+        saveDeskMrVolumePose();
+    }
+    else if (a_key == GLFW_KEY_L){
+        if (!loadDeskMrVolumePose()){
+            applyDeskMrDefaultVolumePose();
+            showNotice("Desk MR: default pose");
+        }
+        else{
+            showNotice("Desk MR: pose reloaded");
+        }
+    }
+}
+
+void afVolmetricDrillingPlugin::placeDeskMrDrillNearVolume()
+{
+    if (!deskMrActive() || !m_volumeObject){
+        return;
+    }
+    cVector3d dims = m_volumeObject->getDimensions();
+    // Scaled volumes keep ADF dimensions; expand standoff roughly with visual scale.
+    dims = dims * m_deskMrVolumeScale;
+    m_volumeLookAt = m_volumeObject->getLocalTransform().getLocalPos();
+    if (!m_drillManager.snapToCameraView(m_volumeLookAt, dims,
+                                         m_volumeObject->getLocalTransform())){
+        cerr << "WARNING! Desk MR: could not place drill near volume" << endl;
+        return;
+    }
+    showNotice("Desk MR: drill placed near volume");
+    cerr << "INFO! Desk MR drill snapped beside volume at "
+         << m_drillManager.m_T_d.getLocalPos().str() << endl;
+}
+
 void afVolmetricDrillingPlugin::requestDrillReposition()
 {
     if (!m_volumeObject || !m_mainCamera){
@@ -1743,7 +2068,18 @@ string afVolmetricDrillingPlugin::controlHelpText(bool paused) const
     if (!paused){
         s += "  Pause / Resume         Double-tap Stylus 1  or  Ctrl + P\n";
     }
-    s +=
+    if (deskMrActive()){
+        s +=
+            "  DESK MR (passthrough trial)\n"
+            "  Nudge volume           Ctrl+Shift+Arrows / PgUp / PgDn\n"
+            "  Yaw volume             Ctrl+Shift+, / .\n"
+            "  Scale volume           Ctrl+Shift+- / =\n"
+            "  Save / reload pose     Ctrl+Shift+S / L\n"
+            "  Resnap drill to volume F9  or  double-tap Stylus 2\n"
+            "  Drill (hold-to-run)    Middle pedal (b) — Omni moves tip in view\n";
+    }
+    else{
+        s +=
             "  Camera clutch          Hold 1  or  Stylus 1  or  Alt (HMD)\n"
             "  Drill (hold-to-run)    Middle pedal (b)\n"
             "  Burr style / size      Left pedal (a) / Right pedal (c)\n"
@@ -1761,6 +2097,7 @@ string afVolmetricDrillingPlugin::controlHelpText(bool paused) const
             "  Attenuation none/mild  F6        , . linear\n"
             "  Beam narrower / wider  F7 / F8\n"
             "  Beam softer / tighter  ; / '\n";
+    }
     return s;
 }
 
@@ -2037,13 +2374,20 @@ void afVolmetricDrillingPlugin::keyboardUpdate(GLFWwindow *a_window, int a_key, 
         return;
     }
 
+    // Desk MR volume place (Ctrl+Shift+…) — only when ADF 16 is loaded.
+    if (deskMrActive() && ctrl && shift && !alt){
+        handleDeskMrPlacementKeys(a_window, a_key, a_action, a_mods);
+        return;
+    }
+
     if (a_action == GLFW_PRESS && a_key == GLFW_KEY_F9 && !ctrl && !alt){
         requestDrillReposition();
         return;
     }
 
     // WiVRn / OpenXR eyepiece scene placement (LOCAL panel): drag + snap.
-    if (m_openxrEyepieceCamera && !ctrl && !alt){
+    // Skipped for Desk MR (world-locked; no lap panel).
+    if (m_openxrEyepieceCamera && !m_openxrDeskMrCamera && !ctrl && !alt){
         ensureOpenxrPlacementFns();
         if (a_key == GLFW_KEY_F10 && m_openxrSetPlaceDrag){
             m_openxrSetPlaceDrag((a_action == GLFW_RELEASE) ? 0 : 1);
