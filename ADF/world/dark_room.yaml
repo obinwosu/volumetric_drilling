@@ -1,5 +1,5 @@
-# Empty dark OR environment — no floor/walls so empty space stays black
-# under the microscope spotlight (see world.yaml).
+# Empty OR — no floor or walls. Empty space is the room gray set by the
+# drilling plugin (Shift+[ / Shift+] from black to white).
 bodies: []
 joints: []
 high resolution path: ./high_res/

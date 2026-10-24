@@ -88,6 +88,9 @@ protected:
     void dollyCamera(double distanceTowardVolume);
 
     void applyVolumeLightingUniforms();
+    // Empty-space color behind the microscope beam. 0 = black, 20 = white.
+    void applyRoomGray();
+    void nudgeRoomGray(int deltaSteps);
 
     struct CanonicalView {
         string id;
@@ -217,6 +220,9 @@ private:
     double m_spotCutoffRad = 0.15;
     // 1 = smooth fade to the cone edge. Higher pulls brightness toward the axis.
     double m_spotFocus = 2.0;
+    // Room gray in 5% steps. 3 = 15%, the surreal simulator room (0.14–0.15).
+    int m_roomGrayStep = 3;
+    std::vector<cBackground*> m_roomBackdrops;
 
     cLabel* m_volumeSmoothingLabel;
 

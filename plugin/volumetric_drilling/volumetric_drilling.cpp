@@ -264,25 +264,20 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
 
 
 
-    // Dark operating room. Microscope beam is the only light; empty space = black.
-    if (m_worldPtr && m_worldPtr->getChaiWorld()){
-        m_worldPtr->getChaiWorld()->setBackgroundColor(0.0f, 0.0f, 0.0f);
-    }
-    auto addBlackBackdrop = [](afCameraPtr cam){
+    // Dull gray room behind the microscope beam (same idea as the surreal sim).
+    auto addRoomBackdrop = [this](afCameraPtr cam){
         if (!cam){
             return;
         }
         cBackground* background = new cBackground();
-        background->setCornerColors(cColorf(0.0f, 0.0f, 0.0f),
-                                    cColorf(0.0f, 0.0f, 0.0f),
-                                    cColorf(0.0f, 0.0f, 0.0f),
-                                    cColorf(0.0f, 0.0f, 0.0f));
         cam->getBackLayer()->addChild(background);
+        m_roomBackdrops.push_back(background);
     };
-    addBlackBackdrop(m_mainCamera);
-    addBlackBackdrop(m_stereoCamera);
-    addBlackBackdrop(m_openvrCamera);
-    addBlackBackdrop(m_openxrEyepieceCamera);
+    addRoomBackdrop(m_mainCamera);
+    addRoomBackdrop(m_stereoCamera);
+    addRoomBackdrop(m_openvrCamera);
+    addRoomBackdrop(m_openxrEyepieceCamera);
+    applyRoomGray();
     // Hide legacy checkered floor / bright planes if an older world ADF still loads them.
     if (afRigidBodyPtr floor = m_worldPtr->getRigidBody("Plane", true)){
         if (floor->getVisualObject()){
@@ -1760,7 +1755,8 @@ string afVolmetricDrillingPlugin::controlHelpText(bool paused) const
             "  Shininess / strength   [ ]   /   - =\n"
             "  Attenuation none/mild  F6        , . linear\n"
             "  Beam narrower / wider  F7 / F8\n"
-            "  Beam softer / tighter  ; / '\n";
+            "  Beam softer / tighter  ; / '\n"
+            "  Room darker / lighter  Shift + [ ]\n";
     return s;
 }
 
@@ -1923,6 +1919,29 @@ void afVolmetricDrillingPlugin::mousePosUpdate(GLFWwindow *a_window, double x_po
     if (m_rightMouseDown){
         m_mainCamera->setLocalRot(m_rightDragRot);
     }
+}
+
+void afVolmetricDrillingPlugin::applyRoomGray()
+{
+    const float g = static_cast<float>(m_roomGrayStep) / 20.0f;
+    const cColorf room(g, g, g);
+    if (m_worldPtr && m_worldPtr->getChaiWorld()){
+        m_worldPtr->getChaiWorld()->setBackgroundColor(g, g, g);
+    }
+    for (cBackground* background : m_roomBackdrops){
+        if (background){
+            background->setCornerColors(room, room, room, room);
+        }
+    }
+}
+
+void afVolmetricDrillingPlugin::nudgeRoomGray(int deltaSteps)
+{
+    m_roomGrayStep = cClamp(m_roomGrayStep + deltaSteps, 0, 20);
+    applyRoomGray();
+    ostringstream msg;
+    msg << "Room " << (m_roomGrayStep * 5) << "% gray";
+    showNotice(msg.str(), 1.5);
 }
 
 void afVolmetricDrillingPlugin::applyVolumeLightingUniforms()
@@ -2345,6 +2364,12 @@ void afVolmetricDrillingPlugin::keyboardUpdate(GLFWwindow *a_window, int a_key, 
                     << "  clamp " << setprecision(2) << m_attClampMin << " to " << m_attClampMax;
                 showNotice(msg.str());
             }
+        }
+        else if ((a_action == GLFW_PRESS || a_action == GLFW_REPEAT) && shift && a_key == GLFW_KEY_LEFT_BRACKET) {
+            nudgeRoomGray(-1);
+        }
+        else if ((a_action == GLFW_PRESS || a_action == GLFW_REPEAT) && shift && a_key == GLFW_KEY_RIGHT_BRACKET) {
+            nudgeRoomGray(1);
         }
         else if ((a_action == GLFW_PRESS || a_action == GLFW_REPEAT) && a_key == GLFW_KEY_LEFT_BRACKET) {
             m_shininess = cClamp(m_shininess - 4.0, 1.0, 128.0);
