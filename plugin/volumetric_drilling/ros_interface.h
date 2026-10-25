@@ -94,6 +94,10 @@ public:
 
     void publishVoxelMsg(double time);
 
+    // Cumulative voxels published. The RTX view reads this from the message
+    // frame_id so it can tell when a removal batch was dropped.
+    uint64_t removedCount() const { return m_removedCount; }
+
     void publishForceFeedback(cVector3d& force, cVector3d& moment, double time);
 
     void publishDrillReposition(const cTransform& poseFrom, const cTransform& poseTo, double time);
@@ -134,6 +138,7 @@ private:
 
     cVector3d m_voxelRemoving_idx;
     bool m_removingVoxel = false;
+    uint64_t m_removedCount = 0;
 };
 
 #endif //ROS_INTERFACE_H

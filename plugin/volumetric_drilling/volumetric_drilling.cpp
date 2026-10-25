@@ -101,7 +101,8 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
             ("anatomy_adf", p_opt::value<string>()->default_value(""), "Path to anatomy ADF (for laterality)")
             ("session_user", p_opt::value<string>()->default_value(""), "Study session user / participant name")
             ("session_anatomy", p_opt::value<string>()->default_value(""), "Study session anatomy display name")
-            ("startup_view", p_opt::value<string>()->default_value(""), "Canonical view id at launch (default|home|<id>)");
+            ("startup_view", p_opt::value<string>()->default_value(""), "Canonical view id at launch (default|home|<id>)")
+            ("rtx_view", p_opt::value<int>()->default_value(0), "Publish status for the optional RTX bone view");
 
     p_opt::variables_map var_map;
     p_opt::store(p_opt::command_line_parser(argc, argv).options(cmd_opts).allow_unregistered().run(), var_map);
@@ -110,6 +111,7 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
     m_sessionUser = var_map["session_user"].as<string>();
     m_sessionAnatomy = var_map["session_anatomy"].as<string>();
     m_startupViewId = var_map["startup_view"].as<string>();
+    m_rtxView = var_map["rtx_view"].as<int>() != 0;
     for (char& c : m_startupViewId){
         c = static_cast<char>(::tolower(c));
     }
@@ -320,6 +322,55 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
     return 1;
 }
 
+void afVolmetricDrillingPlugin::publishRtxStatus(double now)
+{
+    namespace fs = std::filesystem;
+    const fs::path dir = "/tmp/fivrs-rtx";
+    std::error_code mkdirError;
+    fs::create_directories(dir, mkdirError);
+    const uint64_t removed = (m_drillManager.m_drillingPub != nullptr)
+        ? m_drillManager.m_drillingPub->removedCount()
+        : 0;
+    {
+        std::ofstream out(dir / "status.json", std::ios::trunc);
+        if (out){
+            out << "{\n"
+                << "  \"graphics_hz\": " << (m_worldPtr ? m_worldPtr->getGraphicsFrequency() : 0) << ",\n"
+                << "  \"physics_hz\": " << (m_worldPtr ? m_worldPtr->getPhysicsFrequency() : 0) << ",\n"
+                << "  \"removed\": " << removed << ",\n"
+                << "  \"wall_time\": " << std::setprecision(17) << now << "\n"
+                << "}\n";
+        }
+    }
+
+    const fs::path request = dir / "resync.request";
+    if (!fs::exists(request) || m_voxelObj == nullptr || m_voxelObj->m_texture == nullptr){
+        return;
+    }
+    cMultiImagePtr image = dynamic_pointer_cast<cMultiImage>(m_voxelObj->m_texture->m_image);
+    if (image == nullptr || image->getArray() == nullptr){
+        fs::remove(request);
+        return;
+    }
+    const int width = image->getWidth();
+    const int height = image->getHeight();
+    const int depth = static_cast<int>(image->getImageCount());
+    const int bytesPerSlice = static_cast<int>(image->getSizeInBytes());
+    const int voxels = width * height;
+    const int bpp = (voxels > 0) ? bytesPerSlice / voxels : 0;
+    std::ofstream dump(dir / "occupancy.bin", std::ios::binary | std::ios::trunc);
+    if (!dump){
+        return;
+    }
+    const int32_t header[4] = {width, height, depth, bpp};
+    dump.write(reinterpret_cast<const char*>(header), sizeof(header));
+    dump.write(reinterpret_cast<const char*>(image->getArray()),
+               static_cast<std::streamsize>(bytesPerSlice) * depth);
+    dump.close();
+    fs::remove(request);
+    cerr << "INFO! RTX occupancy resync " << width << "x" << height << "x" << depth << endl;
+}
+
 void afVolmetricDrillingPlugin::graphicsUpdate(){
 
     // update region of voxels to be updated
@@ -343,6 +394,20 @@ void afVolmetricDrillingPlugin::graphicsUpdate(){
     double now = m_worldPtr->getWallTime();
     double dt = now - last_time;
     last_time = now;
+
+    if (m_rtxView){
+        if (!m_rtxWindowSized && m_mainCamera && m_mainCamera->m_window){
+            glfwSetWindowSize(m_mainCamera->m_window, 1280, 720);
+            m_rtxWindowSized = true;
+        }
+        if (dt > 0.0 && dt < 0.5){
+            m_rtxStatusTimer += dt;
+        }
+        if (m_rtxStatusTimer >= 0.5){
+            m_rtxStatusTimer = 0.0;
+            publishRtxStatus(now);
+        }
+    }
 
     // While paused (VR HUD up), do not advance study timers or capture video frames.
     // Keep last_time current so unpausing does not apply a large catch-up dt.

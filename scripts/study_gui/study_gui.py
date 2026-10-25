@@ -319,6 +319,7 @@ class Ui(QtWidgets.QWidget):
         self.check_stream_depth = self.findChild(QtWidgets.QCheckBox, "check_stream_depth")
         self.check_openvr_hmd = self.findChild(QtWidgets.QCheckBox, "check_openvr_hmd")
         self.check_openxr_eyepiece = self.findChild(QtWidgets.QCheckBox, "check_openxr_eyepiece")
+        self.check_rtx_view = self.findChild(QtWidgets.QCheckBox, "check_rtx_view")
         self.check_video_record = self.findChild(QtWidgets.QCheckBox, "check_video_record")
         self.check_pupil_capture = self.findChild(QtWidgets.QCheckBox, "check_pupil_capture")
         self.check_pupil_capture.toggled.connect(self.pupil_capture_toggled)
@@ -367,6 +368,7 @@ class Ui(QtWidgets.QWidget):
 
         self._recording_study = False
         self._ambf_process = QProcess()
+        self._rtx_process = QProcess()
         self._ambf_process.readyReadStandardOutput.connect(self.handle_stdout)
         self._ambf_process.readyReadStandardError.connect(self.handle_stderr)
         self._ambf_process.finished.connect(self._simulation_closed)
@@ -559,6 +561,9 @@ class Ui(QtWidgets.QWidget):
                 "--startup_view",
                 self.selected_startup_view_id(),
             ]
+            use_rtx = bool(self.check_rtx_view is not None and self.check_rtx_view.isChecked())
+            if use_rtx:
+                args.extend(["--rtx_view", "1"])
             self._current_args = args
             spacenav = getattr(self.gui_configuration, "spacenav_plugin", "") or ""
             if spacenav and pathlib.Path(spacenav).expanduser().exists():
@@ -633,8 +638,12 @@ class Ui(QtWidgets.QWidget):
                     "Quest WiVRn must show Connection ready before HMD can stream"
                 )
             self._ambf_process.start(ambf_bin, self._current_args)
+            if use_rtx:
+                self._start_rtx_view(repo_root)
             if not self._ambf_process.waitForStarted(5000):
                 self.print_info(f"ERROR! Failed to start AMBF: {ambf_bin}")
+                if self._rtx_process.state() != QProcess.NotRunning:
+                    self._rtx_process.terminate()
                 self.button_start_simulation.setText("Start Simulation")
                 self._set_sim_running_style(False)
                 return
@@ -645,6 +654,29 @@ class Ui(QtWidgets.QWidget):
                 self.print_info("Must stop logging study data first!")
             else:
                 self._ambf_process.close()
+
+    def _start_rtx_view(self, repo_root):
+        venv_python = pathlib.Path(repo_root) / "middle_ear_newton" / ".venv" / "bin" / "python"
+        script = pathlib.Path(repo_root) / "scripts" / "rtx_view" / "fivrs_rtx_view.py"
+        if not venv_python.is_file() or not script.is_file():
+            self.print_info(
+                "ERROR! RTX bone view needs middle_ear_newton/.venv and scripts/rtx_view/fivrs_rtx_view.py"
+            )
+            return
+        if self._rtx_process.state() != QProcess.NotRunning:
+            self._rtx_process.terminate()
+            self._rtx_process.waitForFinished(2000)
+        command = (
+            "source /opt/ros/jazzy/setup.bash && "
+            "source \"$HOME/ros_ambf_ws/install/setup.bash\" && "
+            "export __GLX_VENDOR_LIBRARY_NAME=\"${__GLX_VENDOR_LIBRARY_NAME:-nvidia}\" && "
+            "export VK_DRIVER_FILES=\"${VK_DRIVER_FILES:-/usr/share/vulkan/icd.d/nvidia_icd.json}\" && "
+            f"exec \"{venv_python}\" \"{script}\" --anatomy-adf \"{self.active_volume_adf}\""
+        )
+        self._rtx_process.setWorkingDirectory(str(repo_root))
+        self._rtx_process.setProcessChannelMode(QProcess.MergedChannels)
+        self._rtx_process.start("bash", ["-lc", command])
+        self.print_info("Starting RTX bone view (surreal light, FIVRS volume)")
 
     def add_plugin(self, plugin_path):
         if "--plugins" in self._current_args:
@@ -684,6 +716,8 @@ class Ui(QtWidgets.QWidget):
             )
         self.button_start_simulation.setText("Start Simulation")
         self._set_sim_running_style(False)
+        if self._rtx_process.state() != QProcess.NotRunning:
+            self._rtx_process.terminate()
 
     def _ambf_process_error(self, error):
         self.print_info(f"ERROR! AMBF process: {self._ambf_process.errorString()} ({error})")

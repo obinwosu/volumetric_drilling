@@ -91,6 +91,9 @@ protected:
     // Empty-space color behind the microscope beam. 0 = black, 20 = white.
     void applyRoomGray();
     void nudgeRoomGray(int deltaSteps);
+    // Optional RTX window. Writes a status file and, on request, the current
+    // occupancy. It does not change drilling.
+    void publishRtxStatus(double now);
 
     struct CanonicalView {
         string id;
@@ -279,6 +282,9 @@ private:
     double m_btn1LastClickTime = -1.0;
     bool m_btn2Prev = false;
     double m_btn2LastClickTime = -1.0;
+    bool m_rtxView = false;
+    bool m_rtxWindowSized = false;
+    double m_rtxStatusTimer = 0.0;
 };
 
 

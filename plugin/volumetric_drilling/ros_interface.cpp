@@ -70,8 +70,10 @@ DrillingPublisher::~DrillingPublisher(){
 
 void DrillingPublisher::init(string a_namespace, string a_plugin){
     m_rosNode = afROSNode::getNodeAndRegister(a_namespace);
+    // A deep queue so a rendering subscriber can fall a few batches behind
+    // without losing material the drill already removed.
     ambf_ral::create_publisher<AMBF_RAL_MSG(volumetric_drilling_msgs, Voxels)>
-      (m_voxelsRemovalPub, m_rosNode, a_namespace + "/" + a_plugin + "/voxels_removed", 1, false);
+      (m_voxelsRemovalPub, m_rosNode, a_namespace + "/" + a_plugin + "/voxels_removed", 256, false);
     ambf_ral::create_publisher<AMBF_RAL_MSG(volumetric_drilling_msgs, DrillSize)>
       (m_drillSizePub, m_rosNode, a_namespace + "/" + a_plugin + "/drill_size", 1, true);
     ambf_ral::create_publisher<AMBF_RAL_MSG(volumetric_drilling_msgs, VolumeInfo)>
@@ -190,6 +192,8 @@ void DrillingPublisher::clearVoxelMsg()
 
 void DrillingPublisher::publishVoxelMsg(double time)
 {
+    m_removedCount += static_cast<uint64_t>(m_voxel_msg.indices.size());
+    m_voxel_msg.header.frame_id = std::to_string(m_removedCount);
     #if AMBF_ROS1
         m_voxel_msg.header.stamp.fromSec(time);
         m_voxelsRemovalPub->publish(m_voxel_msg);

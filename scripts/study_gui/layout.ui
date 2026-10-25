@@ -324,6 +324,16 @@
            </widget>
           </item>
           <item>
+           <widget class="QCheckBox" name="check_rtx_view">
+            <property name="toolTip">
+             <string>Open a second window that draws the drillable bone with the surreal RTX light and ivory material. Drilling, haptics, and the AMBF view stay as they are.</string>
+            </property>
+            <property name="text">
+             <string>RTX bone view</string>
+            </property>
+           </widget>
+          </item>
+          <item>
            <widget class="QCheckBox" name="check_openxr_eyepiece">
             <property name="toolTip">
              <string>Recommended: WiVRn + OpenXR head-locked stereo eyepiece (ADF 15). HMD 6DoF moves main_camera only while cam-clutch (stylus btn 1) is held.</string>
