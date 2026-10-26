@@ -38,15 +38,30 @@ MESH_DIR = pathlib.Path(__file__).resolve().parents[2] / "ADF" / "meshes" / "hig
 VERTICAL_FOV_RAD = 0.17951634837990105
 RUNTIME = pathlib.Path("/tmp/fivrs-rtx")
 BONE_ROUGHNESS = 0.55
-# Scope lights at exposure 1. The bone albedo is nearly white, so these sit
-# well below the first tuning, which clipped the whole view. The distant beam
-# is what actually lights the specimen: a camera sphere falls off with
-# distance, and the bone sits about 5 units in front of the camera.
+# The specimen is one surface a few units in front of the camera. A distant
+# beam lights that whole surface evenly, so it stays off unless toggled.
+# A sphere of radius 0.04 is invisible here even at 1e6 nits (measured: black
+# on a white card that a distant light of 200 lights to mid gray). The cone
+# is a disk of radius 0.2, 0.3 units in front of the lens, emitting along the
+# look direction. 1.2e7 nits matches that distant beam on axis at 5 units;
+# each frame rescales by distance squared so dollying does not blow the
+# surface out. The scope light itself comes from tuner_light.json, written
+# by the FIVRS RTX Tuner. Intensity is that saved value, times exposure and
+# distance-squared, with no extra gain from the cone angle.
 LIGHT_BASE = {
     "/root/_ScopeBeam": 200.0,
     "/root/_ScopeFill": 8.0,
-    "/root/_ScopeLight": 8000.0,
+    "/root/_ScopeLight": 4.95e6,
 }
+CONE_RADIUS = 0.2
+CONE_STANDOFF = 0.3
+CONE_REFERENCE_DISTANCE = 5.0
+CONE_ANGLE_DEG = 12.0
+CONE_ANGLE_MIN = 8.0
+CONE_ANGLE_MAX = 36.0
+CONE_SOFTNESS = 0.2
+CONE_FOCUS = 1.0
+TUNER_LIGHT_PATH = pathlib.Path(__file__).resolve().parent / "tuner_light.json"
 EXPOSURE_MIN = 0.05
 EXPOSURE_MAX = 8.0
 # Geometry sent on the draw thread. A cut used to upload every touched block
@@ -252,26 +267,112 @@ def _spin_about_x(angle):
     return (float(np.sin(half)), 0.0, 0.0, float(np.cos(half)))
 
 
+def _tuner_lights_from_file():
+    """Scope light saved by the FIVRS RTX Tuner. Missing keys keep the defaults."""
+    lights = {
+        "cone_angle_deg": CONE_ANGLE_DEG,
+        "cone_softness": CONE_SOFTNESS,
+        "intensity_nits": LIGHT_BASE["/root/_ScopeLight"],
+        "fill": LIGHT_BASE["/root/_ScopeFill"],
+        "disk_radius": CONE_RADIUS,
+        "disk_standoff": CONE_STANDOFF,
+        "disk_color": [1.0, 0.94, 0.86],
+        "fill_color": [0.85, 0.78, 0.70],
+    }
+    try:
+        saved = json.loads(TUNER_LIGHT_PATH.read_text())
+        lights.update(saved.get("lights") or {})
+        mtime = TUNER_LIGHT_PATH.stat().st_mtime
+        found = True
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"RTX light file unavailable ({exc}); using built-in defaults", flush=True)
+        mtime = None
+        found = False
+    return lights, mtime, found
+
+
+def _apply_tuner_lights(viewer, lights):
+    """Copy the saved scope light onto the viewer. The distant beam is separate."""
+    LIGHT_BASE["/root/_ScopeFill"] = float(lights["fill"])
+    LIGHT_BASE["/root/_ScopeLight"] = float(lights["intensity_nits"])
+    viewer._cone_angle = float(lights["cone_angle_deg"])
+    viewer._cone_softness = float(lights["cone_softness"])
+    viewer._cone_radius = float(lights["disk_radius"])
+    viewer._cone_standoff = float(lights["disk_standoff"])
+    viewer._disk_color = tuple(float(v) for v in lights["disk_color"])
+    viewer._fill_color = tuple(float(v) for v in lights["fill_color"])
+
+
+def _reload_tuner_lights(viewer):
+    """Pick up a tuner save without restarting, when the file changes."""
+    try:
+        mtime = TUNER_LIGHT_PATH.stat().st_mtime
+    except OSError:
+        return
+    if mtime == getattr(viewer, "_tuner_light_mtime", None):
+        return
+    lights, mtime, found = _tuner_lights_from_file()
+    if not found:
+        return
+    _apply_tuner_lights(viewer, lights)
+    viewer._tuner_light_mtime = mtime
+    _paint_light_colors(viewer)
+    _announce_tuner_light(viewer)
+
+
+def _announce_tuner_light(viewer):
+    print(
+        "RTX light from tuner_light.json: "
+        f"angle {viewer._cone_angle:.1f}°  softness {viewer._cone_softness:.2f}  "
+        f"intensity {LIGHT_BASE['/root/_ScopeLight']:.3g}  fill {LIGHT_BASE['/root/_ScopeFill']:.1f}  "
+        f"radius {viewer._cone_radius:.3f}",
+        flush=True,
+    )
+
+
+def _paint_light_colors(viewer):
+    from pxr import Gf
+
+    stage = getattr(viewer, "stage", None)
+    if stage is None:
+        return
+    disk = stage.GetPrimAtPath("/root/_ScopeLight")
+    dome = stage.GetPrimAtPath("/root/_ScopeFill")
+    if disk:
+        disk.GetAttribute("inputs:color").Set(Gf.Vec3f(*viewer._disk_color))
+    if dome:
+        dome.GetAttribute("inputs:color").Set(Gf.Vec3f(*viewer._fill_color))
+
+
 def _author_lights(viewer):
     from pxr import Gf, UsdLux
 
-    color = Gf.Vec3f(1.0, 0.985, 0.96)
+    lights, mtime, found = _tuner_lights_from_file()
+    _apply_tuner_lights(viewer, lights)
+    viewer._tuner_light_mtime = mtime
     distant = UsdLux.DistantLight.Define(viewer.stage, "/root/_ScopeBeam")
-    distant.CreateIntensityAttr(LIGHT_BASE["/root/_ScopeBeam"])
-    distant.CreateColorAttr(color)
+    distant.CreateIntensityAttr(0.0)
+    distant.CreateColorAttr(Gf.Vec3f(*viewer._disk_color))
     distant.CreateAngleAttr(2.0)
     dome = UsdLux.DomeLight.Define(viewer.stage, "/root/_ScopeFill")
     dome.CreateIntensityAttr(LIGHT_BASE["/root/_ScopeFill"])
-    dome.CreateColorAttr(Gf.Vec3f(0.93, 0.93, 0.92))
-    sphere = UsdLux.SphereLight.Define(viewer.stage, "/root/_ScopeLight")
-    sphere.CreateIntensityAttr(LIGHT_BASE["/root/_ScopeLight"])
-    sphere.CreateRadiusAttr(0.04)
-    sphere.CreateColorAttr(color)
-    shaping = UsdLux.ShapingAPI.Apply(sphere.GetPrim())
-    shaping.CreateShapingConeAngleAttr(16.0)
-    shaping.CreateShapingConeSoftnessAttr(0.55)
+    dome.CreateColorAttr(Gf.Vec3f(*viewer._fill_color))
+    disk = UsdLux.DiskLight.Define(viewer.stage, "/root/_ScopeLight")
+    disk.CreateIntensityAttr(LIGHT_BASE["/root/_ScopeLight"])
+    disk.CreateRadiusAttr(viewer._cone_radius)
+    disk.CreateColorAttr(Gf.Vec3f(*viewer._disk_color))
+    shaping = UsdLux.ShapingAPI.Apply(disk.GetPrim())
+    shaping.CreateShapingConeAngleAttr(viewer._cone_angle)
+    shaping.CreateShapingConeSoftnessAttr(viewer._cone_softness)
+    shaping.CreateShapingFocusAttr(CONE_FOCUS)
     viewer._exposure = 1.0
     viewer._exposure_dirty = True
+    viewer._beam_on = False
+    viewer._cone_distance = CONE_REFERENCE_DISTANCE
+    _remember_cone_angle(viewer._cone_angle)
+    if found:
+        _announce_tuner_light(viewer)
+    print("RTX distant beam off    L toggles it", flush=True)
 
 
 def _aim_lights(viewer, position, forward):
@@ -317,15 +418,27 @@ def _bind_lights(viewer):
                 if not getattr(viewer, "_cam_warned", False):
                     print(f"camera write failed: {exc}", flush=True)
                     viewer._cam_warned = True
-        if getattr(viewer, "_exposure_dirty", False):
-            _push_exposure(viewer)
+        _push_exposure(viewer)
         matrix = getattr(viewer, "_fivrs_light_matrix", None)
         if matrix is None:
             return
-        posed = np.ascontiguousarray(matrix, dtype=np.float64)[np.newaxis, ...]
+        beam = np.ascontiguousarray(matrix, dtype=np.float64)
+        # Row 2 is -forward, so this steps the disk out along the look axis,
+        # past the near plane, instead of leaving it inside the eye.
+        disk = beam.copy()
+        disk[3, :3] = beam[3, :3] - beam[2, :3] * float(
+            getattr(viewer, "_cone_standoff", CONE_STANDOFF)
+        )
         try:
-            for path in ("/root/_ScopeBeam", "/root/_ScopeLight"):
-                viewer._write_runtime_attribute([path], "omni:xform", posed, is_matrix=True)
+            viewer._write_runtime_attribute(
+                ["/root/_ScopeBeam"], "omni:xform", beam[np.newaxis, ...], is_matrix=True
+            )
+            viewer._write_runtime_attribute(
+                ["/root/_ScopeLight"],
+                "omni:xform",
+                np.ascontiguousarray(disk)[np.newaxis, ...],
+                is_matrix=True,
+            )
         except Exception as exc:
             if not getattr(viewer, "_light_warned", False):
                 print(f"scope light follow failed: {exc}", flush=True)
@@ -569,13 +682,38 @@ def _apply_camera(viewer, camera):
         )
         viewer._aim_printed = True
     viewer._camera_dirty = True
+    origin = getattr(viewer, "_volume_translation", None)
+    if origin is not None:
+        viewer._cone_distance = max(float(np.linalg.norm(position - origin)), 0.5)
     _aim_lights(viewer, position, forward / max(np.linalg.norm(forward), 1e-8))
 
 
-def _push_exposure(viewer):
+def _light_intensity(viewer, path):
+    """Exposure, the beam toggle, and the cone's distance compensation.
+
+    The disk and the dome use the numbers in tuner_light.json. The cone
+    angle does not scale the intensity.
+    """
     scale = float(getattr(viewer, "_exposure", 1.0))
-    for path, base in LIGHT_BASE.items():
-        value = base * scale
+    base = LIGHT_BASE[path]
+    if path == "/root/_ScopeBeam":
+        return base * scale if getattr(viewer, "_beam_on", False) else 0.0
+    if path == "/root/_ScopeLight":
+        distance = max(float(getattr(viewer, "_cone_distance", CONE_REFERENCE_DISTANCE)), 0.5)
+        return base * scale * (distance / CONE_REFERENCE_DISTANCE) ** 2
+    return base * scale
+
+
+def _remember_cone_angle(angle):
+    """Last half-angle the RTX window was left on, in degrees."""
+    RUNTIME.mkdir(parents=True, exist_ok=True)
+    (RUNTIME / "cone_angle.txt").write_text(f"{float(angle):.1f}\n")
+
+
+def _push_exposure(viewer):
+    _reload_tuner_lights(viewer)
+    for path in LIGHT_BASE:
+        value = _light_intensity(viewer, path)
         prim = viewer.stage.GetPrimAtPath(path)
         attr = prim.GetAttribute("inputs:intensity") if prim else None
         if attr:
@@ -586,7 +724,36 @@ def _push_exposure(viewer):
             if not getattr(viewer, "_exposure_warned", False):
                 print(f"exposure write failed: {exc}", flush=True)
                 viewer._exposure_warned = True
+    angle = float(getattr(viewer, "_cone_angle", CONE_ANGLE_DEG))
+    shaping = {
+        "inputs:shaping:cone:angle": angle,
+        "inputs:shaping:cone:softness": float(getattr(viewer, "_cone_softness", CONE_SOFTNESS)),
+        "inputs:shaping:focus": CONE_FOCUS,
+        "inputs:radius": float(getattr(viewer, "_cone_radius", CONE_RADIUS)),
+    }
+    light = viewer.stage.GetPrimAtPath("/root/_ScopeLight")
+    for name, value in shaping.items():
+        attr = light.GetAttribute(name) if light else None
+        if attr:
+            attr.Set(value)
+        try:
+            viewer._write_runtime_attribute(
+                ["/root/_ScopeLight"], name, np.array([value], dtype=np.float32)
+            )
+        except Exception as exc:
+            if not getattr(viewer, "_cone_warned", False):
+                print(f"cone write failed: {exc}", flush=True)
+                viewer._cone_warned = True
     viewer._exposure_dirty = False
+
+
+def _set_cone_angle(viewer, angle):
+    viewer._cone_angle = float(min(CONE_ANGLE_MAX, max(CONE_ANGLE_MIN, angle)))
+    _remember_cone_angle(viewer._cone_angle)
+    print(
+        f"RTX cone {viewer._cone_angle:.0f}°   - narrower   = wider",
+        flush=True,
+    )
 
 
 def _set_exposure(viewer, scale):
@@ -615,10 +782,28 @@ def _bind_exposure_keys(viewer):
             _set_exposure(viewer, viewer._exposure * 1.25)
         elif symbol == key.BACKSLASH:
             _set_exposure(viewer, 1.0)
+        elif symbol == key.L and not (modifiers & (key.MOD_CTRL | key.MOD_ALT | key.MOD_SHIFT)):
+            viewer._beam_on = not getattr(viewer, "_beam_on", False)
+            viewer._exposure_dirty = True
+            state = "on" if viewer._beam_on else "off"
+            print(f"RTX distant beam {state}", flush=True)
+        elif symbol in (key.MINUS, key.NUM_SUBTRACT, key.EQUAL, key.PLUS, key.NUM_ADD):
+            step = 10.0 if modifiers & key.MOD_SHIFT else 2.0
+            if symbol in (key.MINUS, key.NUM_SUBTRACT):
+                step = -step
+            _set_cone_angle(viewer, getattr(viewer, "_cone_angle", CONE_ANGLE_DEG) + step)
+            return True
+        else:
+            return None
+        return True
 
     window.push_handlers(on_key_press=on_key_press)
     viewer._exposure_keys_bound = True
-    print("RTX lighting keys ready: [ darker    ] brighter    \\ reset", flush=True)
+    print(
+        "RTX lighting keys ready: [ darker   ] brighter   \\ reset   "
+        "- narrower cone   = wider cone   L distant beam",
+        flush=True,
+    )
 
 
 def _pan_scale(viewer, bridge):
@@ -1402,10 +1587,11 @@ def main():
         instrument["shafts"][size] = f"drill/shaft_{size}"
         print(f"Shaft {size} mm {len(shaft_tris)} tris", flush=True)
     viewer._instrument_meshes = instrument
+    viewer._volume_translation = np.asarray(bridge.volume["translation"], dtype=np.float64)
     uploads = [_begin_upload(_prepare_blocks(blocks, bridge.volume, None), True, extract_s * 1e3, None)]
     worker = SurfaceWorker(blocks, occupied, colors, bridge.volume)
     _install_frame_probes(viewer)
-    print("RTX brightness: [ darker    ] brighter    \\ reset", flush=True)
+    print("RTX brightness: [ darker    ] brighter    \\ reset    L distant beam", flush=True)
     waiting_dump_since = None
     waiting_catchup = None
     catchup_after = 0

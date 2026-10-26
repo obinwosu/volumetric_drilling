@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=FIVRS RTX Tuner
+GenericName=Microscope light tuner
+Comment=Tune the FIVRS RTX microscope light on the bone
+Exec=/home/obihome/ros_ambf_ws/src/volumetric_drilling/scripts/rtx_view/launch_fivrs_rtx_tuner.sh
+Path=/home/obihome/ros_ambf_ws/src/volumetric_drilling
+Icon=/home/obihome/ros_ambf_ws/src/volumetric_drilling/scripts/study_gui/assets/fivrs_icon.png
+Terminal=false
+StartupNotify=true
+Categories=Education;Science;
+Keywords=FIVRS;RTX;light;tuner;microscope;
+StartupWMClass=FIVRS RTX Tuner
