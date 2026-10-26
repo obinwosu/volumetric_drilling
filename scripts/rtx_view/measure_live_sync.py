@@ -47,6 +47,7 @@ def _stats(values):
         "n": len(values),
         "median_ms": _percentile(values, 0.5),
         "p90_ms": _percentile(values, 0.9),
+        "p95_ms": _percentile(values, 0.95),
         "worst_ms": max(values),
     }
 
@@ -155,6 +156,14 @@ def _summarize(ambf_rows, rtx_rows, started_wall):
 
     deletion = []
     queue_wait = []
+    extract = []
+    smooth = []
+    prepare = []
+    edge = []
+    handoff = []
+    upload = []
+    transfer = []
+    download_bytes = []
     mesh = []
     first_frame = []
     total = []
@@ -179,7 +188,18 @@ def _summarize(ambf_rows, rtx_rows, started_wall):
             continue
         deletion.append((receipt["wall"] - row["wall_clear"]) * 1e3)
         queue_wait.append((surface["worker_start"] - receipt["stamp"]) * 1e3)
+        extract.append(float(surface.get("extract_ms") or 0.0))
+        edge.append(float(surface.get("edge_ms") or 0.0))
+        smooth.append(float(surface.get("smooth_ms") or 0.0))
+        prepare.append(float(surface.get("prepare_ms") or 0.0))
         mesh.append(float(surface.get("mesh_ms") or 0.0))
+        if surface.get("worker_done") is not None:
+            finished = receipt["wall"] + (surface["worker_done"] - receipt["stamp"])
+            handoff.append((event["attribute_wall"] - finished) * 1e3)
+        if event.get("upload_spread_ms") is not None:
+            upload.append(float(event["upload_spread_ms"]))
+        transfer.append(float(surface.get("transfer_ms") or 0.0))
+        download_bytes.append(int(surface.get("download_bytes") or 0))
         first_frame.append((event["display_accept_wall"] - event["attribute_wall"]) * 1e3)
         total.append((event["display_accept_wall"] - row["wall_clear"]) * 1e3)
     for row in dropped:
@@ -205,6 +225,17 @@ def _summarize(ambf_rows, rtx_rows, started_wall):
             continue
         seen_frames.add(id(event))
         frame_ids.append((event["display_accept_wall"] - event["attribute_wall"]) * 1e3)
+    stalls_50 = 0
+    stalls_100 = 0
+    frame_peaks = []
+    for event in presented:
+        serials = [int(serial) for serial in (event.get("serials") or [])]
+        if not any(serial in messages for serial in serials):
+            continue
+        stalls_50 += int(event.get("stalls_over_50ms") or 0)
+        stalls_100 += int(event.get("stalls_over_100ms") or 0)
+        if event.get("frame_ms_max") is not None:
+            frame_peaks.append(float(event["frame_ms_max"]))
     dropped_shown = sum(1 for row in dropped if int(row.get("message_serial") or 0) in presented_by_serial)
     return {
         "scripted_groups": len(ambf_rows),
@@ -218,9 +249,20 @@ def _summarize(ambf_rows, rtx_rows, started_wall):
         "dropped_groups_displayed": dropped_shown,
         "deletion_to_receipt": _stats(deletion),
         "queue_wait": _stats(queue_wait),
+        "extraction": _stats(extract),
+        "edge_compact": _stats(edge),
+        "smoothing": _stats(smooth),
+        "preparation": _stats(prepare),
         "mesh_work": _stats(mesh),
+        "renderer_handoff": _stats(handoff),
+        "gpu_transfer": _stats(transfer),
+        "download_bytes_median": _percentile(download_bytes, 0.5) if download_bytes else 0,
+        "upload_spread": _stats(upload),
         "first_rendered_frame": _stats(first_frame),
         "total_clear_to_display": _stats(total),
+        "frame_stalls_over_50ms": stalls_50,
+        "frame_stalls_over_100ms": stalls_100,
+        "frame_peak_ms": max(frame_peaks) if frame_peaks else None,
         "recovery_clear_to_display": _stats(recovery),
         "occupancy_file_fallbacks": len(fallback),
         "fallback_load_ms": fallback[0].get("load_ms") if fallback else None,
@@ -283,6 +325,9 @@ def _run_once(name, voxels, per_step, drop):
     summary["complete"] = complete and published_ok
     summary["wall_s"] = time.time() - started
     summary["audit"] = _audit([(int(v[0]), int(v[1]), int(v[2])) for batch in batches for v in batch[2]])
+    status_path = RUNTIME / "status.json"
+    if status_path.is_file():
+        summary["ambf_status"] = json.loads(status_path.read_text())
     return summary
 
 
@@ -310,6 +355,12 @@ def main():
             "voxels": "coordinates cleared; audit checks the RTX occupancy afterward",
             "deletion_to_receipt": "AMBF clear wall clock to the ROS callback, published groups only",
             "queue_wait": "callback to the start of the mesh rebuild that included the batch",
+            "extraction": "marching-cubes time of that rebuild, after the GPU work has finished",
+            "smoothing": "clamped smooth of that rebuild",
+            "preparation": "world transform, normals, and color split of that rebuild",
+            "renderer_handoff": "mesh finished until the render thread writes the new attributes",
+            "first_rendered_frame": "attribute write until that frame is handed to the window",
+            "renderer_handoff": "mesh finished until the render thread writes the new attributes",
             "mesh_work": "extract + edge + smooth + prepare for that rebuild",
             "first_rendered_frame": "attribute write to the completed frame handed to the window",
             "recovery": "withheld clear to the frame that displayed the catch-up batch",

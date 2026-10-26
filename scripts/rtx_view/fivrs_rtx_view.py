@@ -502,11 +502,34 @@ def _bind_exposure_keys(viewer):
 
 
 def _log_chunk(viewer, name, points, tris, normals, color):
+    """Update an existing prim from host arrays.
+
+    ViewerRTX downloads a Warp array back to the host on every dynamic
+    update, so wrapping arrays that are already numpy only adds a transfer.
+    A new prim still has to be created from Warp arrays.
+    """
+    points = np.ascontiguousarray(points, dtype=np.float32)
+    indices = np.ascontiguousarray(tris.reshape(-1), dtype=np.int32)
+    normals = np.ascontiguousarray(normals, dtype=np.float32)
+    qualified = viewer._qualify(name)
+    if qualified in getattr(viewer, "_mesh_prim_paths", {}):
+        viewer.log_mesh(
+            name,
+            points,
+            indices,
+            normals=normals,
+            color=color,
+            roughness=BONE_ROUGHNESS,
+            metallic=0.0,
+            dynamic=True,
+            backface_culling=False,
+        )
+        return
     viewer.log_mesh(
         name,
-        wp.array(np.ascontiguousarray(points), dtype=wp.vec3),
-        wp.array(np.ascontiguousarray(tris.reshape(-1)), dtype=wp.int32),
-        normals=wp.array(np.ascontiguousarray(normals), dtype=wp.vec3),
+        wp.array(points, dtype=wp.vec3),
+        wp.array(indices, dtype=wp.int32),
+        normals=wp.array(normals, dtype=wp.vec3),
         color=color,
         roughness=BONE_ROUGHNESS,
         metallic=0.0,
@@ -565,8 +588,12 @@ def _prepare_block_mesh(mesh, volume, spatial):
     counts = volume["counts"]
     rotation = volume["rotation"]
     translation = volume["translation"]
-    world = local_to_world(index_to_local(mesh.verts, dims, counts), rotation, translation).astype(np.float32)
-    normals = vertex_normals(world.astype(np.float64), mesh.tris).astype(np.float32)
+    if getattr(mesh, "world", None) is not None and getattr(mesh, "normals", None) is not None:
+        world = mesh.world
+        normals = mesh.normals
+    else:
+        world = local_to_world(index_to_local(mesh.verts, dims, counts), rotation, translation).astype(np.float32)
+        normals = vertex_normals(world.astype(np.float64), mesh.tris).astype(np.float32)
     labels = _face_labels(mesh, mesh.tris)
     order = np.argsort(labels, kind="mergesort")
     ordered = labels[order]
@@ -685,6 +712,18 @@ class SurfaceWorker:
             return None
 
     def _run(self):
+        try:
+            from warp_mesh import STAGE, WarpMesher
+
+            if STAGE >= 1:
+                self._blocks._warp = WarpMesher()
+                self._blocks._warp.warmup(self._occupied, self._colors)
+                print(f"Warp mesh kernels warmed, stage {STAGE}", flush=True)
+        except Exception:
+            import traceback
+            print("Warp mesh warmup failed; CPU meshing stays in use", flush=True)
+            traceback.print_exc()
+            self._blocks._warp = None
         while True:
             jobs = [self._inbox.get()]
             while True:
@@ -730,6 +769,10 @@ class SurfaceWorker:
             "stitch_ms": 0.0,
             "smooth_ms": 0.0,
             "prepare_ms": 0.0,
+            "prepare_gpu_ms": 0.0,
+            "transfer_ms": 0.0,
+            "download_bytes": 0,
+            "upload_bytes": 0,
             "kept_tris": 0,
             "new_tris": 0,
             "blocks": 0,
@@ -811,19 +854,40 @@ class SurfaceWorker:
             dirty.update(blocks_touched_by(xs, ys, zs, shape))
         if not dirty and resync is None:
             return
-        phases = self._blocks.rebuild(self._occupied, self._colors, dirty)
+        if self._volume is not None:
+            volume = self._volume
+            self._blocks.pose = (
+                volume["dimensions"],
+                volume["counts"],
+                volume["rotation"],
+                volume["translation"],
+            )
+        phases = self._blocks.rebuild(
+            self._occupied,
+            self._colors,
+            dirty,
+            cleared=None if resync is not None else (xs, ys, zs),
+            replace=resync is not None,
+        )
         # One unioned rebuild for every bite already queued, not one per bite.
         detail["replace_calls"] = 1 if dirty else 0
-        for key in ("copy_ms", "extract_ms", "edge_ms", "rewrite_ms", "stitch_ms", "smooth_ms", "new_tris", "blocks"):
+        for key in (
+            "copy_ms", "extract_ms", "edge_ms", "rewrite_ms", "stitch_ms", "smooth_ms",
+            "prepare_gpu_ms", "transfer_ms", "download_bytes", "upload_bytes", "new_tris", "blocks",
+        ):
             detail[key] += phases[key]
         if receipt is not None:
             detail["queue_wait_ms"] = (started - receipt) * 1e3
         detail["receipt_wall"] = receipt_wall
         preparing = time.perf_counter()
         chunks = _prepare_blocks(self._blocks, self._volume, dirty)
-        detail["prepare_ms"] = (time.perf_counter() - preparing) * 1e3
+        detail["prepare_ms"] = (time.perf_counter() - preparing) * 1e3 + phases.get("prepare_gpu_ms", 0.0)
         detail["mesh_ms"] = (
-            phases["extract_ms"] + phases["edge_ms"] + phases["smooth_ms"] + detail["prepare_ms"]
+            phases["extract_ms"]
+            + phases["edge_ms"]
+            + phases["smooth_ms"]
+            + detail["prepare_ms"]
+            + phases.get("transfer_ms", 0.0)
         )
         detail["triangles"] = self._blocks.triangle_count
         detail["worker_done"] = time.perf_counter()

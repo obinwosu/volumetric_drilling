@@ -575,7 +575,7 @@ class BlockVolume:
         xs, ys, zs = np.nonzero(diff)
         return blocks_touched_by(xs, ys, zs, self.shape, self.n)
 
-    def rebuild(self, occupied, colors, blocks):
+    def rebuild(self, occupied, colors, blocks, cleared=None, replace=False):
         """Replace only ``blocks``. The returned times are for the delay report."""
         phases = {
             "copy_ms": 0.0,
@@ -584,10 +584,47 @@ class BlockVolume:
             "rewrite_ms": 0.0,
             "stitch_ms": 0.0,
             "smooth_ms": 0.0,
+            "prepare_gpu_ms": 0.0,
+            "transfer_ms": 0.0,
+            "download_bytes": 0,
+            "upload_bytes": 0,
             "kept_tris": 0,
             "new_tris": 0,
             "blocks": 0,
         }
+        warp = getattr(self, "_warp", None)
+        if warp is not None:
+            from warp_mesh import STAGE
+
+            before_up = warp.upload_bytes
+            before_down = warp.download_bytes
+            before_transfer = warp.transfer_ms
+            if replace or warp.occ is None:
+                warp.upload_volume(occupied, colors)
+            elif cleared is not None and len(cleared[0]):
+                warp.clear(cleared[0], cleared[1], cleared[2])
+            pose = getattr(self, "pose", None) if STAGE >= 3 else None
+            outputs, part = warp.mesh_blocks(blocks, smooth=STAGE >= 2, prepare_pose=pose)
+            for block, result in outputs:
+                verts, tris, rgb, world, normals = result
+                if STAGE < 2 and len(tris):
+                    smoothing = time.perf_counter()
+                    verts = smooth_pinned(verts, tris, shared_face_pins(verts, self.shape, self.n))
+                    part["smooth_ms"] += (time.perf_counter() - smoothing) * 1e3
+                mesh = BlockMesh(verts, tris, rgb)
+                if world is not None:
+                    mesh.world = world
+                    mesh.normals = normals
+                self.meshes[block] = mesh
+                phases["new_tris"] += int(len(mesh.tris))
+                phases["blocks"] += 1
+            for key in ("extract_ms", "edge_ms", "smooth_ms", "prepare_gpu_ms", "transfer_ms"):
+                phases[key] += part[key]
+            phases["download_bytes"] += part["download_bytes"]
+            phases["upload_bytes"] = warp.upload_bytes - before_up
+            phases["transfer_ms"] += warp.transfer_ms - before_transfer
+            phases["stitch_ms"] = phases["edge_ms"] + phases["rewrite_ms"]
+            return phases
         for block in blocks:
             mesh, part = extract_block(occupied, colors, block, self.n)
             self.meshes[block] = mesh
