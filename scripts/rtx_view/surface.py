@@ -10,6 +10,8 @@ steps off without moving a vertex by more than ``max_step`` voxel widths.
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 from scipy import sparse
 
@@ -250,7 +252,21 @@ class BoneMesh:
         self.verts = smooth_surface(self.verts, self.tris)
 
     def replace_cells(self, occupied: np.ndarray, i0, i1, j0, j1, k0, k1, colors: np.ndarray | None = None):
-        """Rebuild every cell whose corner voxel lies in the half-open box."""
+        """Rebuild every cell whose corner voxel lies in the half-open box.
+
+        The returned times are measurement only. The mesh is the same one this
+        function built before the timers were added.
+        """
+        phases = {
+            "copy_ms": 0.0,
+            "extract_ms": 0.0,
+            "edge_ms": 0.0,
+            "rewrite_ms": 0.0,
+            "stitch_ms": 0.0,
+            "smooth_ms": 0.0,
+            "kept_tris": 0,
+            "new_tris": 0,
+        }
         nx, ny, nz = self.shape
         # Cell -1 is the low crop face and cell count-1 is the high crop face.
         i0 = max(-1, min(nx - 1, int(i0)))
@@ -259,21 +275,28 @@ class BoneMesh:
         i1 = max(i0 + 1, min(nx, int(i1)))
         j1 = max(j0 + 1, min(ny, int(j1)))
         k1 = max(k0 + 1, min(nz, int(k1)))
+        started = time.perf_counter()
         ci, cj, ck = cell_corners(self.tri_cell)
         inside = (ci >= i0) & (ci < i1) & (cj >= j0) & (cj < j1) & (ck >= k0) & (ck < k1)
         keep = ~inside
         kept_tris = self.tris[keep]
         kept_cells = self.tri_cell[keep]
+        phases["copy_ms"] = (time.perf_counter() - started) * 1e3
+        phases["kept_tris"] = int(len(kept_tris))
+        started = time.perf_counter()
         slab, slab_colors = _border_slab(occupied, colors, i0, i1, j0, j1, k0, k1)
         new_verts, new_tris, new_keys, new_cells, new_colors = marching_cubes(
             slab, slab_colors, origin=(i0, j0, k0)
         )
+        phases["extract_ms"] = (time.perf_counter() - started) * 1e3
+        phases["new_tris"] = int(len(new_tris))
         if len(new_tris) == 0 and len(kept_tris) == 0:
             self.verts = np.zeros((0, 3), np.float64)
             self.tris = np.zeros((0, 3), np.int32)
             self.tri_cell = np.zeros((0,), np.int64)
             self.colors = np.zeros((0, 3), np.uint8)
-            return
+            return phases
+        started = time.perf_counter()
         remap = np.empty(len(new_keys), dtype=np.int32)
         extra = []
         extra_colors = []
@@ -292,6 +315,8 @@ class BoneMesh:
         if extra:
             self.verts = np.vstack([self.verts, np.asarray(extra, dtype=np.float64)])
             self.colors = np.vstack([self.colors, np.asarray(extra_colors, dtype=np.uint8)])
+        phases["edge_ms"] = (time.perf_counter() - started) * 1e3
+        started = time.perf_counter()
         mapped = remap[new_tris] if len(new_tris) else np.zeros((0, 3), np.int32)
         locked = np.zeros(len(self.verts), dtype=bool)
         if len(kept_tris):
@@ -302,7 +327,12 @@ class BoneMesh:
         else:
             self.tris = mapped
             self.tri_cell = new_cells
+        phases["rewrite_ms"] = (time.perf_counter() - started) * 1e3
+        phases["stitch_ms"] = phases["edge_ms"] + phases["rewrite_ms"]
+        started = time.perf_counter()
         self._smooth_new(extra_ids, locked)
+        phases["smooth_ms"] = (time.perf_counter() - started) * 1e3
+        return phases
 
     def _smooth_new(self, free_ids, locked):
         if not free_ids or len(self.tris) == 0:
@@ -336,3 +366,235 @@ class BoneMesh:
             moved[pinned] = original[pinned]
             current = moved
         self.verts[used] = current
+
+
+# 32 won the live comparison. 48 missed the small-cut median, and 64 was slower.
+BLOCK = 32
+
+
+def block_count(count, n=BLOCK):
+    """How many blocks span this axis, including the crop-face cell."""
+    count = int(count)
+    if count <= 0:
+        return 0
+    return (count - 1) // n + 1
+
+
+def block_voxel_bounds(b, count, n=BLOCK):
+    """Inclusive voxel indices this block reads. The ends may lie outside the scan."""
+    lo = -1 if b == 0 else b * n
+    hi = min(int(count), (b + 1) * n)
+    return lo, hi
+
+
+def _owns_cell(corner, block, count, n=BLOCK):
+    lo = -1 if block == 0 else block * n
+    return (corner >= lo) & (corner < (block + 1) * n) & (corner <= count - 1)
+
+
+def blocks_touched_by(xs, ys, zs, shape, n=BLOCK):
+    """Blocks whose surface can change when these voxels change.
+
+    A voxel on a shared face, or one step away from it, marks both blocks.
+    """
+    xs = np.asarray(xs, dtype=np.int32).reshape(-1)
+    ys = np.asarray(ys, dtype=np.int32).reshape(-1)
+    zs = np.asarray(zs, dtype=np.int32).reshape(-1)
+    if len(xs) == 0:
+        return []
+
+    def candidates(values, count):
+        last = (count - 1) // n
+        base = np.clip(values // n, 0, last).astype(np.int32)
+        face = base * n
+        previous = np.where((base > 0) & ((values - face) <= 1), base - 1, np.int32(-1))
+        next_face = (base + 1) * n
+        nxt = np.where((next_face < count) & ((next_face - values) <= 1), base + 1, np.int32(-1))
+        return (base, previous, nxt)
+
+    cx = candidates(xs, shape[0])
+    cy = candidates(ys, shape[1])
+    cz = candidates(zs, shape[2])
+    packed = []
+    for x in cx:
+        for y in cy:
+            for z in cz:
+                good = (x >= 0) & (y >= 0) & (z >= 0)
+                if not np.any(good):
+                    continue
+                packed.append(
+                    x[good].astype(np.int64) + y[good].astype(np.int64) * 16 + z[good].astype(np.int64) * 256
+                )
+    if not packed:
+        return []
+    keys = np.unique(np.concatenate(packed))
+    blocks = []
+    for key in keys.tolist():
+        key = int(key)
+        bx = key % 16
+        rest = key // 16
+        by = rest % 16
+        bz = rest // 16
+        blocks.append((bx, by, bz))
+    return blocks
+
+
+def _empty_block():
+    return (
+        np.zeros((0, 3), np.float64),
+        np.zeros((0, 3), np.int32),
+        np.zeros((0, 3), np.uint8),
+    )
+
+
+def _compact_used(verts, tris, colors):
+    if len(tris) == 0:
+        return _empty_block()
+    used, inverse = np.unique(tris.reshape(-1), return_inverse=True)
+    return verts[used], inverse.reshape(-1, 3).astype(np.int32), colors[used]
+
+
+def shared_face_pins(verts, shape, n=BLOCK):
+    """Vertices that sit on a face shared with the neighboring block."""
+    pinned = np.zeros(len(verts), dtype=bool)
+    if len(verts) == 0:
+        return pinned
+    for axis, count in enumerate(shape):
+        face = n
+        while face < count:
+            pinned |= np.abs(verts[:, axis] - face) < 1e-5
+            face += n
+    return pinned
+
+
+def smooth_pinned(verts, tris, pinned, iterations=4, lam=0.5, max_step=0.4):
+    """Same clamped smooth as the global mesh, leaving shared-face vertices put."""
+    if len(verts) == 0 or len(tris) == 0 or iterations <= 0:
+        return verts
+    if len(pinned) and np.all(pinned):
+        return verts
+    n = len(verts)
+    a = tris[:, [0, 1, 2]].reshape(-1)
+    b = tris[:, [1, 2, 0]].reshape(-1)
+    weights = np.ones(len(a), dtype=np.float64)
+    matrix = sparse.coo_matrix((weights, (a, b)), shape=(n, n)).tocsr()
+    degree = np.asarray(matrix.sum(axis=1)).ravel()
+    degree[degree == 0.0] = 1.0
+    current = np.array(verts, dtype=np.float64, copy=True)
+    original = current.copy()
+    for _ in range(iterations):
+        mean = matrix.dot(current) / degree[:, None]
+        delta = (mean - current) * lam
+        length = np.linalg.norm(delta, axis=1)
+        scale = np.ones(n, dtype=np.float64)
+        over = length > max_step
+        scale[over] = max_step / np.maximum(length[over], 1e-8)
+        current = current + delta * scale[:, None]
+        if len(pinned):
+            current[pinned] = original[pinned]
+    return current
+
+
+def extract_block(occupied, colors, block, n=BLOCK):
+    """Mesh the cells this block owns. Shared-face vertices stay on the raw midpoint."""
+    shape = tuple(int(v) for v in occupied.shape)
+    bx, by, bz = block
+    i0, i1 = block_voxel_bounds(bx, shape[0], n)
+    j0, j1 = block_voxel_bounds(by, shape[1], n)
+    k0, k1 = block_voxel_bounds(bz, shape[2], n)
+    phases = {"extract_ms": 0.0, "edge_ms": 0.0, "smooth_ms": 0.0}
+    nx, ny, nz = shape
+    ia0, ia1 = max(0, i0), min(nx, i1 + 1)
+    ib0, ib1 = max(0, j0), min(ny, j1 + 1)
+    ic0, ic1 = max(0, k0), min(nz, k1 + 1)
+    region = occupied[ia0:ia1, ib0:ib1, ic0:ic1]
+    touches_outside = i0 < 0 or j0 < 0 or k0 < 0 or i1 >= nx or j1 >= ny or k1 >= nz
+    if region.size == 0 or not region.any() or (region.all() and not touches_outside):
+        return BlockMesh(*_empty_block()), phases
+    started = time.perf_counter()
+    slab, slab_colors = _border_slab(occupied, colors, i0, i1, j0, j1, k0, k1)
+    verts, tris, _keys, cells, vert_colors = marching_cubes(slab, slab_colors, origin=(i0, j0, k0))
+    phases["extract_ms"] = (time.perf_counter() - started) * 1e3
+    started = time.perf_counter()
+    if len(tris):
+        ci, cj, ck = cell_corners(cells)
+        keep = (
+            _owns_cell(ci, bx, shape[0], n)
+            & _owns_cell(cj, by, shape[1], n)
+            & _owns_cell(ck, bz, shape[2], n)
+        )
+        verts, tris, vert_colors = _compact_used(verts, tris[keep], vert_colors)
+    phases["edge_ms"] = (time.perf_counter() - started) * 1e3
+    started = time.perf_counter()
+    if len(tris):
+        verts = smooth_pinned(verts, tris, shared_face_pins(verts, shape, n))
+    phases["smooth_ms"] = (time.perf_counter() - started) * 1e3
+    mesh = BlockMesh(verts, tris, vert_colors)
+    return mesh, phases
+
+
+class BlockMesh:
+    """Triangles for one block. Nothing here is copied from any other block."""
+
+    def __init__(self, verts, tris, colors):
+        self.verts = verts
+        self.tris = tris
+        self.colors = colors
+
+
+class BlockVolume:
+    """One mesh per block. A cut rebuilds the dirty blocks and leaves the rest stored."""
+
+    def __init__(self, occupied, colors, n=BLOCK):
+        self.n = n
+        self.shape = tuple(int(v) for v in occupied.shape)
+        self.meshes = {}
+        self.rebuild(occupied, colors, self._all_blocks())
+
+    def _all_blocks(self):
+        nx, ny, nz = self.shape
+        return [
+            (x, y, z)
+            for x in range(block_count(nx, self.n))
+            for y in range(block_count(ny, self.n))
+            for z in range(block_count(nz, self.n))
+        ]
+
+    @property
+    def triangle_count(self):
+        return int(sum(len(mesh.tris) for mesh in self.meshes.values()))
+
+    @property
+    def vertex_count(self):
+        return int(sum(len(mesh.verts) for mesh in self.meshes.values()))
+
+    def changed_blocks(self, old_occupied, old_colors, new_occupied, new_colors):
+        diff = old_occupied != new_occupied
+        if old_colors is not None and new_colors is not None:
+            diff |= np.any(old_colors != new_colors, axis=-1) & (old_occupied | new_occupied)
+        xs, ys, zs = np.nonzero(diff)
+        return blocks_touched_by(xs, ys, zs, self.shape, self.n)
+
+    def rebuild(self, occupied, colors, blocks):
+        """Replace only ``blocks``. The returned times are for the delay report."""
+        phases = {
+            "copy_ms": 0.0,
+            "extract_ms": 0.0,
+            "edge_ms": 0.0,
+            "rewrite_ms": 0.0,
+            "stitch_ms": 0.0,
+            "smooth_ms": 0.0,
+            "kept_tris": 0,
+            "new_tris": 0,
+            "blocks": 0,
+        }
+        for block in blocks:
+            mesh, part = extract_block(occupied, colors, block, self.n)
+            self.meshes[block] = mesh
+            phases["extract_ms"] += part["extract_ms"]
+            phases["edge_ms"] += part["edge_ms"]
+            phases["smooth_ms"] += part["smooth_ms"]
+            phases["new_tris"] += int(len(mesh.tris))
+            phases["blocks"] += 1
+        phases["stitch_ms"] = phases["edge_ms"] + phases["rewrite_ms"]
+        return phases

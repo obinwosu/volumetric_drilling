@@ -44,11 +44,14 @@
 //==============================================================================
 
 #include "volumetric_drilling.h"
+#include <algorithm>
 #include <boost/program_options.hpp>
 #include <atomic>
 #include <cctype>
 #include <cstdlib>
 #include <dlfcn.h>
+#include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -58,6 +61,12 @@
 namespace {
 std::atomic<int> g_drillingCamClutch{0};
 afVolmetricDrillingPlugin* g_drillingPlugin = nullptr;
+
+double rtxWallClock()
+{
+    using clock = std::chrono::system_clock;
+    return std::chrono::duration<double>(clock::now().time_since_epoch()).count();
+}
 }
 
 // Polled by ambf_openvr_plugin when setter linkage fails (RTLD_LOCAL plugins).
@@ -344,13 +353,66 @@ void afVolmetricDrillingPlugin::publishRtxStatus(double now)
     }
 
     const fs::path request = dir / "resync.request";
-    if (!fs::exists(request) || m_voxelObj == nullptr || m_voxelObj->m_texture == nullptr){
+    if (!fs::exists(request)){
         return;
+    }
+    if (dumpOccupancy((dir / "occupancy.bin").string())){
+        fs::remove(request);
+    }
+}
+
+bool afVolmetricDrillingPlugin::loadRtxTrial(const std::string& path)
+{
+    std::ifstream in(path, std::ios::binary);
+    uint32_t magic = 0;
+    uint32_t count = 0;
+    in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    in.read(reinterpret_cast<char*>(&count), sizeof(count));
+    if (!in || magic != 0x51455346u || count > 10000u){
+        return false;
+    }
+    m_rtxTrial.clear();
+    m_rtxTrial.reserve(count);
+    for (uint32_t batchIndex = 0; batchIndex < count; ++batchIndex){
+        uint32_t idLen = 0;
+        in.read(reinterpret_cast<char*>(&idLen), sizeof(idLen));
+        if (!in || idLen > 128u){
+            return false;
+        }
+        RtxTrialBatch batch;
+        batch.id.assign(idLen, '\0');
+        in.read(batch.id.data(), idLen);
+        in.read(reinterpret_cast<char*>(&batch.release_s), sizeof(batch.release_s));
+        uint32_t voxels = 0;
+        in.read(reinterpret_cast<char*>(&voxels), sizeof(voxels));
+        if (!in || voxels > 2000000u){
+            return false;
+        }
+        const std::string marker = "|drop";
+        if (batch.id.size() > marker.size() && batch.id.compare(batch.id.size() - marker.size(), marker.size(), marker) == 0){
+            batch.drop = true;
+            batch.id.resize(batch.id.size() - marker.size());
+        }
+        batch.indices.resize(static_cast<size_t>(voxels) * 3u);
+        if (!batch.indices.empty()){
+            in.read(reinterpret_cast<char*>(batch.indices.data()), batch.indices.size() * sizeof(int));
+        }
+        if (!in){
+            return false;
+        }
+        m_rtxTrial.push_back(std::move(batch));
+    }
+    return true;
+}
+
+bool afVolmetricDrillingPlugin::dumpOccupancy(const std::string& path)
+{
+    if (m_voxelObj == nullptr || m_voxelObj->m_texture == nullptr){
+        return false;
     }
     cMultiImagePtr image = dynamic_pointer_cast<cMultiImage>(m_voxelObj->m_texture->m_image);
     if (image == nullptr || image->getArray() == nullptr){
-        fs::remove(request);
-        return;
+        return false;
     }
     const int width = image->getWidth();
     const int height = image->getHeight();
@@ -358,20 +420,291 @@ void afVolmetricDrillingPlugin::publishRtxStatus(double now)
     const int bytesPerSlice = static_cast<int>(image->getSizeInBytes());
     const int voxels = width * height;
     const int bpp = (voxels > 0) ? bytesPerSlice / voxels : 0;
-    std::ofstream dump(dir / "occupancy.bin", std::ios::binary | std::ios::trunc);
+    std::ofstream dump(path, std::ios::binary | std::ios::trunc);
     if (!dump){
-        return;
+        return false;
     }
     const int32_t header[4] = {width, height, depth, bpp};
     dump.write(reinterpret_cast<const char*>(header), sizeof(header));
     dump.write(reinterpret_cast<const char*>(image->getArray()),
                static_cast<std::streamsize>(bytesPerSlice) * depth);
+    const bool wrote = static_cast<bool>(dump);
     dump.close();
-    fs::remove(request);
-    cerr << "INFO! RTX occupancy resync " << width << "x" << height << "x" << depth << endl;
+    cerr << "INFO! RTX occupancy dump " << width << "x" << height << "x" << depth << endl;
+    return wrote;
 }
 
+void afVolmetricDrillingPlugin::serviceRtxRestore()
+{
+    if (!m_rtxView || m_volumeObject == nullptr){
+        return;
+    }
+    namespace fs = std::filesystem;
+    const fs::path dir = "/tmp/fivrs-rtx";
+    if (m_rtxRestoreWait > 0){
+        m_rtxRestoreWait -= 1;
+        if (m_rtxRestoreWait == 0){
+            std::error_code mkdirError;
+            fs::create_directories(dir, mkdirError);
+            if (dumpOccupancy((dir / "occupancy.bin").string())){
+                std::ofstream done(dir / "restore.done", std::ios::trunc);
+                done << std::setprecision(17) << rtxWallClock() << "\n";
+                cerr << "INFO! RTX trial volume restored" << endl;
+            }
+        }
+    }
+    if (!fs::exists(dir / "restore.request")){
+        return;
+    }
+    fs::remove(dir / "restore.request");
+    fs::remove(dir / "delete_sequence.bin");
+    fs::remove(dir / "catchup.request");
+    fs::remove(dir / "catchup.bin");
+    m_rtxTrialLoaded = false;
+    m_rtxTrial.clear();
+    m_rtxPending.clear();
+    m_rtxHistory.clear();
+    if (m_drillManager.m_drillingPub != nullptr){
+        m_drillManager.m_drillingPub->resetRemovedCount();
+    }
+    m_flagMarkVolumeForUpdate = false;
+    m_volumeUpdate.setEmpty();
+    // updateSceneObjects runs before this graphics update, so the texture
+    // copy lands at the start of the next frame. The dump waits for that.
+    m_volumeObject->reset();
+    m_rtxRestoreWait = 1;
+}
+
+void afVolmetricDrillingPlugin::serviceRtxTrial()
+{
+    if (!m_rtxView || m_rtxRestoreWait > 0 || m_voxelObj == nullptr || m_voxelObj->m_texture == nullptr){
+        return;
+    }
+    if (m_drillManager.m_drillingPub == nullptr){
+        return;
+    }
+    namespace fs = std::filesystem;
+    const fs::path path = "/tmp/fivrs-rtx/delete_sequence.bin";
+    if (!m_rtxTrialLoaded){
+        m_rtxTrialScan = (m_rtxTrialScan + 1) % 16;
+        if (m_rtxTrialScan != 0 || !fs::exists(path)){
+            return;
+        }
+        if (!loadRtxTrial(path.string())){
+            fs::remove(path);
+            cerr << "WARNING! RTX trial file was not readable" << endl;
+            return;
+        }
+        m_rtxTrialNext = 0;
+        m_rtxTrialStart = rtxWallClock();
+        m_rtxTrialLoaded = true;
+        cerr << "INFO! RTX trial uses the live graphics-frame batch" << endl;
+    }
+    if (m_rtxTrialNext >= m_rtxTrial.size()){
+        fs::remove(path);
+        m_rtxTrialLoaded = false;
+        m_rtxTrial.clear();
+        return;
+    }
+    const double now = rtxWallClock();
+    const RtxTrialBatch& batch = m_rtxTrial[m_rtxTrialNext];
+    if (now + 1e-4 < m_rtxTrialStart + batch.release_s){
+        return;
+    }
+    cMultiImagePtr image = dynamic_pointer_cast<cMultiImage>(m_voxelObj->m_texture->m_image);
+    if (image == nullptr){
+        return;
+    }
+    const int width = image->getWidth();
+    const int height = image->getHeight();
+    const int depth = static_cast<int>(image->getImageCount());
+    int cleared = 0;
+    m_mutexVoxel.acquire();
+    for (size_t i = 0; i + 2 < batch.indices.size(); i += 3){
+        const int x = batch.indices[i];
+        const int y = batch.indices[i + 1];
+        const int z = batch.indices[i + 2];
+        if (x < 0 || y < 0 || z < 0 || x >= width || y >= height || z >= depth){
+            continue;
+        }
+        cColorb colorb;
+        image->getVoxelColor(static_cast<uint>(x), static_cast<uint>(y), static_cast<uint>(z), colorb);
+        if (colorb == m_zeroColor){
+            continue;
+        }
+        image->setVoxelColor(static_cast<uint>(x), static_cast<uint>(y), static_cast<uint>(z), m_zeroColor);
+        m_volumeUpdate.enclose(cVector3d(x, y, z));
+        enqueueRemoved(x, y, z, batch.id, batch.drop);
+        cleared += 1;
+    }
+    m_mutexVoxel.release();
+    if (cleared > 0){
+        m_flagMarkVolumeForUpdate = true;
+    }
+    cerr << "INFO! RTX trial " << batch.id << " cleared " << cleared
+         << (batch.drop ? " (withheld from publish)" : "") << endl;
+    m_rtxTrialNext += 1;
+}
+
+void afVolmetricDrillingPlugin::enqueueRemoved(int x, int y, int z, const std::string& trialId, bool silent)
+{
+    RtxPendingVoxel voxel;
+    voxel.trialId = trialId;
+    voxel.wallClear = rtxWallClock();
+    voxel.x = x;
+    voxel.y = y;
+    voxel.z = z;
+    voxel.silent = silent;
+    m_rtxPending.push_back(voxel);
+}
+
+void afVolmetricDrillingPlugin::writeTrialLine(const std::string& id, int cleared, uint64_t batchId, double wallClear, double wallPublish, double clearMs, bool dropped)
+{
+    std::ofstream log("/tmp/fivrs-rtx/ambf_timing.jsonl", std::ios::app);
+    log << std::setprecision(17)
+        << "{\"id\":\"" << id << "\",\"n\":" << cleared
+        << ",\"serial\":" << batchId
+        << ",\"message_serial\":" << batchId
+        << ",\"wall_clear\":" << wallClear
+        << ",\"wall_publish\":" << (dropped ? 0.0 : wallPublish)
+        << ",\"clear_ms\":" << clearMs
+        << ",\"dropped\":" << (dropped ? "true" : "false")
+        << ",\"mode\":\"live\"}\n";
+}
+
+void afVolmetricDrillingPlugin::serviceRtxFlush()
+{
+    if (!m_rtxView || m_drillManager.m_drillingPub == nullptr){
+        return;
+    }
+    m_mutexVoxel.acquire();
+    if (m_rtxPending.empty()){
+        m_mutexVoxel.release();
+        return;
+    }
+    std::vector<RtxPendingVoxel> pending;
+    pending.swap(m_rtxPending);
+    m_mutexVoxel.release();
+
+    auto emit = [&](bool silent){
+        std::vector<RtxPendingVoxel> group;
+        for (const RtxPendingVoxel& voxel : pending){
+            if (voxel.silent == silent){
+                group.push_back(voxel);
+            }
+        }
+        if (group.empty()){
+            return;
+        }
+        const uint64_t batchId = m_rtxNextBatch++;
+        RtxBatch batch;
+        batch.id = batchId;
+        batch.published = !silent;
+        batch.indices.reserve(group.size() * 3u);
+        m_drillManager.m_drillingPub->clearVoxelMsg();
+        for (const RtxPendingVoxel& voxel : group){
+            batch.indices.push_back(voxel.x);
+            batch.indices.push_back(voxel.y);
+            batch.indices.push_back(voxel.z);
+            if (!silent){
+                cVector3d index(voxel.x, voxel.y, voxel.z);
+                cColorf color(0.0f, 0.0f, 0.0f);
+                m_drillManager.m_drillingPub->appendToVoxelMsg(index, color);
+            }
+        }
+        m_mutexVoxel.acquire();
+        m_rtxHistory.push_back(batch);
+        if (m_rtxHistory.size() > 8192u){
+            m_rtxHistory.erase(m_rtxHistory.begin(), m_rtxHistory.begin() + static_cast<std::ptrdiff_t>(m_rtxHistory.size() - 8192u));
+        }
+        m_mutexVoxel.release();
+        const double published = rtxWallClock();
+        if (!silent){
+            m_drillManager.m_drillingPub->publishVoxelBatch(m_worldPtr->getCurrentTimeStamp(), batchId);
+            m_flagMarkVolumeForUpdate = true;
+        }
+        size_t cursor = 0;
+        while (cursor < group.size()){
+            const std::string id = group[cursor].trialId.empty() ? (silent ? "withheld" : "drill") : group[cursor].trialId;
+            const double wallClear = group[cursor].wallClear;
+            int count = 0;
+            while (cursor < group.size()){
+                const std::string nextId = group[cursor].trialId.empty() ? (silent ? "withheld" : "drill") : group[cursor].trialId;
+                if (nextId != id){
+                    break;
+                }
+                count += 1;
+                cursor += 1;
+            }
+            writeTrialLine(id, count, batchId, wallClear, published, 0.0, silent);
+        }
+    };
+    emit(false);
+    emit(true);
+}
+
+void afVolmetricDrillingPlugin::serviceRtxCatchup()
+{
+    namespace fs = std::filesystem;
+    const fs::path request = "/tmp/fivrs-rtx/catchup.request";
+    if (!fs::exists(request)){
+        return;
+    }
+    std::ifstream in(request);
+    uint64_t first = 0;
+    uint64_t last = 0;
+    in >> first >> last;
+    if (!in || last < first){
+        fs::remove(request);
+        return;
+    }
+    std::vector<RtxBatch> found;
+    bool missing = false;
+    if (last > first + 8192u){
+        missing = true;
+        last = first + 8192u;
+    }
+    m_mutexVoxel.acquire();
+    for (uint64_t id = first; id <= last; ++id){
+        const auto batch = std::find_if(m_rtxHistory.begin(), m_rtxHistory.end(), [id](const RtxBatch& item){ return item.id == id; });
+        if (batch == m_rtxHistory.end()){
+            missing = true;
+        } else {
+            found.push_back(*batch);
+        }
+    }
+    m_mutexVoxel.release();
+    const fs::path temporary = "/tmp/fivrs-rtx/catchup.tmp";
+    const fs::path bin = "/tmp/fivrs-rtx/catchup.bin";
+    std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+    const uint32_t magic = 0x48544346u;
+    const uint32_t missingFlag = missing ? 1u : 0u;
+    const uint32_t batchCount = static_cast<uint32_t>(found.size());
+    out.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+    out.write(reinterpret_cast<const char*>(&missingFlag), sizeof(missingFlag));
+    out.write(reinterpret_cast<const char*>(&batchCount), sizeof(batchCount));
+    for (const RtxBatch& batch : found){
+        const uint64_t id = batch.id;
+        const uint32_t count = static_cast<uint32_t>(batch.indices.size() / 3u);
+        out.write(reinterpret_cast<const char*>(&id), sizeof(id));
+        out.write(reinterpret_cast<const char*>(&count), sizeof(count));
+        if (count > 0){
+            out.write(reinterpret_cast<const char*>(batch.indices.data()), batch.indices.size() * sizeof(int));
+        }
+    }
+    out.close();
+    fs::remove(bin);
+    fs::rename(temporary, bin);
+    fs::remove(request);
+    cerr << "INFO! RTX catch-up batches " << first << "-" << last
+         << " found " << found.size() << (missing ? " (history miss)" : "") << endl;
+}
+
+
 void afVolmetricDrillingPlugin::graphicsUpdate(){
+    serviceRtxRestore();
+    serviceRtxCatchup();
+    serviceRtxFlush();
 
     // update region of voxels to be updated
     if (m_flagMarkVolumeForUpdate)
@@ -485,6 +818,7 @@ void afVolmetricDrillingPlugin::physicsUpdate(double dt){
         return;
     }
 
+    serviceRtxTrial();
     m_drillManager.update(dt);
 
     bool anyCursorInContact = false;
@@ -520,14 +854,20 @@ void afVolmetricDrillingPlugin::physicsUpdate(double dt){
                     cColorb colorb;
                     m_voxelObj->m_texture->m_image->getVoxelColor(uint(ct.x()), uint(ct.y()), uint(ct.z()), colorb);
                     cColorf colorf = colorb.getColorf();
-                    m_drillManager.m_drillingPub->appendToVoxelMsg(ct, colorf);
+                    if (m_rtxView){
+                        enqueueRemoved(static_cast<int>(ct.x()), static_cast<int>(ct.y()), static_cast<int>(ct.z()), "", false);
+                    } else {
+                        m_drillManager.m_drillingPub->appendToVoxelMsg(ct, colorf);
+                    }
                     m_voxelObj->m_texture->m_image->setVoxelColor(uint(ct.x()), uint(ct.y()), uint(ct.z()), m_zeroColor);
                     m_volumeUpdate.enclose(cVector3d(uint(ct.x()), uint(ct.y()), uint(ct.z())));
                 }
                 m_mutexVoxel.release();
 
-                //Publisher for voxels removed
-                m_drillManager.m_drillingPub->publishVoxelMsg(m_worldPtr->getCurrentTimeStamp());
+                // RTX publishes the accumulated voxels once per graphics frame.
+                if (!m_rtxView){
+                    m_drillManager.m_drillingPub->publishVoxelMsg(m_worldPtr->getCurrentTimeStamp());
+                }
             }
 
             //Publisher for voxels removed

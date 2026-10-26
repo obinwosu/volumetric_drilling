@@ -190,6 +190,27 @@ void DrillingPublisher::clearVoxelMsg()
     m_voxel_msg.colors.clear();
 }
 
+void DrillingPublisher::skipRemoved(uint64_t count)
+{
+    m_removedCount += count;
+}
+
+void DrillingPublisher::publishVoxelBatch(double time, uint64_t batchId)
+{
+    m_removedCount += static_cast<uint64_t>(m_voxel_msg.indices.size());
+    m_voxel_msg.header.frame_id = std::to_string(batchId);
+    #if AMBF_ROS1
+        m_voxel_msg.header.stamp.fromSec(time);
+        m_voxelsRemovalPub->publish(m_voxel_msg);
+    #elif AMBF_ROS2
+        int32_t sec  = static_cast<int32_t>(time);
+        uint32_t nsec = static_cast<uint32_t>((time - sec) * 1e9);
+        m_voxel_msg.header.stamp.sec = sec;
+        m_voxel_msg.header.stamp.nanosec = nsec;
+        m_voxelsRemovalPub->publish(m_voxel_msg);
+    #endif
+}
+
 void DrillingPublisher::publishVoxelMsg(double time)
 {
     m_removedCount += static_cast<uint64_t>(m_voxel_msg.indices.size());

@@ -93,6 +93,13 @@ public:
     void clearVoxelMsg();
 
     void publishVoxelMsg(double time);
+    // frame_id is the consecutive published-batch id, not the voxel tally.
+    void publishVoxelBatch(double time, uint64_t batchId);
+
+    // Count voxels that were cleared but not published, so the next frame_id
+    // skips them and the RTX view can see the hole.
+    void skipRemoved(uint64_t count);
+    void resetRemovedCount() { m_removedCount = 0; }
 
     // Cumulative voxels published. The RTX view reads this from the message
     // frame_id so it can tell when a removal batch was dropped.

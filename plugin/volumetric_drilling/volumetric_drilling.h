@@ -285,6 +285,45 @@ private:
     bool m_rtxView = false;
     bool m_rtxWindowSized = false;
     double m_rtxStatusTimer = 0.0;
+
+    // RTX deletions are queued in physics and published once per graphics frame.
+    // A trial file clears named voxels through that same queue.
+    void serviceRtxRestore();
+    void serviceRtxTrial();
+    void serviceRtxFlush();
+    void serviceRtxCatchup();
+    bool dumpOccupancy(const std::string& path);
+    bool loadRtxTrial(const std::string& path);
+    void enqueueRemoved(int x, int y, int z, const std::string& trialId, bool silent);
+    void writeTrialLine(const std::string& id, int cleared, uint64_t batchId, double wallClear, double wallPublish, double clearMs, bool dropped);
+    struct RtxTrialBatch {
+        std::string id;
+        double release_s = 0.0;
+        std::vector<int> indices;
+        bool drop = false;
+    };
+    struct RtxPendingVoxel {
+        std::string trialId;
+        double wallClear = 0.0;
+        int x = 0;
+        int y = 0;
+        int z = 0;
+        bool silent = false;
+    };
+    struct RtxBatch {
+        uint64_t id = 0;
+        bool published = false;
+        std::vector<int> indices;
+    };
+    std::vector<RtxTrialBatch> m_rtxTrial;
+    std::vector<RtxPendingVoxel> m_rtxPending;
+    std::vector<RtxBatch> m_rtxHistory;
+    size_t m_rtxTrialNext = 0;
+    double m_rtxTrialStart = 0.0;
+    bool m_rtxTrialLoaded = false;
+    int m_rtxTrialScan = 0;
+    int m_rtxRestoreWait = 0;
+    uint64_t m_rtxNextBatch = 1;
 };
 
 
