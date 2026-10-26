@@ -1,0 +1,10 @@
+# Original segmentation colors from the volume slices.
+# Tuner display color may have been edited; identity is always this hex.
+# bone is the plugin's m_boneColor. The other official names are Slicer
+# GenericAnatomyColors matches on the original RGB, allowing one-level PNG
+# quantization. Do not match against diffuse_reflection_color.
+labels:
+  fff9db: bone                 # 255,249,219  volumetric_drilling.cpp
+  f4d631: nerve                # 244,214,49   Slicer nerve
+  d8644f: artery               # 216,100,79   Slicer artery/blood 216,101,79
+  6eb8d1: connective_tissue    # 110,184,209  Slicer connective_tissue/cartilage 111,184,210

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """FIVRS RTX Tuner.
 
-A fixed view of the undrilled bone for setting the microscope light.
-Material sliders can be added later in the same window; their values
-already have a place in the saved file.
+A fixed view of the undrilled bone and the burr. The light panel writes
+tuner_light.json. The structure panel writes tuner_materials.json, keyed by
+segmentation hex and by a regular name such as bone. Visibility stays in
+this window and is not saved.
 """
 
 from __future__ import annotations
@@ -17,6 +18,8 @@ import numpy as np
 import warp as wp
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+import rtx_materials
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parents[1]
@@ -38,7 +41,7 @@ DEFAULT_LIGHTS = {
 
 
 def load_document() -> dict:
-    document = {"version": 1, "lights": dict(DEFAULT_LIGHTS), "materials": {}}
+    document = {"version": 1, "lights": dict(DEFAULT_LIGHTS)}
     if not SAVE_PATH.is_file():
         return document
     try:
@@ -49,7 +52,6 @@ def load_document() -> dict:
     lights = dict(DEFAULT_LIGHTS)
     lights.update(saved.get("lights") or {})
     document["lights"] = lights
-    document["materials"] = dict(saved.get("materials") or {})
     return document
 
 
@@ -57,7 +59,6 @@ def save_document(document: dict) -> None:
     payload = {
         "version": 1,
         "lights": document["lights"],
-        "materials": document.get("materials") or {},
     }
     temporary = SAVE_PATH.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(payload, indent=2) + "\n")
@@ -177,16 +178,74 @@ def _quiet_stock_panels():
     ViewerGui._render_stats_overlay = lambda self: None
 
 
-def _author_scene(viewer, lights):
+def _burr_pose(groups, camera):
+    """Park the burr in the lower-right of the scope, in front of the bone."""
+    position, right, up, forward = camera
+    parts = [np.concatenate(points) for points, _normals, _tris in groups.values() if points]
+    if parts:
+        along = (np.concatenate(parts) - position) @ forward
+        in_front = along > 0.2
+        near = float(np.min(along[in_front])) if np.any(in_front) else 2.0
+    else:
+        near = 2.0
+    # Closer than the specimen so the 6 mm head reads in this narrow field.
+    distance = max(min(near * 0.45, near - 0.35), 1.1)
+    half_height = distance * math.tan(0.5 * 0.17951634837990105)
+    shift = 0.32 * half_height
+    center = position + forward * distance + right * shift - up * shift
+    return center, right, up, forward
+
+
+def _author_burr(viewer, groups, camera):
+    from fivrs_rtx_view import MESH_DIR, MM_TO_SIM, _load_obj, _sphere
+    from surface import vertex_normals
+
+    scale = 6.0 * MM_TO_SIM * 0.5
+    center, right, up, forward = _burr_pose(groups, camera)
+    flute_path = MESH_DIR / "fluted_burr.obj"
+    try:
+        points, tris, normals = _load_obj(flute_path)
+        print(f"Tuner burr {len(tris)} tris", flush=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        points, tris = _sphere(1.0)
+        normals = vertex_normals(points.astype(np.float64), tris).astype(np.float32)
+        print(f"Fluted burr unavailable ({exc}); using the diamond sphere", flush=True)
+    # Mesh -X is the cutting end. Face that toward the camera so the flutes show.
+    axes = np.column_stack((forward, right, up))
+    world = np.ascontiguousarray(points @ axes.T * scale + center, np.float32)
+    world_normals = np.ascontiguousarray(normals @ axes.T, np.float32)
+    color = tuple(rtx_materials.resolve(viewer._material_document, "burr")["diffuse_reflection_color"])
+    viewer.log_mesh(
+        "burr",
+        wp.array(world, dtype=wp.vec3),
+        wp.array(np.ascontiguousarray(tris.reshape(-1), np.int32), dtype=wp.int32),
+        normals=wp.array(world_normals, dtype=wp.vec3),
+        color=color,
+        roughness=0.18,
+        metallic=0.92,
+    )
+    prim = viewer.stage.GetPrimAtPath(viewer._get_path(viewer._qualify("burr")))
+    if not prim.IsValid():
+        print("No mesh prim for burr", flush=True)
+        return None
+    rtx_materials.bind_prim(viewer, prim, "burr", viewer._material_document)
+    print(f"Tuner burr at {center.round(3).tolist()}", flush=True)
+    return {"id": "burr", "prim": prim}
+
+
+def _author_scene(viewer, lights, camera):
     from pxr import Gf, UsdLux
 
     groups = _bone_groups()
+    segments = []
     for key, (points, normals, tris) in groups.items():
         if sum(len(part) for part in tris) < 40:
             continue
-        color = ((key & 255) / 255.0, ((key >> 8) & 255) / 255.0, ((key >> 16) & 255) / 255.0)
+        segment = rtx_materials.segment_id(key)
+        name = rtx_materials.name_of(viewer._material_document, segment) or f"bone_{key:06x}"
+        color = tuple(rtx_materials.identity_color(segment))
         viewer.log_mesh(
-            f"bone_{key:06x}",
+            name,
             wp.array(np.ascontiguousarray(np.concatenate(points), np.float32), dtype=wp.vec3),
             wp.array(np.ascontiguousarray(np.concatenate(tris).reshape(-1), np.int32), dtype=wp.int32),
             normals=wp.array(np.ascontiguousarray(np.concatenate(normals), np.float32), dtype=wp.vec3),
@@ -194,6 +253,16 @@ def _author_scene(viewer, lights):
             roughness=0.55,
             metallic=0.0,
         )
+        prim = viewer.stage.GetPrimAtPath(viewer._get_path(viewer._qualify(name)))
+        if not prim.IsValid():
+            print(f"No mesh prim for {name}", flush=True)
+            continue
+        rtx_materials.bind_prim(viewer, prim, segment, viewer._material_document)
+        segments.append({"id": segment, "prim": prim})
+    segments.sort(key=lambda item: item["id"])
+    burr = _author_burr(viewer, groups, camera)
+    if burr:
+        segments.append(burr)
     disk_color = Gf.Vec3f(*lights["disk_color"])
     disk = UsdLux.DiskLight.Define(viewer.stage, "/root/_ScopeLight")
     disk.CreateIntensityAttr(float(lights["intensity_nits"]))
@@ -206,6 +275,7 @@ def _author_scene(viewer, lights):
     dome = UsdLux.DomeLight.Define(viewer.stage, "/root/_ScopeFill")
     dome.CreateIntensityAttr(float(lights["fill"]))
     dome.CreateColorAttr(Gf.Vec3f(*lights["fill_color"]))
+    return segments
 
 
 def _bind_light(viewer, lights, camera):
@@ -253,6 +323,7 @@ def _bind_light(viewer, lights, camera):
             if not getattr(viewer, "_tune_warned", False):
                 print(f"light write failed: {exc}", flush=True)
                 viewer._tune_warned = True
+        rtx_materials.flush_materials(viewer)
 
     viewer._update_ovrtx_camera = update
 
@@ -296,9 +367,6 @@ def _draw_panel(imgui, document, status):
     )
     changed |= touched
     imgui.separator()
-    imgui.text_disabled("Materials")
-    imgui.text_disabled("Omniverse material sliders will go here.")
-    imgui.separator()
     if imgui.button("Save light") or changed:
         save_document(document)
         status["text"] = f"Saved {SAVE_PATH.name}"
@@ -339,11 +407,14 @@ def main():
     viewer.show_ui = True
     viewer.show_ground = False
     viewer.picking_enabled = False
-    _author_scene(viewer, lights)
+    rtx_materials.attach(viewer)
+    segments = _author_scene(viewer, lights, camera)
     _bind_light(viewer, lights, camera)
     status = {"text": "Moves save as you drag."}
+    materials = rtx_materials.MaterialUi(viewer, segments)
     viewer.register_ui_callback(lambda imgui: _draw_panel(imgui, document, status), position="free")
-    print(f"Tuner ready. Light file {SAVE_PATH}", flush=True)
+    viewer.register_ui_callback(materials.draw, position="free")
+    print(f"Tuner ready. Light {SAVE_PATH.name}  materials {rtx_materials.MATERIALS_PATH.name}", flush=True)
     locked = False
     while viewer.is_running():
         viewer._camera_dirty = True

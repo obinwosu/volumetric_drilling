@@ -26,6 +26,7 @@ import yaml
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
+import rtx_materials
 from surface import BlockVolume, blocks_touched_by, index_to_local, local_to_world, vertex_normals
 
 # DrillManager stores a millimetre as 0.01007 simulation units, then the
@@ -372,6 +373,7 @@ def _author_lights(viewer):
     _remember_cone_angle(viewer._cone_angle)
     if found:
         _announce_tuner_light(viewer)
+    rtx_materials.attach(viewer)
     print("RTX distant beam off    L toggles it", flush=True)
 
 
@@ -712,6 +714,8 @@ def _remember_cone_angle(angle):
 
 def _push_exposure(viewer):
     _reload_tuner_lights(viewer)
+    rtx_materials.reload_if_changed(viewer)
+    rtx_materials.flush_materials(viewer)
     for path in LIGHT_BASE:
         value = _light_intensity(viewer, path)
         prim = viewer.stage.GetPrimAtPath(path)
@@ -921,6 +925,14 @@ def _send_chunk(viewer, key, points, tris, normals, color):
         _log_chunk(viewer, name, points, tris, normals, color)
     names[key] = name
     viewer._chunk_names = names
+    try:
+        rtx_materials.bind_named_mesh(
+            viewer, name, rtx_materials.segment_id(packed), viewer._material_document
+        )
+    except Exception as exc:
+        if not getattr(viewer, "_material_bind_warned", False):
+            print(f"material bind failed: {exc}", flush=True)
+            viewer._material_bind_warned = True
 
 
 _EMPTY_POINTS = np.zeros((3, 3), np.float32)
@@ -1393,6 +1405,19 @@ def _log_instance(viewer, name, mesh, position, quat, scale, hidden=False):
     )
 
 
+def _bind_burr(viewer):
+    document = getattr(viewer, "_material_document", None)
+    if document is None:
+        return
+    for name in ("drill/sphere", "drill/flutes", "drill/cutting", "drill/diamond"):
+        try:
+            rtx_materials.bind_named_mesh(viewer, name, "burr", document)
+        except Exception as exc:
+            if not getattr(viewer, "_burr_material_warned", False):
+                print(f"burr material bind failed: {exc}", flush=True)
+                viewer._burr_material_warned = True
+
+
 def _log_static_mesh(viewer, name, points, tris, normals, color, roughness, metallic):
     # The mesh is a prototype. Leaving it visible draws it a second time at
     # the origin, which is where the giant drills were coming from.
@@ -1465,6 +1490,9 @@ def _log_instrument(viewer, bridge):
             1.0,
             hidden=shaft_size != size,
         )
+    if not getattr(viewer, "_burr_material_bound", False):
+        _bind_burr(viewer)
+        viewer._burr_material_bound = True
 
 
 def main():
@@ -1587,6 +1615,7 @@ def main():
         instrument["shafts"][size] = f"drill/shaft_{size}"
         print(f"Shaft {size} mm {len(shaft_tris)} tris", flush=True)
     viewer._instrument_meshes = instrument
+    _bind_burr(viewer)
     viewer._volume_translation = np.asarray(bridge.volume["translation"], dtype=np.float64)
     uploads = [_begin_upload(_prepare_blocks(blocks, bridge.volume, None), True, extract_s * 1e3, None)]
     worker = SurfaceWorker(blocks, occupied, colors, bridge.volume)
