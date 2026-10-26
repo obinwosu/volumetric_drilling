@@ -28,14 +28,20 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from surface import BlockVolume, blocks_touched_by, index_to_local, local_to_world, vertex_normals
 
-# The volume ADF states 1 AMBF unit = 0.049664 m. Burr diameters arrive in mm.
-METERS_PER_AU = 0.049664
+# DrillManager stores a millimetre as 0.01007 simulation units, then the
+# cutter and the fluted mesh both use half of that as the radius. Converting
+# millimetres through the volume's metre scale instead draws a sphere twice
+# as large as the sphere that removes bone.
+MM_TO_SIM = 0.01007
+MESH_DIR = pathlib.Path(__file__).resolve().parents[2] / "ADF" / "meshes" / "high_res"
 # main_camera field view angle, radians, full vertical angle.
 VERTICAL_FOV_RAD = 0.17951634837990105
 RUNTIME = pathlib.Path("/tmp/fivrs-rtx")
 BONE_ROUGHNESS = 0.55
 # Scope lights at exposure 1. The bone albedo is nearly white, so these sit
-# well below the first tuning, which clipped the whole view.
+# well below the first tuning, which clipped the whole view. The distant beam
+# is what actually lights the specimen: a camera sphere falls off with
+# distance, and the bone sits about 5 units in front of the camera.
 LIGHT_BASE = {
     "/root/_ScopeBeam": 200.0,
     "/root/_ScopeFill": 8.0,
@@ -184,7 +190,66 @@ def _sphere(radius: float, stacks: int = 8, slices: int = 12):
             c = (i + 1) * slices + j
             d = (i + 1) * slices + (j + 1) % slices
             tris.extend((a, c, b, b, c, d))
-    return points, np.asarray(tris, dtype=np.int32)
+    return points, np.asarray(tris, dtype=np.int32).reshape(-1, 3)
+
+
+def _load_obj(path):
+    """Positions and authored normals. Corners stay split so flute edges stay sharp."""
+    positions = []
+    normals = []
+    corners = []
+    with open(path) as handle:
+        for line in handle:
+            if line.startswith("v "):
+                positions.append([float(item) for item in line.split()[1:4]])
+            elif line.startswith("vn "):
+                normals.append([float(item) for item in line.split()[1:4]])
+            elif line.startswith("f "):
+                face = []
+                for token in line.split()[1:]:
+                    parts = token.split("/")
+                    vertex = int(parts[0]) - 1
+                    normal = int(parts[2]) - 1 if len(parts) > 2 and parts[2] else vertex
+                    face.append((vertex, normal))
+                for index in range(1, len(face) - 1):
+                    corners.extend((face[0], face[index], face[index + 1]))
+    lookup = {}
+    points = []
+    point_normals = []
+    indices = []
+    for vertex, normal in corners:
+        slot = lookup.get((vertex, normal))
+        if slot is None:
+            slot = len(points)
+            lookup[(vertex, normal)] = slot
+            points.append(positions[vertex])
+            if 0 <= normal < len(normals):
+                point_normals.append(normals[normal])
+            else:
+                point_normals.append((0.0, 0.0, 1.0))
+        indices.append(slot)
+    points = np.asarray(points, dtype=np.float32)
+    point_normals = np.asarray(point_normals, dtype=np.float32)
+    lengths = np.linalg.norm(point_normals, axis=1, keepdims=True)
+    point_normals /= np.maximum(lengths, 1e-8)
+    return points, np.asarray(indices, dtype=np.int32).reshape(-1, 3), point_normals
+
+
+def _mul_quat(left, right):
+    """Hamilton product, both quaternions stored as x, y, z, w."""
+    lx, ly, lz, lw = left
+    rx, ry, rz, rw = right
+    return (
+        lw * rx + lx * rw + ly * rz - lz * ry,
+        lw * ry - lx * rz + ly * rw + lz * rx,
+        lw * rz + lx * ry - ly * rx + lz * rw,
+        lw * rw - lx * rx - ly * ry - lz * rz,
+    )
+
+
+def _spin_about_x(angle):
+    half = 0.5 * float(angle)
+    return (float(np.sin(half)), 0.0, 0.0, float(np.cos(half)))
 
 
 def _author_lights(viewer):
@@ -325,6 +390,18 @@ class Bridge:
         self.node.create_subscription(Voxels, "/ambf/env/plugin/volumetric_drilling/voxels_removed", self._voxels, stream)
         self.node.create_subscription(CameraState, "/ambf/env/cameras/main_camera/State", self._camera, pose)
         self.node.create_subscription(RigidBodyState, "/ambf/env/mastoidectomy_drill/State", self._drill, pose)
+        # The sized burrs are named 1mm, 2mm, 4mm, and 6mm. ROS 2 rejects those
+        # topic names, so the visible pose is read from drill_state.json.
+        self._nudge_totals = {
+            "seq": 0,
+            "yaw": 0.0,
+            "pitch": 0.0,
+            "pan_right": 0.0,
+            "pan_up": 0.0,
+            "dolly": 0.0,
+        }
+        self._nudge_announced = False
+        self._nudge_warned = False
         self._spin_thread = threading.Thread(target=self._spin_loop, name="fivrs-rtx-recv", daemon=True)
         self._spin_thread.start()
 
@@ -333,6 +410,36 @@ class Bridge:
         # cannot stop new deletions from being recorded.
         while self._running:
             self._rclpy.spin_once(self.node, timeout_sec=0.01)
+
+    def publish_camera_nudge(self, yaw=0.0, pitch=0.0, pan_right=0.0, pan_up=0.0, dolly=0.0):
+        """Ask AMBF to move main_camera. This window then draws the published pose.
+
+        The simulator's drilling node is never spun, so a ROS subscriber on it
+        does not receive. Running totals are written for the graphics loop.
+        """
+        totals = self._nudge_totals
+        totals["seq"] += 1
+        totals["yaw"] += float(yaw)
+        totals["pitch"] += float(pitch)
+        totals["pan_right"] += float(pan_right)
+        totals["pan_up"] += float(pan_up)
+        totals["dolly"] += float(dolly)
+        try:
+            RUNTIME.mkdir(parents=True, exist_ok=True)
+            temporary = RUNTIME / "camera_nudge.tmp"
+            temporary.write_text(
+                f"{totals['seq']} {totals['yaw']:.8f} {totals['pitch']:.8f} "
+                f"{totals['pan_right']:.8f} {totals['pan_up']:.8f} {totals['dolly']:.8f}\n"
+            )
+            temporary.replace(RUNTIME / "camera_nudge.txt")
+        except OSError as exc:
+            if not self._nudge_warned:
+                print(f"RTX camera nudge was not saved: {exc}", flush=True)
+                self._nudge_warned = True
+            return
+        if not self._nudge_announced:
+            print("RTX camera gesture sent to AMBF main_camera.", flush=True)
+            self._nudge_announced = True
 
     def spin(self):
         return
@@ -410,10 +517,9 @@ class Bridge:
             ),
         }
 
-    def _drill(self, msg):
-        self._arrived += 1
+    def _pose(self, msg):
         pose = msg.pose
-        self.drill = {
+        return {
             "position": np.array([pose.position.x, pose.position.y, pose.position.z], dtype=np.float64),
             "quat": (
                 float(pose.orientation.x),
@@ -422,6 +528,10 @@ class Bridge:
                 float(pose.orientation.w),
             ),
         }
+
+    def _drill(self, msg):
+        self._arrived += 1
+        self.drill = self._pose(msg)
 
     def _voxels(self, msg):
         self._arrived += 1
@@ -486,6 +596,16 @@ def _set_exposure(viewer, scale):
 
 
 def _bind_exposure_keys(viewer):
+    """Attach once the presentation window exists.
+
+    ViewerRTX creates that window on the first displayed frame, so a bind
+    during setup finds nothing and the keys never arrive.
+    """
+    if getattr(viewer, "_exposure_keys_bound", False):
+        return
+    window = getattr(viewer, "_window", None)
+    if window is None:
+        return
     import pyglet.window.key as key
 
     def on_key_press(symbol, modifiers):
@@ -496,9 +616,71 @@ def _bind_exposure_keys(viewer):
         elif symbol == key.BACKSLASH:
             _set_exposure(viewer, 1.0)
 
+    window.push_handlers(on_key_press=on_key_press)
+    viewer._exposure_keys_bound = True
+    print("RTX lighting keys ready: [ darker    ] brighter    \\ reset", flush=True)
+
+
+def _pan_scale(viewer, bridge):
+    """World units per pixel, from the current camera-to-volume distance."""
+    distance = 5.0
+    camera = getattr(bridge, "camera", None)
+    volume = getattr(bridge, "volume", None)
+    if camera is not None and volume is not None:
+        distance = float(np.linalg.norm(camera["position"] - volume["translation"]))
+    distance = max(distance, 0.5)
+    height = max(float(getattr(viewer.camera, "height", 720.0)), 1.0)
+    return 2.0 * distance * float(np.tan(VERTICAL_FOV_RAD * 0.5)) / height
+
+
+def _rtx_mouse_drag(viewer, bridge, x, y, dx, dy, buttons, to_framebuffer_coords, modifiers=0):
+    import pyglet
+
+    del x, y, to_framebuffer_coords, modifiers
+    if buttons & pyglet.window.mouse.LEFT:
+        bridge.publish_camera_nudge(yaw=-float(dx) * 0.25, pitch=float(dy) * 0.25)
+    elif buttons & (pyglet.window.mouse.RIGHT | pyglet.window.mouse.MIDDLE):
+        scale = _pan_scale(viewer, bridge)
+        bridge.publish_camera_nudge(pan_right=-float(dx) * scale, pan_up=-float(dy) * scale)
+
+
+def _rtx_mouse_scroll(viewer, bridge, scroll_y, is_ctrl_down=False):
+    del viewer, is_ctrl_down
+    if abs(float(scroll_y)) < 1e-6:
+        return
+    bridge.publish_camera_nudge(dolly=float(scroll_y) * 0.15)
+
+
+def _bind_window_input(viewer, bridge):
+    """Camera gestures go to AMBF. The view keeps following main_camera.
+
+    The viewer's own drag handler is installed before ImGui, and ImGui sits
+    above it. Handlers pushed after the window exists are dispatched first.
+    """
+    if getattr(viewer, "_window_input_bound", False):
+        return
     window = getattr(viewer, "_window", None)
-    if window is not None:
-        window.push_handlers(on_key_press=on_key_press)
+    if window is None:
+        return
+    _bind_exposure_keys(viewer)
+
+    def on_mouse_drag(x, y, dx, dy, buttons, modifiers):
+        _rtx_mouse_drag(viewer, bridge, x, y, dx, dy, buttons, None, modifiers)
+        return True
+
+    def on_mouse_scroll(x, y, scroll_x, scroll_y):
+        del x, y, scroll_x
+        _rtx_mouse_scroll(viewer, bridge, scroll_y)
+        return True
+
+    window.push_handlers(on_mouse_drag, on_mouse_scroll)
+    gui = getattr(viewer, "gui", None)
+    if gui is not None:
+        gui.handle_mouse_drag = lambda *args, **kwargs: None
+        gui.handle_mouse_scroll = lambda *args, **kwargs: None
+        gui.update_camera_from_keys = lambda *args, **kwargs: None
+    viewer._window_input_bound = True
+    print("RTX camera: left-drag orbit, right-drag pan, wheel dolly. AMBF keeps main_camera.", flush=True)
 
 
 def _log_chunk(viewer, name, points, tris, normals, color):
@@ -1010,19 +1192,94 @@ def _install_frame_probes(viewer):
     viewer.end_frame = timed_end
 
 
-def _log_burr(viewer, position, quat, radius):
+def _log_instance(viewer, name, mesh, position, quat, scale, hidden=False):
     xform = wp.transform(
         wp.vec3(float(position[0]), float(position[1]), float(position[2])),
         wp.quat(float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])),
     )
     viewer.log_instances(
-        "drill/burr",
-        "drill/sphere",
+        name,
+        mesh,
         wp.array([xform], dtype=wp.transform),
-        wp.array([wp.vec3(radius, radius, radius)], dtype=wp.vec3),
+        wp.array([wp.vec3(float(scale), float(scale), float(scale))], dtype=wp.vec3),
         None,
         None,
+        hidden=hidden,
     )
+
+
+def _log_static_mesh(viewer, name, points, tris, normals, color, roughness, metallic):
+    # The mesh is a prototype. Leaving it visible draws it a second time at
+    # the origin, which is where the giant drills were coming from.
+    viewer.log_mesh(
+        name,
+        wp.array(np.ascontiguousarray(points), dtype=wp.vec3),
+        wp.array(np.ascontiguousarray(tris.reshape(-1)), dtype=wp.int32),
+        normals=wp.array(np.ascontiguousarray(normals), dtype=wp.vec3),
+        color=color,
+        roughness=roughness,
+        metallic=metallic,
+        dynamic=False,
+        hidden=True,
+    )
+
+
+def _read_drill_state():
+    try:
+        return json.loads((RUNTIME / "drill_state.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _visual_pose(state):
+    """Pose of the burr AMBF is drawing. The sized body has no ROS topic."""
+    try:
+        return {
+            "position": np.array(
+                [float(state["px"]), float(state["py"]), float(state["pz"])], dtype=np.float64
+            ),
+            "quat": (float(state["qx"]), float(state["qy"]), float(state["qz"]), float(state["qw"])),
+        }
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _log_instrument(viewer, bridge):
+    """Shaft plus the same tip AMBF draws, at the cutter radius rather than around it."""
+    state = _read_drill_state()
+    size = int(state.get("size_mm") or bridge.burr_mm or 6)
+    pose = _visual_pose(state) or bridge.drill
+    if pose is None:
+        return
+    radius = float(size) * MM_TO_SIM * 0.5
+    now = time.perf_counter()
+    previous = getattr(viewer, "_burr_spin_t", now)
+    angle = getattr(viewer, "_burr_spin", 0.0)
+    if state.get("on"):
+        # Four visible turns per second, matching DrillManager.
+        angle += (now - previous) * 8.0 * np.pi
+    viewer._burr_spin = angle
+    viewer._burr_spin_t = now
+    meshes = getattr(viewer, "_instrument_meshes", {})
+    cutting = state.get("style") != "diamond"
+    head = meshes.get("cutting") or "drill/sphere"
+    head_quat = _mul_quat(pose["quat"], _spin_about_x(angle)) if cutting else pose["quat"]
+    _log_instance(
+        viewer, "drill/cutting", head, pose["position"], head_quat, radius, hidden=not cutting
+    )
+    _log_instance(
+        viewer, "drill/diamond", "drill/sphere", pose["position"], pose["quat"], radius, hidden=cutting
+    )
+    for shaft_size, mesh in meshes.get("shafts", {}).items():
+        _log_instance(
+            viewer,
+            f"drill/shaft_inst_{shaft_size}",
+            mesh,
+            pose["position"],
+            pose["quat"],
+            1.0,
+            hidden=shaft_size != size,
+        )
 
 
 def main():
@@ -1110,15 +1367,41 @@ def main():
     viewer.picking_enabled = False
 
     sphere_local, sphere_tris = _sphere(1.0)
-    viewer.log_mesh(
-        "drill/sphere",
-        wp.array(sphere_local, dtype=wp.vec3),
-        wp.array(sphere_tris.reshape(-1), dtype=wp.int32),
-        color=(0.75, 0.75, 0.78),
-        roughness=0.25,
-        metallic=0.85,
-        dynamic=False,
+    sphere_normals = vertex_normals(sphere_local.astype(np.float64), sphere_tris).astype(np.float32)
+    _log_static_mesh(
+        viewer, "drill/sphere", sphere_local, sphere_tris, sphere_normals, (0.86, 0.87, 0.88), 0.12, 0.95
     )
+    instrument = {"cutting": "drill/sphere", "shafts": {}}
+    flute_path = MESH_DIR / "fluted_burr.obj"
+    try:
+        flute_points, flute_tris, flute_normals = _load_obj(flute_path)
+        _log_static_mesh(
+            viewer, "drill/flutes", flute_points, flute_tris, flute_normals, (0.82, 0.83, 0.85), 0.18, 0.92
+        )
+        instrument["cutting"] = "drill/flutes"
+        print(f"Fluted burr {len(flute_tris)} tris", flush=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"Fluted burr unavailable ({exc}); using the diamond sphere", flush=True)
+    for size in (1, 2, 4, 6):
+        shaft_path = MESH_DIR / f"{size}mm.OBJ"
+        try:
+            shaft_points, shaft_tris, shaft_normals = _load_obj(shaft_path)
+            _log_static_mesh(
+                viewer,
+                f"drill/shaft_{size}",
+                shaft_points,
+                shaft_tris,
+                shaft_normals,
+                (0.55, 0.56, 0.58),
+                0.35,
+                0.75,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(f"Shaft {size} mm unavailable ({exc})", flush=True)
+            continue
+        instrument["shafts"][size] = f"drill/shaft_{size}"
+        print(f"Shaft {size} mm {len(shaft_tris)} tris", flush=True)
+    viewer._instrument_meshes = instrument
     uploads = [_begin_upload(_prepare_blocks(blocks, bridge.volume, None), True, extract_s * 1e3, None)]
     worker = SurfaceWorker(blocks, occupied, colors, bridge.volume)
     _install_frame_probes(viewer)
@@ -1296,9 +1579,9 @@ def main():
                     print(f"Bone upload finished, {len(getattr(viewer, '_chunk_names', {}))} meshes", flush=True)
             last_upload_ms = (time.perf_counter() - t0) * 1e3
         if bridge.drill is not None:
-            radius = (bridge.burr_mm * 0.001 / METERS_PER_AU) * 0.5
-            _log_burr(viewer, bridge.drill["position"], bridge.drill["quat"], radius)
+            _log_instrument(viewer, bridge)
         viewer.end_frame()
+        _bind_window_input(viewer, bridge)
         frame += 1
         stamp = time.perf_counter()
         if previous > 0.0:

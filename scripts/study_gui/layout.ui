@@ -326,7 +326,7 @@
           <item>
            <widget class="QCheckBox" name="check_rtx_view">
             <property name="toolTip">
-             <string>Open a second window that draws the drillable bone with the surreal RTX light and ivory material. Drilling, haptics, and the AMBF view stay as they are.</string>
+             <string>When Start Simulation is clicked, open a second window with the drillable bone under the microscope beam. Drilling, haptics, and the AMBF view stay as they are.</string>
             </property>
             <property name="text">
              <string>RTX bone view</string>

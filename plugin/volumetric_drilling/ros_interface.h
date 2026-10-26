@@ -43,6 +43,7 @@
 #ifndef ROS_INTERFACE_H
 #define ROS_INTERFACE_H
 
+#include <mutex>
 #include <string>
 #include <afFramework.h>
 #include <ambf_server/ambf_ral_config.h>
@@ -52,6 +53,7 @@
 #if AMBF_ROS1
 #include <ros/ros.h>
 #include <geometry_msgs/WrenchStamped.h>
+#include <geometry_msgs/Twist.h>
 #include <geometry_msgs/Pose.h>
 #include <std_msgs/ColorRGBA.h>
 #include <volumetric_drilling_msgs/Voxels.h>
@@ -69,6 +71,7 @@
 #include "volumetric_drilling_msgs/msg/drill_reposition.hpp"
 #include "volumetric_drilling_msgs/msg/index.hpp"
 #include "geometry_msgs/msg/wrench_stamped.hpp"
+#include "geometry_msgs/msg/twist.hpp"
 #include "geometry_msgs/msg/pose.hpp"
 #include "std_msgs/msg/color_rgba.hpp"
 #endif
@@ -112,6 +115,10 @@ public:
     void voxelsCallback(AMBF_RAL_MSG_PTR(volumetric_drilling_msgs, Index) msg);
     bool getRemoveVoxelsIdx(cVector3d& vector);
 
+    // RTX window orbit / pan / dolly. Applied to main_camera by the plugin.
+    void cameraNudgeCallback(AMBF_RAL_MSG_PTR(geometry_msgs, Twist) msg);
+    bool takeCameraNudge(double& yawDeg, double& pitchDeg, double& panRight, double& panUp, double& dolly);
+
 private:
     #if AMBF_ROS1
     std::shared_ptr<ros::Publisher> m_voxelsRemovalPub;
@@ -120,6 +127,7 @@ private:
     std::shared_ptr<ros::Publisher> m_forcefeedbackPub;
     std::shared_ptr<ros::Publisher> m_drillRepositionPub;
     std::shared_ptr<ros::Subscriber> m_removeVoxelsSub;
+    std::shared_ptr<ros::Subscriber> m_cameraNudgeSub;
 
     volumetric_drilling_msgs::Voxels m_voxel_msg;
     volumetric_drilling_msgs::DrillSize m_drill_size_msg;
@@ -134,6 +142,7 @@ private:
     rclcpp::Publisher<geometry_msgs::msg::WrenchStamped>::SharedPtr m_forcefeedbackPub;
     rclcpp::Publisher<volumetric_drilling_msgs::msg::DrillReposition>::SharedPtr m_drillRepositionPub;
     rclcpp::Subscription<volumetric_drilling_msgs::msg::Index>::SharedPtr m_removeVoxelsSub;
+    rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr m_cameraNudgeSub;
 
     volumetric_drilling_msgs::msg::Voxels m_voxel_msg;
     volumetric_drilling_msgs::msg::DrillSize m_drill_size_msg;
@@ -146,6 +155,12 @@ private:
     cVector3d m_voxelRemoving_idx;
     bool m_removingVoxel = false;
     uint64_t m_removedCount = 0;
+    std::mutex m_cameraNudgeMutex;
+    double m_nudgeYaw = 0.0;
+    double m_nudgePitch = 0.0;
+    double m_nudgePanRight = 0.0;
+    double m_nudgePanUp = 0.0;
+    double m_nudgeDolly = 0.0;
 };
 
 #endif //ROS_INTERFACE_H

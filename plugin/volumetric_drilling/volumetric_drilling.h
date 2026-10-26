@@ -94,6 +94,10 @@ protected:
     // Optional RTX window. Writes a status file and, on request, the current
     // occupancy. It does not change drilling.
     void publishRtxStatus(double now);
+    void publishDrillVisualState();
+    void serviceRtxCamera();
+    bool takeRtxCameraFile(double& yawDeg, double& pitchDeg, double& panRight, double& panUp, double& dolly);
+    void panCamera(double rightAmount, double upAmount);
 
     struct CanonicalView {
         string id;
@@ -271,6 +275,14 @@ private:
     string m_sessionUser;       // from study GUI --session_user
     string m_sessionAnatomy;    // from study GUI --session_anatomy
     cLabel* m_cameraPresetLabel;
+    bool m_helpVisible = true;
+    // Last totals read from the RTX camera-nudge file. The difference is applied.
+    unsigned long long m_cameraNudgeSeq = 0;
+    double m_cameraNudgeYaw = 0.0;
+    double m_cameraNudgePitch = 0.0;
+    double m_cameraNudgePanRight = 0.0;
+    double m_cameraNudgePanUp = 0.0;
+    double m_cameraNudgeDolly = 0.0;
     cLabel* m_calibrationWarningLabel;
     cLabel* m_noticeLabel;
     cLabel* m_vrHudLabel = nullptr;
@@ -285,6 +297,9 @@ private:
     bool m_rtxView = false;
     bool m_rtxWindowSized = false;
     double m_rtxStatusTimer = 0.0;
+    // Last contact force, held across the brief gap after a voxel is deleted.
+    cVector3d m_heldHapticForce = cVector3d(0.0, 0.0, 0.0);
+    double m_hapticHoldSeconds = 0.0;
 
     // RTX deletions are queued in physics and published once per graphics frame.
     // A trial file clears named voxels through that same queue.

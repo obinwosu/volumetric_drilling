@@ -369,6 +369,8 @@ class Ui(QtWidgets.QWidget):
         self._recording_study = False
         self._ambf_process = QProcess()
         self._rtx_process = QProcess()
+        self._rtx_process.readyReadStandardOutput.connect(self._rtx_output)
+        self._rtx_process.finished.connect(self._rtx_finished)
         self._ambf_process.readyReadStandardOutput.connect(self.handle_stdout)
         self._ambf_process.readyReadStandardError.connect(self.handle_stderr)
         self._ambf_process.finished.connect(self._simulation_closed)
@@ -667,8 +669,10 @@ class Ui(QtWidgets.QWidget):
             self._rtx_process.terminate()
             self._rtx_process.waitForFinished(2000)
         command = (
+            "set +u && "
             "source /opt/ros/jazzy/setup.bash && "
             "source \"$HOME/ros_ambf_ws/install/setup.bash\" && "
+            "export DISPLAY=\"${DISPLAY:-:1}\" && "
             "export __GLX_VENDOR_LIBRARY_NAME=\"${__GLX_VENDOR_LIBRARY_NAME:-nvidia}\" && "
             "export VK_DRIVER_FILES=\"${VK_DRIVER_FILES:-/usr/share/vulkan/icd.d/nvidia_icd.json}\" && "
             f"exec \"{venv_python}\" \"{script}\" --anatomy-adf \"{self.active_volume_adf}\""
@@ -676,7 +680,10 @@ class Ui(QtWidgets.QWidget):
         self._rtx_process.setWorkingDirectory(str(repo_root))
         self._rtx_process.setProcessChannelMode(QProcess.MergedChannels)
         self._rtx_process.start("bash", ["-lc", command])
-        self.print_info("Starting RTX bone view (surreal light, FIVRS volume)")
+        if not self._rtx_process.waitForStarted(5000):
+            self.print_info(f"ERROR! RTX bone view did not start: {self._rtx_process.errorString()}")
+            return
+        self.print_info("Starting RTX bone view")
 
     def add_plugin(self, plugin_path):
         if "--plugins" in self._current_args:
@@ -700,6 +707,19 @@ class Ui(QtWidgets.QWidget):
     def _set_logging_active_style(self, active):
         self.check_log_study_data.setProperty("loggingActive", active)
         self._refresh_widget_style(self.check_log_study_data)
+
+    def _rtx_output(self):
+        msg = bytes(self._rtx_process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        if not msg:
+            return
+        self.print_debug(msg if msg.endswith("\n") else msg + "\n")
+        for line in msg.splitlines():
+            if any(token in line for token in ("Traceback", "Error", "ERROR", "Exception", "did not publish")):
+                self.print_info(line)
+
+    def _rtx_finished(self, code, status):
+        if code not in (0, None) and self._ambf_process.state() == QProcess.Running:
+            self.print_info(f"RTX bone view exited ({code}). See the Debug pane.")
 
     def _simulation_closed(self, exit_code=0, exit_status=None):
         if self._recording_study:

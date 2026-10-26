@@ -331,6 +331,42 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
     return 1;
 }
 
+void afVolmetricDrillingPlugin::publishDrillVisualState()
+{
+    namespace fs = std::filesystem;
+    const fs::path dir = "/tmp/fivrs-rtx";
+    std::error_code mkdirError;
+    fs::create_directories(dir, mkdirError);
+    const char* style = (m_drillManager.m_burrStyle == BurrStyle::DIAMOND) ? "diamond" : "cutting";
+    int sizeMm = 0;
+    if (m_drillManager.m_activeDrill){
+        sizeMm = static_cast<int>(std::lround(
+            m_drillManager.m_activeDrill->m_size / m_drillManager.m_units_mmToSim));
+    }
+    cVector3d tip(0.0, 0.0, 0.0);
+    cQuaternion tipRot;
+    tipRot.x = 0.0;
+    tipRot.y = 0.0;
+    tipRot.z = 0.0;
+    tipRot.w = 1.0;
+    if (m_drillManager.m_activeDrill && m_drillManager.m_activeDrill->m_rigidBody){
+        cTransform pose = m_drillManager.m_activeDrill->m_rigidBody->getLocalTransform();
+        tip = pose.getLocalPos();
+        tipRot.fromRotMat(pose.getLocalRot());
+    }
+    std::ofstream out(dir / "drill_state.json", std::ios::trunc);
+    if (!out){
+        return;
+    }
+    out << std::setprecision(8)
+        << "{\"on\":" << (m_drillManager.m_isOn ? "true" : "false")
+        << ",\"style\":\"" << style << "\""
+        << ",\"size_mm\":" << sizeMm
+        << ",\"px\":" << tip.x() << ",\"py\":" << tip.y() << ",\"pz\":" << tip.z()
+        << ",\"qx\":" << tipRot.x << ",\"qy\":" << tipRot.y
+        << ",\"qz\":" << tipRot.z << ",\"qw\":" << tipRot.w << "}\n";
+}
+
 void afVolmetricDrillingPlugin::publishRtxStatus(double now)
 {
     namespace fs = std::filesystem;
@@ -705,6 +741,7 @@ void afVolmetricDrillingPlugin::graphicsUpdate(){
     serviceRtxRestore();
     serviceRtxCatchup();
     serviceRtxFlush();
+    serviceRtxCamera();
 
     // update region of voxels to be updated
     if (m_flagMarkVolumeForUpdate)
@@ -800,6 +837,9 @@ void afVolmetricDrillingPlugin::graphicsUpdate(){
     }
     updateButtons();
     m_panelManager.update();
+    if (m_rtxView){
+        publishDrillVisualState();
+    }
 }
 
 void afVolmetricDrillingPlugin::physicsUpdate(double dt){
@@ -833,6 +873,13 @@ void afVolmetricDrillingPlugin::physicsUpdate(double dt){
     }
     m_drillManager.tickVolumeContactSuppression(anyCursorInContact);
     const bool skipContact = m_drillManager.isVolumeContactSuppressed();
+
+    // Sample the wall before this step deletes it. Clearing the contacted voxels
+    // first made the restoring force fall to zero on the same step, so the
+    // drill felt like it punched through and caught again.
+    for(int i = 0 ; i < m_drillManager.m_toolCursorList.size() ; i++){
+        m_drillManager.m_toolCursorList[i]->computeInteractionForces();
+    }
 
     if (!skipContact && m_drillManager.m_toolCursorList[0]->isInContact(m_voxelObj) && m_drillManager.m_targetToolCursorIdx == 0 /*&& (userSwitches == 2)*/)
     {
@@ -886,19 +933,35 @@ void afVolmetricDrillingPlugin::physicsUpdate(double dt){
     {
         m_panelManager.setVisible(m_warningLabel, false);
     }
-    // compute interaction forces
-    for(int i = 0 ; i < m_drillManager.m_toolCursorList.size() ; i++){
-        m_drillManager.m_toolCursorList[i]->computeInteractionForces();
-    }
-
-    // check if device remains stuck inside voxel object
-    // Also orient the force to match the camera rotation
+    // Tip and shaft forces are kept together. Sending only the cursor with the
+    // larger proxy gap dropped the tip force whenever the shaft barely won.
     cVector3d force(0.0, 0.0, 0.0);
     if (!skipContact){
-        force = cTranspose(m_mainCamera->getLocalRot()) * m_drillManager.m_targetToolCursor->getDeviceLocalForce();
+        cVector3d local(0.0, 0.0, 0.0);
+        for(int i = 0 ; i < m_drillManager.m_toolCursorList.size() ; i++){
+            local.add(m_drillManager.m_toolCursorList[i]->getDeviceLocalForce());
+        }
+        force = cTranspose(m_mainCamera->getLocalRot()) * local;
+        const double kContactForce = 0.05;
+        const double kHoldSeconds = 0.012;
+        if (force.length() >= kContactForce){
+            m_heldHapticForce = force;
+            m_hapticHoldSeconds = kHoldSeconds;
+        }
+        else if (m_hapticHoldSeconds > 0.0){
+            force = m_heldHapticForce * (m_hapticHoldSeconds / kHoldSeconds);
+            m_hapticHoldSeconds = cMax(0.0, m_hapticHoldSeconds - dt);
+        }
         if (m_drillManager.m_isOn){
             force += (cVector3d(1.0, 1.0, 1.0) * m_waveGenerator.generate(dt));
         }
+        double maxF = m_drillManager.m_hapticDevice->getSpecifications().m_maxLinearForce;
+        if (maxF > 0.5 && force.length() > maxF){
+            force.mul(maxF / force.length());
+        }
+    }
+    else{
+        m_hapticHoldSeconds = 0.0;
     }
 
     m_drillManager.m_toolCursorList[0]->setDeviceLocalForce(force);
@@ -2141,6 +2204,7 @@ string afVolmetricDrillingPlugin::controlHelpText(bool paused) const
     }
     s += "CONTROLS\n";
     if (!paused){
+        s += "  Hide / show this panel H\n";
         s += "  Pause / Resume         Double-tap Stylus 1  or  Ctrl + P\n";
     }
     s +=
@@ -2402,6 +2466,101 @@ void afVolmetricDrillingPlugin::dollyCamera(double distanceTowardVolume)
     }
 
     m_mainCamera->setLocalPos(newPos);
+    m_customViewActive = true;
+}
+
+void afVolmetricDrillingPlugin::panCamera(double rightAmount, double upAmount)
+{
+    if (!m_mainCamera){
+        return;
+    }
+    cVector3d right = m_mainCamera->getRightVector();
+    cVector3d up = m_mainCamera->getUpVector();
+    if (right.length() < 1e-6 || up.length() < 1e-6){
+        return;
+    }
+    right.normalize();
+    up.normalize();
+    m_mainCamera->setLocalPos(m_mainCamera->getLocalPos() + right * rightAmount + up * upAmount);
+    m_customViewActive = true;
+}
+
+bool afVolmetricDrillingPlugin::takeRtxCameraFile(double& yawDeg, double& pitchDeg,
+                                                    double& panRight, double& panUp, double& dolly)
+{
+    // The drilling ROS node is never spun, so a Twist subscriber on it does
+    // not receive. The RTX window writes running totals here instead.
+    std::ifstream in("/tmp/fivrs-rtx/camera_nudge.txt");
+    unsigned long long seq = 0;
+    double yaw = 0.0;
+    double pitch = 0.0;
+    double right = 0.0;
+    double up = 0.0;
+    double along = 0.0;
+    if (!(in >> seq >> yaw >> pitch >> right >> up >> along)){
+        return false;
+    }
+    if (!std::isfinite(yaw) || !std::isfinite(pitch) || !std::isfinite(right)
+        || !std::isfinite(up) || !std::isfinite(along)){
+        return false;
+    }
+    if (seq == m_cameraNudgeSeq){
+        return false;
+    }
+    if (seq < m_cameraNudgeSeq){
+        m_cameraNudgeSeq = seq;
+        m_cameraNudgeYaw = yaw;
+        m_cameraNudgePitch = pitch;
+        m_cameraNudgePanRight = right;
+        m_cameraNudgePanUp = up;
+        m_cameraNudgeDolly = along;
+        return false;
+    }
+    yawDeg = yaw - m_cameraNudgeYaw;
+    pitchDeg = pitch - m_cameraNudgePitch;
+    panRight = right - m_cameraNudgePanRight;
+    panUp = up - m_cameraNudgePanUp;
+    dolly = along - m_cameraNudgeDolly;
+    m_cameraNudgeSeq = seq;
+    m_cameraNudgeYaw = yaw;
+    m_cameraNudgePitch = pitch;
+    m_cameraNudgePanRight = right;
+    m_cameraNudgePanUp = up;
+    m_cameraNudgeDolly = along;
+    return fabs(yawDeg) > 1e-8 || fabs(pitchDeg) > 1e-8
+        || fabs(panRight) > 1e-8 || fabs(panUp) > 1e-8 || fabs(dolly) > 1e-8;
+}
+
+void afVolmetricDrillingPlugin::serviceRtxCamera()
+{
+    if (!m_mainCamera){
+        return;
+    }
+    double yaw = 0.0;
+    double pitch = 0.0;
+    double panRight = 0.0;
+    double panUp = 0.0;
+    double dolly = 0.0;
+    if (!takeRtxCameraFile(yaw, pitch, panRight, panUp, dolly)){
+        return;
+    }
+    static bool announced = false;
+    if (!announced){
+        announced = true;
+        cerr << "INFO! RTX window is moving main_camera" << endl;
+    }
+    if (fabs(panRight) > 1e-8 || fabs(panUp) > 1e-8){
+        panCamera(panRight, panUp);
+    }
+    if (fabs(dolly) > 1e-8){
+        dollyCamera(dolly);
+    }
+    if (fabs(yaw) > 1e-6){
+        nudgeCameraOrbitYaw(yaw);
+    }
+    if (fabs(pitch) > 1e-6){
+        nudgeCameraOrbitPitch(pitch);
+    }
 }
 
 void afVolmetricDrillingPlugin::initializeLabels()
@@ -2483,6 +2642,15 @@ void afVolmetricDrillingPlugin::keyboardUpdate(GLFWwindow *a_window, int a_key, 
             showNotice("WiVRn scene → look direction");
             return;
         }
+    }
+
+    if (a_action == GLFW_PRESS && a_key == GLFW_KEY_H && !ctrl && !alt && !shift){
+        m_helpVisible = !m_helpVisible;
+        if (m_cameraPresetLabel){
+            m_panelManager.setVisible(m_cameraPresetLabel, m_helpVisible);
+        }
+        showNotice(m_helpVisible ? "Controls shown" : "Controls hidden  (H)");
+        return;
     }
 
     if (m_vrHudVisible && !ctrl && !alt){

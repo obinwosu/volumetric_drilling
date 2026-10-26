@@ -58,6 +58,9 @@ DrillingPublisher::~DrillingPublisher(){
         if (m_removeVoxelsSub) {
             m_removeVoxelsSub->shutdown();
         }
+        if (m_cameraNudgeSub) {
+            m_cameraNudgeSub->shutdown();
+        }
     #elif AMBF_ROS2
         m_voxelsRemovalPub.reset();
         m_drillSizePub.reset();
@@ -65,6 +68,7 @@ DrillingPublisher::~DrillingPublisher(){
         m_forcefeedbackPub.reset();
         m_drillRepositionPub.reset();
         m_removeVoxelsSub.reset();
+        m_cameraNudgeSub.reset();
     #endif
 }
 
@@ -85,6 +89,8 @@ void DrillingPublisher::init(string a_namespace, string a_plugin){
       (m_drillRepositionPub, m_rosNode, a_namespace + "/" + a_plugin + "/drill_reposition", 1, true);
     ambf_ral::create_subscriber<AMBF_RAL_MSG(volumetric_drilling_msgs, Index), DrillingPublisher>
       (m_removeVoxelsSub, m_rosNode, a_namespace + "/" + a_plugin + "/remove_voxels", 1, &DrillingPublisher::voxelsCallback, this);
+    ambf_ral::create_subscriber<AMBF_RAL_MSG(geometry_msgs, Twist), DrillingPublisher>
+      (m_cameraNudgeSub, m_rosNode, a_namespace + "/" + a_plugin + "/camera_nudge", 32, &DrillingPublisher::cameraNudgeCallback, this);
 }
 
 
@@ -95,6 +101,32 @@ void DrillingPublisher::voxelsCallback(AMBF_RAL_MSG_PTR(volumetric_drilling_msgs
     m_removingVoxel = true;
 }
 
+
+void DrillingPublisher::cameraNudgeCallback(AMBF_RAL_MSG_PTR(geometry_msgs, Twist) msg){
+    std::lock_guard<std::mutex> guard(m_cameraNudgeMutex);
+    m_nudgeYaw += msg->angular.z;
+    m_nudgePitch += msg->angular.x;
+    m_nudgePanRight += msg->linear.y;
+    m_nudgePanUp += msg->linear.z;
+    m_nudgeDolly += msg->linear.x;
+}
+
+bool DrillingPublisher::takeCameraNudge(double& yawDeg, double& pitchDeg, double& panRight, double& panUp, double& dolly){
+    std::lock_guard<std::mutex> guard(m_cameraNudgeMutex);
+    yawDeg = m_nudgeYaw;
+    pitchDeg = m_nudgePitch;
+    panRight = m_nudgePanRight;
+    panUp = m_nudgePanUp;
+    dolly = m_nudgeDolly;
+    const bool any = fabs(yawDeg) > 1e-8 || fabs(pitchDeg) > 1e-8
+        || fabs(panRight) > 1e-8 || fabs(panUp) > 1e-8 || fabs(dolly) > 1e-8;
+    m_nudgeYaw = 0.0;
+    m_nudgePitch = 0.0;
+    m_nudgePanRight = 0.0;
+    m_nudgePanUp = 0.0;
+    m_nudgeDolly = 0.0;
+    return any;
+}
 
 bool DrillingPublisher::getRemoveVoxelsIdx(cVector3d& vector){
     if (m_removingVoxel){
