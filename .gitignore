@@ -59,3 +59,4 @@ middle_ear/tests/release_log.txt
 # Native / CUDA build leftovers
 cmake-build-*/
 CMakeFiles/
+scripts/fluid/_build/

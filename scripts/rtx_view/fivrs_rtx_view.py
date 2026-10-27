@@ -25,8 +25,11 @@ import warp as wp
 import yaml
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 import rtx_materials
+from fluid.rtx_stream import PrescribedStream, write_default_config
+from fluid.sph_dump import DEFAULT_PATH as SPH_DUMP, dump_is_fresh, read_positions
 from surface import BlockVolume, blocks_touched_by, index_to_local, local_to_world, vertex_normals
 
 # DrillManager stores a millimetre as 0.01007 simulation units, then the
@@ -68,6 +71,7 @@ EXPOSURE_MAX = 8.0
 # Geometry sent on the draw thread. A cut used to upload every touched block
 # before the drill could move again.
 UPLOAD_BUDGET_S = 0.008
+SPH_COLOR = (0.62, 0.64, 0.67)
 
 
 def _quat_matrix(x, y, z, w):
@@ -1441,6 +1445,43 @@ def _read_drill_state():
         return {}
 
 
+def _sph_snapshot(viewer):
+    dump = getattr(viewer, "_sph_dump", None)
+    if dump is None:
+        return {"live": False, "count": 0, "generation": None, "draw_ms": 0.0, "radius": None}
+    return {
+        "live": bool(getattr(viewer, "_sph_live", False)),
+        "count": int(dump.get("count") or 0),
+        "generation": dump.get("generation"),
+        "draw_ms": float(getattr(viewer, "_sph_draw_ms", 0.0)),
+        "radius": dump.get("radius"),
+    }
+
+
+def _draw_sph(viewer) -> bool:
+    """Paint Maelstrom positions when the sidecar dump is fresh."""
+    started = time.perf_counter()
+    live = dump_is_fresh(SPH_DUMP)
+    viewer._sph_live = live
+    if not live:
+        if getattr(viewer, "_sph_logged", False):
+            viewer.log_points("fluid/sph", None, hidden=True)
+        viewer._sph_draw_ms = (time.perf_counter() - started) * 1e3
+        return False
+    dump = read_positions(SPH_DUMP)
+    viewer._sph_dump = dump
+    if dump is None or dump["count"] <= 0:
+        if getattr(viewer, "_sph_logged", False):
+            viewer.log_points("fluid/sph", None, hidden=True)
+        viewer._sph_draw_ms = (time.perf_counter() - started) * 1e3
+        return True
+    points = wp.array(dump["xyz"], dtype=wp.vec3)
+    viewer.log_points("fluid/sph", points, radii=float(dump["radius"]), colors=SPH_COLOR)
+    viewer._sph_logged = True
+    viewer._sph_draw_ms = (time.perf_counter() - started) * 1e3
+    return True
+
+
 def _visual_pose(state):
     """Pose of the burr AMBF is drawing. The sized body has no ROS topic."""
     try:
@@ -1500,6 +1541,8 @@ def main():
     parser.add_argument("--anatomy-adf", required=True)
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
+    parser.add_argument("--stream-cc-s", type=float, default=1.0)
+    parser.add_argument("--no-stream", action="store_true")
     args = parser.parse_args()
 
     import newton
@@ -1616,6 +1659,17 @@ def main():
         print(f"Shaft {size} mm {len(shaft_tris)} tris", flush=True)
     viewer._instrument_meshes = instrument
     _bind_burr(viewer)
+    stream = None
+    if not args.no_stream:
+        stream_cfg = RUNTIME / "stream.json"
+        write_default_config(stream_cfg, args.stream_cc_s)
+        stream = PrescribedStream(cc_per_s=args.stream_cc_s, config_path=stream_cfg)
+        print(
+            f"Irrigation stream {stream.cc_per_s:g} cc/s, "
+            f"{stream.offset_mm:g} mm drill-right, "
+            f"{stream.proximal_mm:g} mm proximal. Edit {stream_cfg}",
+            flush=True,
+        )
     viewer._volume_translation = np.asarray(bridge.volume["translation"], dtype=np.float64)
     uploads = [_begin_upload(_prepare_blocks(blocks, bridge.volume, None), True, extract_s * 1e3, None)]
     worker = SurfaceWorker(blocks, occupied, colors, bridge.volume)
@@ -1795,6 +1849,23 @@ def main():
             last_upload_ms = (time.perf_counter() - t0) * 1e3
         if bridge.drill is not None:
             _log_instrument(viewer, bridge)
+        sph_live = _draw_sph(viewer)
+        if stream is not None:
+            stream._reload_config()
+            if sph_live:
+                stream.hide(viewer)
+            elif stream.enabled:
+                state = _read_drill_state()
+                pose = _visual_pose(state) or bridge.drill
+                if pose is not None:
+                    # last completed RTX frame, not the few microseconds
+                    # between end_frame and this loop's start-of-work `now`.
+                    dt = min(frame_ms[-1] * 1e-3, 0.05) if frame_ms else 0.0
+                    emitting = bool(state.get("on")) or stream.force_emit
+                    stream.step(dt, pose["position"], pose["quat"], emitting)
+                    stream.draw(viewer)
+            else:
+                stream.hide(viewer)
         viewer.end_frame()
         _bind_window_input(viewer, bridge)
         frame += 1
@@ -1838,13 +1909,22 @@ def main():
                 "removal_to_surface_ms_note": "Receipt until chunk logging finishes. Not the displayed frame.",
                 "triangles": blocks.triangle_count,
                 "vertices": blocks.vertex_count,
+                "stream": None if stream is None else stream.snapshot(),
+                "sph": _sph_snapshot(viewer),
             }
             (RUNTIME / "summary.json").write_text(json.dumps(summary, indent=2))
+            sph = summary.get("sph") or {}
+            sph_note = (
+                f"   SPH {sph.get('count') or 0}"
+                if sph.get("live")
+                else ""
+            )
             title = (
                 f"FIVRS RTX  {summary['rtx_fps']:.0f} fps"
                 f"   exposure {getattr(viewer, '_exposure', 1.0):.2f}"
                 f"   Gfx {graphics_hz} Hz   Phx {physics_hz} Hz"
                 f"   extract {last_extract_ms:.0f} ms"
+                f"{sph_note}"
             )
             window = getattr(viewer, "_window", None)
             if window is not None:
