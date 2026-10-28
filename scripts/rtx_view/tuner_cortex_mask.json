@@ -1,0 +1,95 @@
+{
+  "version": 1,
+  "kind": "derived_appearance_mask",
+  "target": "bone",
+  "anatomy": "ADF/volume_256_RT143.yaml",
+  "selected_mask": "off",
+  "parameters": {
+    "seed_distance_mm": 6.0,
+    "normal_angle_deg": 70.0,
+    "plane_offset_mm": 8.0,
+    "plane_depth_mm": 24.0,
+    "plane_depth_scale": 3.0,
+    "cleanup_steps": 2,
+    "crop_margin_voxels": 0,
+    "opacity": 0.62
+  },
+  "frame": {
+    "space": "voxel_millimetres",
+    "eac_hex": "ffe1d6",
+    "bone_hex": "fff9db",
+    "eac_closed": true,
+    "lateral_end": "min",
+    "cap_scores": {
+      "min": 447,
+      "max": 109
+    },
+    "centroid_mm": [
+      50.6835,
+      68.5931,
+      34.8278
+    ],
+    "cap_center_mm": [
+      53.1436,
+      82.2368,
+      30.2232
+    ],
+    "lateral_vector": [
+      0.1684,
+      0.934,
+      -0.3152
+    ],
+    "long_axis": [
+      0.362,
+      0.8199,
+      -0.4435
+    ],
+    "plane_point_mm": [
+      53.1436,
+      82.2368,
+      30.2232
+    ],
+    "plane_normal": [
+      0.0062,
+      1.0,
+      -0.0006
+    ],
+    "plane_angle_deg": 20.74,
+    "length_mm": 56.07,
+    "summary": "EAC #ffe1d6 is closed (1 component, largest used). PCA length 56.1 mm. The min-projection side meets exterior air on 447 end-band voxels; the max side meets it on 109. The cap plane fits that side's face of the closed solid (3310 surface voxels meeting exterior air and facing along the canal, in-plane radius 13.4 mm). The lateral vector runs from the EAC centroid to that face (alignment with the long axis 0.97). The fitted plane is 20.7\u00b0 from that vector. #640000 (138892 voxels) lies entirely beyond the EAC (0.1 mm clear) and is the TMJ side. The anterior plane is the outer tangent of that wall (5593 voxels, in-plane radius 24.9 mm), held at 90\u00b0 to the cap plane. Mask 3 drops cortex on the TMJ side of it. Volume laterality is right and was not used.",
+    "anterior_ok": true,
+    "anterior_point_mm": [
+      39.5168,
+      66.355,
+      31.7445
+    ],
+    "anterior_normal": [
+      -0.8147,
+      0.0047,
+      -0.5798
+    ],
+    "anterior_radius_mm": 24.94,
+    "tmj_hex": "640000",
+    "tmj_voxels": 138892,
+    "tmj_gap_mm": 0.12
+  },
+  "masks": {
+    "mask1": {
+      "triangles": 1449018,
+      "area_mm2": 71039.0
+    },
+    "mask2": {
+      "triangles": 1315793,
+      "area_mm2": 62950.0
+    },
+    "mask3": {
+      "triangles": 116608,
+      "area_mm2": 5905.0
+    }
+  },
+  "notes": [
+    "Mask 3 drops 7.41 cm² on the TMJ side of the anterior plane.",
+    "Mask 2 keeps almost all of mask 1, so the exterior bone around the cap is one connected sheet.",
+    "Counts are the smoothed surface shown in the tuner. Save mask writes the exact live values."
+  ]
+}

@@ -1,0 +1,125 @@
+mdl 1.7;
+
+import ::anno::*;
+import ::math::*;
+import ::scene::*;
+import ::OmniSurface::OmniSurfaceBase::*;
+
+// One surface. The mesh primvar "markings" is char, periosteum, blood.
+export material Markings(
+    uniform color bone_color = color(1.0, 0.976, 0.859) [[
+        anno::display_name("Bone color"),
+        anno::in_group("Looks")
+    ]],
+    uniform color char_color = color(0.10, 0.055, 0.03) [[
+        anno::display_name("Char color"),
+        anno::in_group("Looks")
+    ]],
+    uniform color periosteum_color = color(0.55, 0.16, 0.13) [[
+        anno::display_name("Periosteum color"),
+        anno::in_group("Looks")
+    ]],
+    uniform color blood_color = color(0.40, 0.015, 0.012) [[
+        anno::display_name("Blood color"),
+        anno::in_group("Looks")
+    ]],
+    uniform float bone_roughness = 0.12 [[
+        anno::display_name("Bone roughness"),
+        anno::in_group("Looks"),
+        anno::hard_range(0.0, 1.0)
+    ]],
+    uniform float char_roughness = 0.92 [[
+        anno::display_name("Char roughness"),
+        anno::in_group("Looks"),
+        anno::hard_range(0.0, 1.0)
+    ]],
+    uniform float periosteum_roughness = 0.62 [[
+        anno::display_name("Periosteum roughness"),
+        anno::in_group("Looks"),
+        anno::hard_range(0.0, 1.0)
+    ]],
+    uniform float blood_roughness = 0.04 [[
+        anno::display_name("Blood roughness"),
+        anno::in_group("Looks"),
+        anno::hard_range(0.0, 1.0)
+    ]],
+    uniform float bone_coat = 0.22 [[
+        anno::display_name("Bone coat"),
+        anno::in_group("Looks"),
+        anno::hard_range(0.0, 1.0)
+    ]],
+    uniform float blood_coat = 0.85 [[
+        anno::display_name("Blood coat"),
+        anno::in_group("Looks"),
+        anno::hard_range(0.0, 1.0)
+    ]],
+    uniform float bone_coat_roughness = 0.05 [[
+        anno::display_name("Bone coat roughness"),
+        anno::in_group("Looks"),
+        anno::hard_range(0.0, 1.0)
+    ]],
+    uniform float blood_coat_roughness = 0.03 [[
+        anno::display_name("Blood coat roughness"),
+        anno::in_group("Looks"),
+        anno::hard_range(0.0, 1.0)
+    ]],
+    uniform float coat_ior = 1.45 [[
+        anno::display_name("Coat IOR"),
+        anno::in_group("Looks"),
+        anno::hard_range(1.0, 2.2)
+    ]],
+    uniform float char_strength = 1.0 [[
+        anno::display_name("Char strength"),
+        anno::in_group("Strength"),
+        anno::hard_range(0.0, 1.0)
+    ]],
+    uniform float periosteum_strength = 1.0 [[
+        anno::display_name("Periosteum strength"),
+        anno::in_group("Strength"),
+        anno::hard_range(0.0, 1.0)
+    ]],
+    uniform float blood_strength = 1.0 [[
+        anno::display_name("Blood strength"),
+        anno::in_group("Strength"),
+        anno::hard_range(0.0, 1.0)
+    ]],
+    uniform bool char_enabled = false [[
+        anno::display_name("Char"),
+        anno::in_group("Channels")
+    ]],
+    uniform bool periosteum_enabled = false [[
+        anno::display_name("Periosteum"),
+        anno::in_group("Channels")
+    ]],
+    uniform bool blood_enabled = false [[
+        anno::display_name("Blood"),
+        anno::in_group("Channels")
+    ]]
+) = let {
+    float4 raw = scene::data_lookup_float4("markings", float4(0.0, 0.0, 0.0, 0.0));
+    float fade = math::clamp(raw.w, 0.0, 1.0);
+    float char_amount = math::clamp(raw.x * char_strength * (char_enabled ? 1.0 : 0.0), 0.0, 1.0);
+    float peri_amount = math::clamp(raw.y * periosteum_strength * (periosteum_enabled ? 1.0 : 0.0), 0.0, 1.0);
+    float blood_amount = math::clamp(raw.z * blood_strength * (blood_enabled ? 1.0 : 0.0), 0.0, 1.0);
+    color peri_base = bone_color * (1.0 - peri_amount) + periosteum_color * peri_amount;
+    color wet_base = peri_base * (1.0 - blood_amount) + blood_color * blood_amount;
+    color base = wet_base * (1.0 - char_amount) + char_color * char_amount;
+    float peri_rough = bone_roughness * (1.0 - peri_amount) + periosteum_roughness * peri_amount;
+    float wet_rough = peri_rough * (1.0 - blood_amount) + blood_roughness * blood_amount;
+    float rough = wet_rough * (1.0 - char_amount) + char_roughness * char_amount;
+    float coat = (bone_coat * (1.0 - blood_amount) + blood_coat * blood_amount)
+        * (1.0 - char_amount) * (1.0 - 0.85 * peri_amount);
+    color coat_tint = color(1.0) * (1.0 - blood_amount) + blood_color * blood_amount;
+    float coat_rough = bone_coat_roughness * (1.0 - blood_amount) + blood_coat_roughness * blood_amount;
+} in ::OmniSurface::OmniSurfaceBase::OmniSurfaceBase(
+    diffuse_reflection_weight: 1.0,
+    diffuse_reflection_color: base,
+    specular_reflection_weight: 1.0,
+    specular_reflection_roughness: rough,
+    coat_weight: coat,
+    coat_color: coat_tint,
+    coat_roughness: coat_rough,
+    coat_ior: coat_ior,
+    enable_opacity: true,
+    geometry_opacity: fade
+);

@@ -2,8 +2,9 @@
 
 The occupancy mirror stays on the device. A cut uploads only the cleared
 voxels. Extraction matches the CPU midpoint tables, including the empty
-crop border and vertices pinned on a shared block face. Timing calls
-synchronize, so the recorded milliseconds are finished GPU work.
+crop border. Smoothing reads a halo of the neighboring block and does not
+pin the shared face, so both sides meet. Timing calls synchronize, so the
+recorded milliseconds are finished GPU work.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import numpy as np
 import warp as wp
 
 from mc_tables import EDGE_TABLE, TRI_TABLE
-from surface import BLOCK, _compact_used, block_voxel_bounds, smooth_pinned
+from surface import BLOCK, SMOOTH_ITERS, _owns_cell, block_halo_bounds, smooth_pinned
 
 # 1: GPU extraction, CPU smooth and prepare. Measured, and slower once per-block
 # synchronizations were included.
@@ -261,6 +262,7 @@ def emit_triangles(
     tri_counts: wp.array(dtype=wp.int32),
     tri_scan: wp.array(dtype=wp.int32),
     tris: wp.array(dtype=wp.int32),
+    tri_cell: wp.array(dtype=wp.int32),
     nx: int,
     ny: int,
     nz: int,
@@ -333,6 +335,8 @@ def emit_triangles(
                     oz = bz
             slot = axis * plane + (ix + ox) * row + (iy + oy) * sz + (iz + oz)
             tris[(base + written) * 3 + corner] = int(edge_scan[slot]) - 1
+        # Bias 8 keeps the crop-border cell -1 inside an unsigned 10-bit field.
+        tri_cell[base + written] = (cx + 8) | ((cy + 8) << 10) | ((cz + 8) << 20)
         written = written + 1
 
 
@@ -544,6 +548,34 @@ def normalize_vectors(normals: wp.array(dtype=wp.vec3)):
         normals[i] = normals[i] / length
 
 
+def _keep_owned(verts, tris, rgb, codes, block, shape, world=None, normals=None):
+    """Drop halo triangles, then compact every per-vertex array with them."""
+    codes = np.asarray(codes, dtype=np.int32)
+    ci = (codes & 1023).astype(np.int64) - 8
+    cj = ((codes >> 10) & 1023).astype(np.int64) - 8
+    ck = ((codes >> 20) & 1023).astype(np.int64) - 8
+    bx, by, bz = (int(v) for v in block)
+    keep = _owns_cell(ci, bx, shape[0]) & _owns_cell(cj, by, shape[1]) & _owns_cell(ck, bz, shape[2])
+    tris = np.asarray(tris)[keep]
+    empty = (
+        np.zeros((0, 3), np.float32),
+        np.zeros((0, 3), np.int32),
+        np.zeros((0, 3), np.uint8),
+        None,
+        None,
+    )
+    if len(tris) == 0:
+        return empty
+    used, inverse = np.unique(tris.reshape(-1), return_inverse=True)
+    verts = verts[used]
+    rgb = rgb[used]
+    tris = inverse.reshape(-1, 3).astype(np.int32)
+    if world is not None:
+        world = np.ascontiguousarray(world[used], dtype=np.float32)
+        normals = np.ascontiguousarray(normals[used], dtype=np.float32)
+    return verts, tris, rgb, world, normals
+
+
 class WarpMesher:
     """One device-side occupancy mirror and reusable scratch buffers."""
 
@@ -569,6 +601,7 @@ class WarpMesher:
         self._tri_counts = wp.zeros(MAX_CELLS, dtype=wp.int32, device=self.device)
         self._tri_scan = wp.zeros(MAX_CELLS, dtype=wp.int32, device=self.device)
         self._tris = wp.zeros(MAX_CELLS * 15, dtype=wp.int32, device=self.device)
+        self._tri_cell = wp.zeros(MAX_CELLS * 5, dtype=wp.int32, device=self.device)
         self._degree = wp.zeros(MAX_VERTS, dtype=wp.int32, device=self.device)
         self._neighbors = wp.zeros(MAX_VERTS * MAX_DEGREE, dtype=wp.int32, device=self.device)
         self._overflow = wp.zeros(1, dtype=wp.int32, device=self.device)
@@ -584,6 +617,7 @@ class WarpMesher:
         self._slot_points = wp.zeros(SLOT_COUNT * MAX_VERTS, dtype=wp.vec3, device=self.device)
         self._slot_colors = wp.zeros(SLOT_COUNT * MAX_VERTS, dtype=wp.uint32, device=self.device)
         self._slot_tris = wp.zeros(SLOT_COUNT * MAX_CELLS * 15, dtype=wp.int32, device=self.device)
+        self._slot_tri_cell = wp.zeros(SLOT_COUNT * MAX_CELLS * 5, dtype=wp.int32, device=self.device)
         self._slot_world = wp.zeros(SLOT_COUNT * MAX_VERTS, dtype=wp.vec3, device=self.device)
         self._slot_normals = wp.zeros(SLOT_COUNT * MAX_VERTS, dtype=wp.vec3, device=self.device)
         self._events = [wp.Event(self.device, enable_timing=True) for _ in range(4)]
@@ -640,11 +674,9 @@ class WarpMesher:
         """
         phases = {"extract_ms": 0.0, "edge_ms": 0.0, "smooth_ms": 0.0, "prepare_gpu_ms": 0.0, "transfer_ms": 0.0, "download_bytes": 0}
         shape = self.shape
-        bx, by, bz = (int(v) for v in block)
-        i0, i1 = block_voxel_bounds(bx, shape[0], BLOCK)
-        j0, j1 = block_voxel_bounds(by, shape[1], BLOCK)
-        k0, k1 = block_voxel_bounds(bz, shape[2], BLOCK)
-        sx, sy, sz = i1 - i0 + 1, j1 - j0 + 1, k1 - k0 + 1
+        geo = self._block_geometry(block)
+        i0, j0, k0 = geo["origin"]
+        sx, sy, sz = geo["size"]
         empty = (
             np.zeros((0, 3), np.float32),
             np.zeros((0, 3), np.int32),
@@ -654,14 +686,10 @@ class WarpMesher:
         )
         if min(sx, sy, sz) < 2 or sx > MAX_AXIS or sy > MAX_AXIS or sz > MAX_AXIS:
             return empty, phases
-        cx, cy, cz = sx - 1, sy - 1, sz - 1
+        cx, cy, cz = geo["cells"]
         edge_n = 3 * sx * sy * sz
         cell_n = cx * cy * cz
-        own_hi = (
-            min((bx + 1) * BLOCK, shape[0]),
-            min((by + 1) * BLOCK, shape[1]),
-            min((bz + 1) * BLOCK, shape[2]),
-        )
+        own_hi = geo["own_hi"]
         started = time.perf_counter()
         self._flags.zero_()
         self._tri_counts.zero_()
@@ -704,7 +732,7 @@ class WarpMesher:
             emit_triangles,
             dim=(cx, cy, cz),
             inputs=[
-                self.occ, self._corners, self._edges, self._tri_table, self._scan, self._tri_counts, self._tri_scan, self._tris,
+                self.occ, self._corners, self._edges, self._tri_table, self._scan, self._tri_counts, self._tri_scan, self._tris, self._tri_cell,
                 shape[0], shape[1], shape[2], i0, j0, k0, sx, sy, sz, cx, cy, own_hi[0], own_hi[1], own_hi[2],
             ],
             device=self.device,
@@ -717,7 +745,7 @@ class WarpMesher:
             smoothing = time.perf_counter()
             self._overflow.zero_()
             self._degree.zero_()
-            wp.launch(mark_pins, dim=n_verts, inputs=[self._points, self._pinned, shape[0], shape[1], shape[2], BLOCK], device=self.device)
+            wp.launch(zero_range, dim=n_verts, inputs=[self._pinned], device=self.device)
             wp.launch(
                 scatter_neighbors,
                 dim=n_tris,
@@ -727,7 +755,7 @@ class WarpMesher:
             wp.copy(self._original, self._points, count=n_verts)
             current = self._points
             nxt = self._swap
-            for _ in range(4):
+            for _ in range(SMOOTH_ITERS):
                 wp.launch(
                     smooth_step,
                     dim=n_verts,
@@ -747,12 +775,16 @@ class WarpMesher:
         downloading = time.perf_counter()
         verts = self._points.numpy()[:n_verts].astype(np.float64, copy=False)
         tris = self._tris.numpy()[: n_tris * 3].reshape(-1, 3).astype(np.int32, copy=False)
+        codes = self._tri_cell.numpy()[:n_tris]
         packed = self._point_colors.numpy()[:n_verts]
         rgb = np.stack([(packed) & 255, (packed >> 8) & 255, (packed >> 16) & 255], axis=1).astype(np.uint8)
-        verts, tris, rgb = _compact_used(verts, tris, rgb)
         phases["transfer_ms"] += (time.perf_counter() - downloading) * 1e3
-        phases["download_bytes"] = int(n_verts * 16 + n_tris * 12 + n_verts * 4)
+        phases["download_bytes"] = int(n_verts * 16 + n_tris * 16 + n_verts * 4)
         self.download_bytes += phases["download_bytes"]
+        if smooth and not smoothed_on_gpu and len(tris):
+            fallback = time.perf_counter()
+            verts = smooth_pinned(verts, tris, np.zeros(len(verts), dtype=bool), iterations=SMOOTH_ITERS)
+            phases["smooth_ms"] += (time.perf_counter() - fallback) * 1e3
         world = None
         normals = None
         if prepare_pose is not None and len(tris):
@@ -761,14 +793,14 @@ class WarpMesher:
             rot = np.ascontiguousarray(rotation, dtype=np.float32).reshape(-1)
             self._rotation.assign(rot)
             self._translation.assign(np.ascontiguousarray(translation, dtype=np.float32))
-            # The downloaded compact arrays are a subset. Upload that subset for the pose kernels.
-            compact_points = wp.array(np.ascontiguousarray(verts, dtype=np.float32), dtype=wp.vec3, device=self.device)
-            compact_tris = wp.array(np.ascontiguousarray(tris.reshape(-1), dtype=np.int32), dtype=wp.int32, device=self.device)
+            # Normals see the halo triangles, then the halo is dropped below.
+            full_points = wp.array(np.ascontiguousarray(verts, dtype=np.float32), dtype=wp.vec3, device=self.device)
+            full_tris = wp.array(np.ascontiguousarray(tris.reshape(-1), dtype=np.int32), dtype=wp.int32, device=self.device)
             wp.launch(
                 world_positions,
                 dim=len(verts),
                 inputs=[
-                    compact_points, self._world,
+                    full_points, self._world,
                     float(dims[0]), float(dims[1]), float(dims[2]),
                     float(counts[0]), float(counts[1]), float(counts[2]),
                     self._rotation, self._translation,
@@ -776,7 +808,7 @@ class WarpMesher:
                 device=self.device,
             )
             wp.launch(zero_vec3, dim=len(verts), inputs=[self._normals], device=self.device)
-            wp.launch(accumulate_normals, dim=len(tris), inputs=[self._world, compact_tris, self._normals], device=self.device)
+            wp.launch(accumulate_normals, dim=len(tris), inputs=[self._world, full_tris, self._normals], device=self.device)
             wp.launch(normalize_vectors, dim=len(verts), inputs=[self._normals], device=self.device)
             wp.synchronize()
             world = self._world.numpy()[: len(verts)].astype(np.float32, copy=True)
@@ -785,36 +817,23 @@ class WarpMesher:
             phases["download_bytes"] += int(len(verts) * 12 * 2)
             self.download_bytes += int(len(verts) * 12 * 2)
             self.upload_bytes += int(verts.nbytes + tris.nbytes)
-        if smooth and not smoothed_on_gpu and len(tris):
-            # The neighbor cap was hit. The CPU smooth is the same rule.
-            from surface import shared_face_pins
-
-            fallback = time.perf_counter()
-            verts = smooth_pinned(verts, tris, shared_face_pins(verts, shape, BLOCK))
-            phases["smooth_ms"] += (time.perf_counter() - fallback) * 1e3
-        elif not smooth and len(tris):
-            pass
-        elif smooth and smoothed_on_gpu:
-            pass
+        verts, tris, rgb, world, normals = _keep_owned(verts, tris, rgb, codes, block, shape, world, normals)
         return (verts, tris, rgb, world, normals), phases
 
 
     def _block_geometry(self, block):
         shape = self.shape
         bx, by, bz = (int(v) for v in block)
-        i0, i1 = block_voxel_bounds(bx, shape[0], BLOCK)
-        j0, j1 = block_voxel_bounds(by, shape[1], BLOCK)
-        k0, k1 = block_voxel_bounds(bz, shape[2], BLOCK)
+        i0, i1 = block_halo_bounds(bx, shape[0], BLOCK)
+        j0, j1 = block_halo_bounds(by, shape[1], BLOCK)
+        k0, k1 = block_halo_bounds(bz, shape[2], BLOCK)
         sx, sy, sz = i1 - i0 + 1, j1 - j0 + 1, k1 - k0 + 1
         return {
             "origin": (i0, j0, k0),
             "size": (sx, sy, sz),
             "cells": (sx - 1, sy - 1, sz - 1),
-            "own_hi": (
-                min((bx + 1) * BLOCK, shape[0]),
-                min((by + 1) * BLOCK, shape[1]),
-                min((bz + 1) * BLOCK, shape[2]),
-            ),
+            # Exclusive cell end of the halo read. Ownership is applied after smoothing.
+            "own_hi": (i1, j1, k1),
         }
 
     def _enqueue_extract(self, block, slot):
@@ -864,7 +883,7 @@ class WarpMesher:
             emit_triangles,
             dim=(cx, cy, cz),
             inputs=[
-                self.occ, self._corners, self._edges, self._tri_table, self._scan, self._tri_counts, self._tri_scan, self._tris,
+                self.occ, self._corners, self._edges, self._tri_table, self._scan, self._tri_counts, self._tri_scan, self._tris, self._tri_cell,
                 shape[0], shape[1], shape[2], i0, j0, k0, sx, sy, sz, cx, cy, own_hi[0], own_hi[1], own_hi[2],
             ],
             device=self.device,
@@ -874,6 +893,7 @@ class WarpMesher:
         wp.copy(self._slot_points, self._points, dest_offset=slot * MAX_VERTS, count=edge_n)
         wp.copy(self._slot_colors, self._point_colors, dest_offset=slot * MAX_VERTS, count=edge_n)
         wp.copy(self._slot_tris, self._tris, dest_offset=slot * MAX_CELLS * 15, count=cell_n * 15)
+        wp.copy(self._slot_tri_cell, self._tri_cell, dest_offset=slot * MAX_CELLS * 5, count=cell_n * 5)
         return {"skip": False, "edge_n": edge_n, "cell_n": cell_n, "block": block}
 
     def mesh_blocks(self, blocks, smooth, prepare_pose):
@@ -908,12 +928,12 @@ class WarpMesher:
             if smooth:
                 wp.launch(zero_range, dim=nv, inputs=[self._degree], device=self.device)
                 self._overflow.zero_()
-                wp.launch(mark_pins, dim=nv, inputs=[self._points, self._pinned, shape[0], shape[1], shape[2], BLOCK], device=self.device)
+                wp.launch(zero_range, dim=nv, inputs=[self._pinned], device=self.device)
                 wp.launch(scatter_neighbors, dim=nt, inputs=[self._tris, self._degree, self._neighbors, self._overflow, MAX_DEGREE], device=self.device)
                 wp.copy(self._original, self._points, count=nv)
                 current = self._points
                 nxt = self._swap
-                for _ in range(4):
+                for _ in range(SMOOTH_ITERS):
                     wp.launch(
                         smooth_step,
                         dim=nv,
@@ -969,20 +989,21 @@ class WarpMesher:
                 continue
             base_v = slot * MAX_VERTS
             base_t = slot * MAX_CELLS * 15
+            base_c = slot * MAX_CELLS * 5
             verts = self._slot_points[base_v : base_v + nv].numpy().astype(np.float64, copy=False)
             tris = self._slot_tris[base_t : base_t + nt * 3].numpy().reshape(-1, 3).astype(np.int32, copy=False)
+            codes = self._slot_tri_cell[base_c : base_c + nt].numpy()
             packed = self._slot_colors[base_v : base_v + nv].numpy()
             rgb = np.stack((packed & 255, (packed >> 8) & 255, (packed >> 16) & 255), axis=1).astype(np.uint8)
-            used, inverse = np.unique(tris.reshape(-1), return_inverse=True)
-            verts = verts[used]
-            rgb = rgb[used]
-            tris = inverse.reshape(-1, 3).astype(np.int32)
             world = None
             normals = None
             if prepare_pose is not None:
-                world = self._slot_world[base_v : base_v + nv].numpy()[used].astype(np.float32, copy=True)
-                normals = self._slot_normals[base_v : base_v + nv].numpy()[used].astype(np.float32, copy=True)
-            phases["download_bytes"] += int(nv * 20 + nt * 12 + (0 if world is None else used.size * 24))
+                world = self._slot_world[base_v : base_v + nv].numpy().astype(np.float32, copy=False)
+                normals = self._slot_normals[base_v : base_v + nv].numpy().astype(np.float32, copy=False)
+            verts, tris, rgb, world, normals = _keep_owned(
+                verts, tris, rgb, codes, meta["block"], shape, world, normals
+            )
+            phases["download_bytes"] += int(nv * 20 + nt * 16 + (0 if world is None else len(verts) * 24))
             outputs.append((meta["block"], (verts, tris, rgb, world, normals)))
         phases["transfer_ms"] += (time.perf_counter() - downloading) * 1e3
         return outputs

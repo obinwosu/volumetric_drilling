@@ -370,6 +370,11 @@ class BoneMesh:
 
 # 32 won the live comparison. 48 missed the small-cut median, and 64 was slower.
 BLOCK = 32
+# Each block smooths a three-voxel halo of its neighbor, then drops those
+# triangles. Three iterations with that halo leave the shared face identical
+# from both sides. The read is BLOCK + 2*HALO + 1 = 39, inside the GPU limit.
+HALO = 3
+SMOOTH_ITERS = 3
 
 
 def block_count(count, n=BLOCK):
@@ -381,10 +386,23 @@ def block_count(count, n=BLOCK):
 
 
 def block_voxel_bounds(b, count, n=BLOCK):
-    """Inclusive voxel indices this block reads. The ends may lie outside the scan."""
+    """Inclusive voxel indices this block owns. The ends may lie outside the scan."""
     lo = -1 if b == 0 else b * n
     hi = min(int(count), (b + 1) * n)
     return lo, hi
+
+
+def block_halo_bounds(b, count, n=BLOCK, halo=HALO):
+    """Owned range plus ``halo`` voxels into each neighboring block."""
+    lo, hi = block_voxel_bounds(b, count, n)
+    if count <= 0:
+        return lo, hi
+    last = (int(count) - 1) // n
+    if b > 0:
+        lo -= halo
+    if b < last:
+        hi = min(int(count), hi + halo)
+    return int(lo), int(hi)
 
 
 def _owns_cell(corner, block, count, n=BLOCK):
@@ -395,7 +413,8 @@ def _owns_cell(corner, block, count, n=BLOCK):
 def blocks_touched_by(xs, ys, zs, shape, n=BLOCK):
     """Blocks whose surface can change when these voxels change.
 
-    A voxel on a shared face, or one step away from it, marks both blocks.
+    A voxel within the smooth halo of a shared face marks both blocks, so the
+    neighbor rebuilds with the same halo the cut changed.
     """
     xs = np.asarray(xs, dtype=np.int32).reshape(-1)
     ys = np.asarray(ys, dtype=np.int32).reshape(-1)
@@ -407,9 +426,9 @@ def blocks_touched_by(xs, ys, zs, shape, n=BLOCK):
         last = (count - 1) // n
         base = np.clip(values // n, 0, last).astype(np.int32)
         face = base * n
-        previous = np.where((base > 0) & ((values - face) <= 1), base - 1, np.int32(-1))
+        previous = np.where((base > 0) & ((values - face) <= HALO), base - 1, np.int32(-1))
         next_face = (base + 1) * n
-        nxt = np.where((next_face < count) & ((next_face - values) <= 1), base + 1, np.int32(-1))
+        nxt = np.where((next_face < count) & ((next_face - values) <= HALO), base + 1, np.int32(-1))
         return (base, previous, nxt)
 
     cx = candidates(xs, shape[0])
@@ -495,13 +514,18 @@ def smooth_pinned(verts, tris, pinned, iterations=4, lam=0.5, max_step=0.4):
     return current
 
 
-def extract_block(occupied, colors, block, n=BLOCK):
-    """Mesh the cells this block owns. Shared-face vertices stay on the raw midpoint."""
+def extract_block(occupied, colors, block, n=BLOCK, smooth=True):
+    """Mesh the cells this block owns.
+
+    Smoothing sees ``HALO`` voxels of each neighbor, and normals are accumulated
+    on that same mesh. Triangles outside the block are dropped afterwards, so
+    the shared face matches the neighbor's copy.
+    """
     shape = tuple(int(v) for v in occupied.shape)
     bx, by, bz = block
-    i0, i1 = block_voxel_bounds(bx, shape[0], n)
-    j0, j1 = block_voxel_bounds(by, shape[1], n)
-    k0, k1 = block_voxel_bounds(bz, shape[2], n)
+    i0, i1 = block_halo_bounds(bx, shape[0], n)
+    j0, j1 = block_halo_bounds(by, shape[1], n)
+    k0, k1 = block_halo_bounds(bz, shape[2], n)
     phases = {"extract_ms": 0.0, "edge_ms": 0.0, "smooth_ms": 0.0}
     nx, ny, nz = shape
     ia0, ia1 = max(0, i0), min(nx, i1 + 1)
@@ -516,30 +540,41 @@ def extract_block(occupied, colors, block, n=BLOCK):
     verts, tris, _keys, cells, vert_colors = marching_cubes(slab, slab_colors, origin=(i0, j0, k0))
     phases["extract_ms"] = (time.perf_counter() - started) * 1e3
     started = time.perf_counter()
+    if len(tris) and smooth:
+        verts = smooth_pinned(
+            verts, tris, np.zeros(len(verts), dtype=bool), iterations=SMOOTH_ITERS
+        )
+    phases["smooth_ms"] = (time.perf_counter() - started) * 1e3
+    started = time.perf_counter()
+    index_normals = None
     if len(tris):
+        index_normals = vertex_normals(verts, tris)
         ci, cj, ck = cell_corners(cells)
         keep = (
             _owns_cell(ci, bx, shape[0], n)
             & _owns_cell(cj, by, shape[1], n)
             & _owns_cell(ck, bz, shape[2], n)
         )
-        verts, tris, vert_colors = _compact_used(verts, tris[keep], vert_colors)
+        if not np.any(keep):
+            phases["edge_ms"] = (time.perf_counter() - started) * 1e3
+            return BlockMesh(*_empty_block()), phases
+        used, inverse = np.unique(tris[keep].reshape(-1), return_inverse=True)
+        verts = verts[used]
+        vert_colors = vert_colors[used]
+        tris = inverse.reshape(-1, 3).astype(np.int32)
+        index_normals = index_normals[used]
     phases["edge_ms"] = (time.perf_counter() - started) * 1e3
-    started = time.perf_counter()
-    if len(tris):
-        verts = smooth_pinned(verts, tris, shared_face_pins(verts, shape, n))
-    phases["smooth_ms"] = (time.perf_counter() - started) * 1e3
-    mesh = BlockMesh(verts, tris, vert_colors)
-    return mesh, phases
+    return BlockMesh(verts, tris, vert_colors, index_normals), phases
 
 
 class BlockMesh:
     """Triangles for one block. Nothing here is copied from any other block."""
 
-    def __init__(self, verts, tris, colors):
+    def __init__(self, verts, tris, colors, index_normals=None):
         self.verts = verts
         self.tris = tris
         self.colors = colors
+        self.index_normals = index_normals
 
 
 class BlockVolume:

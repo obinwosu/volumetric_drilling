@@ -1,7 +1,7 @@
 {
   "version": 1,
   "lights": {
-    "cone_angle_deg": 10.199999809265137,
+    "cone_angle_deg": 12.100000381469727,
     "cone_softness": 0.3499999940395355,
     "intensity_nits": 20000000.0,
     "fill": 0.0,
@@ -17,6 +17,5 @@
       0.78,
       0.7
     ]
-  },
-  "materials": {}
+  }
 }
