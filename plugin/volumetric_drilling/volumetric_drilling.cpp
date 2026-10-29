@@ -302,9 +302,9 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
     }
     else{
         cerr << "WARNING! NO FOOTPEDAL /dev/input DEVICE OPEN "
-             << "(using keyboard a/b/c + key 1 cam-clutch)\n";
+             << "(using keyboard a/b/c, Space hold-drill, + key 1 cam-clutch)\n";
     }
-    cerr << "INFO! Ikkegol pedals: a=diamond/cutting, b=hold drill, c=size; key 1=cam clutch" << endl;
+    cerr << "INFO! Ikkegol pedals: a=diamond/cutting, b or Space=hold drill, c=size; key 1=cam clutch" << endl;
 
     m_gazeMarkerController.init(m_worldPtr, &m_panelManager);
     cerr << "INFO! GAZE MARKER INITIALIZED \n";
@@ -354,17 +354,39 @@ void afVolmetricDrillingPlugin::publishDrillVisualState()
         tip = pose.getLocalPos();
         tipRot.fromRotMat(pose.getLocalRot());
     }
-    std::ofstream out(dir / "drill_state.json", std::ios::trunc);
-    if (!out){
-        return;
+    // q and -q are the same rotation. Flipping the hemisphere each frame
+    // makes the RTX shaft whip back and forth when the pose is interpolated.
+    static cQuaternion previousQuat;
+    static bool havePreviousQuat = false;
+    if (havePreviousQuat){
+        const double dot = tipRot.x * previousQuat.x + tipRot.y * previousQuat.y
+            + tipRot.z * previousQuat.z + tipRot.w * previousQuat.w;
+        if (dot < 0.0){
+            tipRot.x = -tipRot.x;
+            tipRot.y = -tipRot.y;
+            tipRot.z = -tipRot.z;
+            tipRot.w = -tipRot.w;
+        }
     }
-    out << std::setprecision(8)
-        << "{\"on\":" << (m_drillManager.m_isOn ? "true" : "false")
-        << ",\"style\":\"" << style << "\""
-        << ",\"size_mm\":" << sizeMm
-        << ",\"px\":" << tip.x() << ",\"py\":" << tip.y() << ",\"pz\":" << tip.z()
-        << ",\"qx\":" << tipRot.x << ",\"qy\":" << tipRot.y
-        << ",\"qz\":" << tipRot.z << ",\"qw\":" << tipRot.w << "}\n";
+    previousQuat = tipRot;
+    havePreviousQuat = true;
+    const fs::path finalPath = dir / "drill_state.json";
+    const fs::path tempPath = dir / "drill_state.json.tmp";
+    {
+        std::ofstream out(tempPath, std::ios::trunc);
+        if (!out){
+            return;
+        }
+        out << std::setprecision(8)
+            << "{\"on\":" << (m_drillManager.m_isOn ? "true" : "false")
+            << ",\"style\":\"" << style << "\""
+            << ",\"size_mm\":" << sizeMm
+            << ",\"px\":" << tip.x() << ",\"py\":" << tip.y() << ",\"pz\":" << tip.z()
+            << ",\"qx\":" << tipRot.x << ",\"qy\":" << tipRot.y
+            << ",\"qz\":" << tipRot.z << ",\"qw\":" << tipRot.w << "}\n";
+    }
+    std::error_code renameError;
+    fs::rename(tempPath, finalPath, renameError);
 }
 
 void afVolmetricDrillingPlugin::publishRtxStatus(double now)
@@ -1097,8 +1119,8 @@ void afVolmetricDrillingPlugin::updateButtons(){
         m_drillManager.cycleDrillTypes();
     }
 
-    // Hold-to-run drill (device pedal and/or keyboard 'b' from middle pedal).
-    m_drillManager.m_isOn = m_footpedal.isDrillOn() || xDrillHeld;
+    // Hold-to-run drill: device pedal, keyboard 'b', or Space (RTX window included).
+    m_drillManager.m_isOn = m_footpedal.isDrillOn() || xDrillHeld || isDrillHoldRequested();
     m_drillManager.updateBurrLabel();
 
     m_drillManager.m_camClutch = false;
@@ -1467,6 +1489,33 @@ bool afVolmetricDrillingPlugin::isDigit1Held() const
         }
     }
     return false;
+}
+
+bool afVolmetricDrillingPlugin::isDrillHoldRequested() const
+{
+    Display* dpy = glfwGetX11Display();
+    if (dpy){
+        KeyCode code = XKeysymToKeycode(dpy, XK_space);
+        if (isXKeycodeHeld(code)){
+            return true;
+        }
+    }
+    auto winSpace = [](GLFWwindow* win) -> bool {
+        return win && (glfwGetKey(win, GLFW_KEY_SPACE) == GLFW_PRESS);
+    };
+    if (m_mainCamera && winSpace(m_mainCamera->m_window)){
+        return true;
+    }
+    if (m_stereoCamera && winSpace(m_stereoCamera->m_window)){
+        return true;
+    }
+    for (const auto& kv : m_cameras){
+        if (kv.second && winSpace(kv.second->m_window)){
+            return true;
+        }
+    }
+    std::error_code existsError;
+    return fs::exists("/tmp/fivrs-rtx/drill_hold", existsError);
 }
 
 bool afVolmetricDrillingPlugin::isLetterKeyHeld(int glfwKey) const
@@ -2209,7 +2258,7 @@ string afVolmetricDrillingPlugin::controlHelpText(bool paused) const
     }
     s +=
             "  Camera clutch          Hold 1  or  Stylus 1  or  Alt (HMD)\n"
-            "  Drill (hold-to-run)    Middle pedal (b)\n"
+            "  Drill (hold-to-run)    Middle pedal (b)  or  Space\n"
             "  Burr style / size      Left pedal (a) / Right pedal (c)\n"
             "  Place WiVRn scene      Hold F10 (drag) / F11 lap / F12 look\n"
             "  Device clutch          Hold Stylus 2\n"

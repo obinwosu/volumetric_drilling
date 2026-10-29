@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import struct
 import sys
 from dataclasses import dataclass
@@ -20,7 +21,7 @@ import numpy as np
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from fluid.frozen_bone import ensure_writer, inspect_vdb, write_dense
+from fluid.frozen_bone import inspect_vdb, run_writer, write_dense
 from fluid.occupancy import drill_pose, read_drill_state
 from fluid.outlet import (
     CC_PER_S,
@@ -34,7 +35,7 @@ from fluid.outlet import (
 )
 
 STATE_MAGIC = b"FIVRINLT"
-STATE_VERSION = 1
+STATE_VERSION = 2
 MAX_SEEDS = 64
 DEFAULT_STATE = Path("/tmp/fivrs-rtx/inlet_state.bin")
 
@@ -49,10 +50,17 @@ class MovingInlet:
     support: float
     jet_mm: float
     cc_per_s: float
+    flow_sim3_s: float
+    particle_volume: float
+    disk_area: bool = False
+
+    @property
+    def seed_count(self) -> int:
+        return int(self.seeds.shape[0])
 
     @property
     def count(self) -> int:
-        return 0 if not self.emitting else int(self.seeds.shape[0])
+        return self.seed_count if self.emitting else 0
 
     def report(self) -> dict:
         return {
@@ -68,6 +76,10 @@ class MovingInlet:
             "emit_dot_tangent": float(self.frame["emit_dot_tangent"]),
             "particle_radius": float(self.particle_radius),
             "cc_per_s": float(self.cc_per_s),
+            "seed_count": self.seed_count,
+            "flow_sim3_s": float(self.flow_sim3_s),
+            "particle_volume": float(self.particle_volume),
+            "speed_mm_s": float(np.linalg.norm(self.velocity) / MM_TO_SIM),
         }
 
 
@@ -92,6 +104,39 @@ def disk_offsets(jet_mm: float, particle_mm: float) -> np.ndarray:
     return np.asarray(pts, dtype=np.float64)
 
 
+def particle_volume_sim(particle_mm: float) -> float:
+    """SPH particle volume, (4/3) pi r^3. This is the discretization, not the drop you see."""
+    radius = 0.5 * float(particle_mm) * MM_TO_SIM
+    return (4.0 / 3.0) * math.pi * radius ** 3
+
+
+def flow_sim3_s(cc_per_s: float) -> float:
+    return float(cc_per_s) * 1000.0 * (MM_TO_SIM ** 3)
+
+
+def disk_area_mm2(diameter_mm: float) -> float:
+    return math.pi * (0.5 * float(diameter_mm)) ** 2
+
+
+def jet_speed_disk_mm_s(cc_per_s: float, diameter_mm: float) -> float:
+    """U from Q = A U. A is the circular patch, not a square of side diameter_mm."""
+    area = disk_area_mm2(diameter_mm)
+    if area <= 0.0:
+        raise ValueError("diameter_mm must be positive")
+    return float(cc_per_s) * 1000.0 / area
+
+
+def accumulate_births(remainder: float, flow: float, volume: float, dt: float, cap: int = MAX_SEEDS):
+    """N = floor(remainder + Q dt / V). The fraction is kept for the next step."""
+    if not (volume > 0.0 and dt > 0.0 and flow > 0.0):
+        return float(remainder), 0
+    remainder = min(float(cap), float(remainder) + float(flow) * float(dt) / float(volume))
+    born = int(math.floor(remainder))
+    if born > cap:
+        born = cap
+    return remainder - born, born
+
+
 def inlet_from_pose(
     tip,
     quat,
@@ -101,9 +146,13 @@ def inlet_from_pose(
     jet_mm: float = JET_MM,
     particle_mm: float = PARTICLE_MM,
     cc_per_s: float = CC_PER_S,
+    disk_area: bool = False,
 ) -> MovingInlet:
     frame = outlet_frame(tip, quat, offset_mm=offset_mm, proximal_mm=proximal_mm)
-    speed = jet_speed_mm_s(cc_per_s, jet_mm) * MM_TO_SIM
+    if disk_area:
+        speed = jet_speed_disk_mm_s(cc_per_s, jet_mm) * MM_TO_SIM
+    else:
+        speed = jet_speed_mm_s(cc_per_s, jet_mm) * MM_TO_SIM
     velocity = frame["emit"] * speed
     offsets = disk_offsets(jet_mm, particle_mm)
     seeds = (
@@ -121,6 +170,9 @@ def inlet_from_pose(
         support=2.0 * radius,
         jet_mm=float(jet_mm),
         cc_per_s=float(cc_per_s),
+        flow_sim3_s=flow_sim3_s(cc_per_s),
+        particle_volume=particle_volume_sim(particle_mm),
+        disk_area=bool(disk_area),
     )
 
 
@@ -134,7 +186,9 @@ def inlet_from_drill(path: Path, force_emit: bool = False, **kwargs) -> MovingIn
 def write_state(path: Path, inlet: MovingInlet) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    seeds = inlet.seeds if inlet.emitting else np.zeros((0, 3), dtype=np.float64)
+    # The patch is written whether or not the pedal is down, so the next
+    # solver step can follow the drill. emitting only gates births.
+    seeds = inlet.seeds
     count = int(seeds.shape[0])
     if count > MAX_SEEDS:
         raise ValueError(f"inlet has {count} seeds; max is {MAX_SEEDS}")
@@ -148,6 +202,7 @@ def write_state(path: Path, inlet: MovingInlet) -> Path:
         handle.write(STATE_MAGIC)
         handle.write(struct.pack("<iii", STATE_VERSION, 1 if inlet.emitting else 0, count))
         handle.write(struct.pack("<ffff", float(vel[0]), float(vel[1]), float(vel[2]), 0.0))
+        handle.write(struct.pack("<ff", float(inlet.flow_sim3_s), float(inlet.particle_volume)))
         handle.write(packed.tobytes())
     tmp.replace(path)
     path.with_suffix(".json").write_text(json.dumps(inlet.report(), indent=2) + "\n")
@@ -160,14 +215,28 @@ def read_state(path: Path) -> dict:
         raise ValueError("inlet state magic is not FIVRINLT")
     version, emitting, count = struct.unpack_from("<iii", raw, 8)
     vx, vy, vz, vw = struct.unpack_from("<ffff", raw, 20)
-    packed = np.frombuffer(raw[36:], dtype=np.float32).reshape(count, 4)
+    if version >= 2:
+        flow, particle_volume = struct.unpack_from("<ff", raw, 36)
+        pos_off = 44
+    else:
+        flow, particle_volume = 0.0, 0.0
+        pos_off = 36
+    if count:
+        packed = np.frombuffer(raw[pos_off:], dtype=np.float32, count=count * 4).reshape(count, 4)
+        seeds = packed[:, :3].copy()
+        support = packed[:, 3].copy()
+    else:
+        seeds = np.zeros((0, 3), np.float32)
+        support = np.zeros(0, np.float32)
     return {
         "version": version,
         "emitting": bool(emitting),
         "count": count,
         "velocity": [float(vx), float(vy), float(vz), float(vw)],
-        "seeds": packed[:, :3].copy(),
-        "support": packed[:, 3].copy() if count else np.zeros(0, np.float32),
+        "flow_sim3_s": float(flow),
+        "particle_volume": float(particle_volume),
+        "seeds": seeds,
+        "support": support,
     }
 
 
@@ -194,10 +263,7 @@ def write_inlet_vdb(path: Path, inlet: MovingInlet, samples: int = 24) -> Path:
     path = Path(path)
     dense = path.with_suffix(".dense.bin")
     write_dense(dense, origin, spacing, distance)
-    writer = ensure_writer()
-    import subprocess
-
-    subprocess.run([str(writer), "write", str(dense), str(path)], check=True)
+    run_writer(["write", str(dense), str(path)])
     dense.unlink(missing_ok=True)
     return path
 

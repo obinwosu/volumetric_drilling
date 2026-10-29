@@ -1,4 +1,4 @@
-"""Seeds follow the constrained tip. Pedal off writes an empty inlet."""
+"""Seeds follow the constrained tip. Pedal off keeps the patch and stops births."""
 
 from __future__ import annotations
 
@@ -13,8 +13,10 @@ HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
 from fluid.moving_inlet import (
+    accumulate_births,
     attach_inlet_config,
     inlet_from_pose,
+    jet_speed_disk_mm_s,
     read_state,
     write_inlet_vdb,
     write_state,
@@ -41,18 +43,21 @@ def test_seeds_sit_on_outlet_disk_and_jet_is_minus_shaft():
         assert radial / MM_TO_SIM <= 0.6
 
 
-def test_pedal_off_writes_zero_seeds():
+def test_pedal_off_keeps_the_patch():
     tip = np.array([0.2, -0.1, 0.05], dtype=np.float64)
     quat = (0.0, 0.0, 0.0, 1.0)
-    inlet = inlet_from_pose(tip, quat, emitting=False)
+    inlet = inlet_from_pose(tip, quat, emitting=False, proximal_mm=0.0, disk_area=True)
     assert inlet.count == 0
+    assert inlet.seed_count > 0
     with tempfile.TemporaryDirectory() as tmp:
         path = pathlib.Path(tmp) / "inlet_state.bin"
         write_state(path, inlet)
         state = read_state(path)
         assert state["emitting"] is False
-        assert state["count"] == 0
-        assert state["seeds"].shape == (0, 3)
+        assert state["count"] == inlet.seed_count
+        assert state["version"] == 2
+        assert state["flow_sim3_s"] > 0.0
+        assert np.allclose(state["seeds"], inlet.seeds.astype(np.float32), atol=1e-5)
 
 
 def test_seeds_track_tip_pose():
@@ -70,6 +75,32 @@ def test_seeds_track_tip_pose():
     assert np.allclose(rotated.frame["emit"], (0.0, -1.0, 0.0), atol=1e-6)
 
 
+def test_live_patch_is_five_mm_right_of_the_shaft():
+    tip = np.array([0.2, -0.1, 0.05], dtype=np.float64)
+    quat = (0.0, 0.0, 0.0, 1.0)
+    inlet = inlet_from_pose(
+        tip, quat, emitting=True, offset_mm=5.0, proximal_mm=0.0, jet_mm=2.0, particle_mm=0.5, cc_per_s=1.0, disk_area=True
+    )
+    assert abs(inlet.frame["proximal_mm"]) < 1e-6
+    assert abs(inlet.frame["radial_mm"] - 5.0) < 1e-6
+    assert abs(inlet.frame["emit_dot_shaft"] + 1.0) < 1e-9
+    speed = float(np.linalg.norm(inlet.velocity) / MM_TO_SIM)
+    assert abs(speed - jet_speed_disk_mm_s(1.0, 2.0)) < 1e-6
+    moved = inlet_from_pose(
+        tip + np.array([0.04, -0.02, 0.01]), quat, emitting=True, offset_mm=5.0, proximal_mm=0.0, disk_area=True
+    )
+    assert not np.allclose(moved.seeds, inlet.seeds)
+
+
+def test_births_keep_the_fractional_remainder():
+    remainder, born = accumulate_births(0.0, flow=2.5, volume=1.0, dt=1.0)
+    assert born == 2
+    assert abs(remainder - 0.5) < 1e-9
+    remainder, born = accumulate_births(remainder, flow=2.5, volume=1.0, dt=1.0)
+    assert born == 3
+    assert abs(remainder) < 1e-9
+
+
 def test_inlet_vdb_is_negative_at_outlet():
     tip = np.array([0.2, -0.1, 0.05], dtype=np.float64)
     quat = (0.0, 0.0, 0.0, 1.0)
@@ -79,7 +110,7 @@ def test_inlet_vdb_is_negative_at_outlet():
         vdb = write_inlet_vdb(root / "inlet_surface.vdb", inlet)
         write_state(root / "inlet_state.bin", inlet)
         attach_inlet_config(root / "config.json", inlet)
-        from fluid.frozen_bone import ensure_writer, inspect_vdb
+        from fluid.frozen_bone import ensure_writer, inspect_vdb, writer_env
         import subprocess
 
         writer = ensure_writer()
@@ -89,12 +120,14 @@ def test_inlet_vdb_is_negative_at_outlet():
             subprocess.check_output(
                 [str(writer), "sample", str(vdb), *(f"{c:.8f}" for c in outlet)],
                 text=True,
+                env=writer_env(),
             ).strip()
         )
         outside = float(
             subprocess.check_output(
                 [str(writer), "sample", str(vdb), *(f"{c:.8f}" for c in far)],
                 text=True,
+                env=writer_env(),
             ).strip()
         )
         info = inspect_vdb(vdb)
@@ -107,8 +140,10 @@ def test_inlet_vdb_is_negative_at_outlet():
 
 def main():
     test_seeds_sit_on_outlet_disk_and_jet_is_minus_shaft()
-    test_pedal_off_writes_zero_seeds()
+    test_pedal_off_keeps_the_patch()
     test_seeds_track_tip_pose()
+    test_live_patch_is_five_mm_right_of_the_shaft()
+    test_births_keep_the_fractional_remainder()
     test_inlet_vdb_is_negative_at_outlet()
     print("moving inlet tests passed", flush=True)
 

@@ -23,6 +23,26 @@ KNOWN_NAMES = {
     "fff9db": "bone",
 }
 
+# One water sheet. Thin-walled, IOR 1: transmission and opacity, no refraction.
+# A single surface can sit clearer than stacked spheres, which added up to black.
+WATER = {
+    "diffuse_reflection_color": [0.62, 0.82, 0.94],
+    "diffuse_reflection_weight": 0.15,
+    "diffuse_reflection_roughness": 0.0,
+    "metalness": 0.0,
+    "specular_reflection_weight": 0.65,
+    "specular_reflection_color": [1.0, 1.0, 1.0],
+    "specular_reflection_roughness": 0.03,
+    "specular_reflection_ior": 1.0,
+    "coat_weight": 0.0,
+    "enable_specular_transmission": True,
+    "specular_transmission_weight": 0.85,
+    "specular_transmission_color": [0.78, 0.9, 1.0],
+    "thin_walled": True,
+    "enable_opacity": True,
+    "geometry_opacity": 0.22,
+}
+
 # Name-only parts. They are not a volume hex. The cortex entries are appearance
 # layers on the bone masks: same ivory, different coat. The bone hex stays bone.
 _BONE_IVORY = [255 / 255, 249 / 255, 219 / 255]
@@ -492,6 +512,20 @@ def bind_prim(viewer, prim, segment: str, document: dict):
         paths = {}
         viewer._segment_prims = paths
     paths.setdefault(segment, set()).add(str(prim.GetPath()))
+
+
+def bind_water(viewer, prim):
+    """One shared OmniSurface for the irrigation water sheet."""
+    if "water" not in getattr(viewer, "_material_params", {}):
+        params = dict(WATER)
+        try:
+            from fluid.irrigation_bench import load_irrigation, water_from_irrigation, IRRIGATION_PATH
+
+            params = water_from_irrigation(load_irrigation(IRRIGATION_PATH), WATER)
+        except Exception:
+            pass
+        apply_params(viewer, "water", params)
+    bind_prim(viewer, prim, "water", getattr(viewer, "_material_document", None) or {"segments": {}, "names": {}})
 
 
 def bind_named_mesh(viewer, mesh_name: str, segment: str, document: dict):

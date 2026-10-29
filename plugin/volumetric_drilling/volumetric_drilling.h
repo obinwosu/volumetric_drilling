@@ -156,6 +156,8 @@ protected:
     bool isXKeycodeHeld(unsigned int keycode) const;
     // True if letter key is held system-wide (Ikkegol a/b/c pedals).
     bool isLetterKeyHeld(int glfwKey) const;
+    // True if Space is held, or the RTX window wrote drill_hold.
+    bool isDrillHoldRequested() const;
 
     void requestDrillReposition();
 

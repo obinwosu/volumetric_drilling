@@ -34,8 +34,18 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import cortex_masks
 import markings
 import rtx_materials
-from fluid.rtx_stream import PrescribedStream, write_default_config
+from fluid.irrigation_bench import (
+    DRAW_SPHERES,
+    DRAW_TUBE,
+    IRRIGATION_PATH,
+    IrrigationBench,
+    load_irrigation,
+    water_from_irrigation,
+)
+from fluid.occupancy import VolumeFrame
+from fluid.rtx_stream import PrescribedStream
 from fluid.sph_dump import DEFAULT_PATH as SPH_DUMP, dump_is_fresh, read_positions
+from fluid.water_mesh import water_surface
 from surface import BlockVolume, blocks_touched_by, index_to_local, local_to_world, vertex_normals
 
 # Chunk colors for bone faces that take a tuner appearance. They are not
@@ -83,9 +93,6 @@ EXPOSURE_MAX = 8.0
 # Geometry sent on the draw thread. A cut used to upload every touched block
 # before the drill could move again.
 UPLOAD_BUDGET_S = 0.008
-SPH_COLOR = (0.62, 0.64, 0.67)
-
-
 def _quat_matrix(x, y, z, w):
     n = x * x + y * y + z * z + w * w
     if n < 1e-12:
@@ -732,6 +739,7 @@ def _push_exposure(viewer):
     _reload_tuner_lights(viewer)
     rtx_materials.reload_if_changed(viewer)
     _sync_markings(viewer)
+    _sync_irrigation(viewer)
     rtx_materials.flush_materials(viewer)
     for path in LIGHT_BASE:
         value = _light_intensity(viewer, path)
@@ -783,6 +791,16 @@ def _set_exposure(viewer, scale):
     print(f"RTX exposure {viewer._exposure:.2f}   [ darker   ] brighter   \\ reset", flush=True)
 
 
+def _set_drill_hold(held: bool) -> None:
+    """Hold-to-run flag the simulator and the fluid inlet both read."""
+    path = RUNTIME / "drill_hold"
+    if held:
+        RUNTIME.mkdir(parents=True, exist_ok=True)
+        path.write_text("hold\n")
+    else:
+        path.unlink(missing_ok=True)
+
+
 def _bind_exposure_keys(viewer):
     """Attach once the presentation window exists.
 
@@ -797,6 +815,9 @@ def _bind_exposure_keys(viewer):
     import pyglet.window.key as key
 
     def on_key_press(symbol, modifiers):
+        if symbol == key.SPACE:
+            _set_drill_hold(True)
+            return True
         if symbol == key.BRACKETLEFT:
             _set_exposure(viewer, viewer._exposure / 1.25)
         elif symbol == key.BRACKETRIGHT:
@@ -818,11 +839,21 @@ def _bind_exposure_keys(viewer):
             return None
         return True
 
-    window.push_handlers(on_key_press=on_key_press)
+    def on_key_release(symbol, modifiers):
+        del modifiers
+        if symbol == key.SPACE:
+            _set_drill_hold(False)
+            return True
+        return None
+
+    def on_deactivate():
+        _set_drill_hold(False)
+
+    window.push_handlers(on_key_press=on_key_press, on_key_release=on_key_release, on_deactivate=on_deactivate)
     viewer._exposure_keys_bound = True
     print(
         "RTX lighting keys ready: [ darker   ] brighter   \\ reset   "
-        "- narrower cone   = wider cone   L distant beam",
+        "- narrower cone   = wider cone   L distant beam   Space hold drill",
         flush=True,
     )
 
@@ -951,6 +982,29 @@ def _sync_markings(viewer):
         markings.push_look(viewer, fresh)
         viewer._markings_params_live = fresh
     markings.flush_runtime(viewer)
+
+
+def _sync_irrigation(viewer):
+    """Pick up tuner_irrigation.json for the live jet look and SPH draw mode."""
+    try:
+        mtime = IRRIGATION_PATH.stat().st_mtime
+    except OSError:
+        mtime = None
+    if mtime == getattr(viewer, "_irrigation_mtime", None):
+        return
+    viewer._irrigation_mtime = mtime
+    settings = load_irrigation(IRRIGATION_PATH)
+    viewer._irrigation = settings
+    water = water_from_irrigation(settings, rtx_materials.WATER)
+    rtx_materials.apply_params(viewer, "water", water)
+    if not getattr(viewer, "_irrigation_logged", False):
+        print(
+            f"Irrigation {IRRIGATION_PATH.name}: {settings['draw']}  "
+            f"{settings['jet_mm']:g} mm  {settings['cc_per_s']:g} cc/s  "
+            f"opacity {settings['opacity']:g}",
+            flush=True,
+        )
+        viewer._irrigation_logged = True
 
 
 def _send_chunk(viewer, key, points, tris, normals, color, channels=None, index_pts=None):
@@ -1538,43 +1592,145 @@ def _read_drill_state():
     try:
         return json.loads((RUNTIME / "drill_state.json").read_text())
     except (OSError, json.JSONDecodeError):
-        return {}
+        return None
 
 
 def _sph_snapshot(viewer):
     dump = getattr(viewer, "_sph_dump", None)
     if dump is None:
-        return {"live": False, "count": 0, "generation": None, "draw_ms": 0.0, "radius": None}
+        return {
+            "live": False,
+            "count": 0,
+            "generation": None,
+            "draw_ms": 0.0,
+            "mesh_ms": 0.0,
+            "triangles": 0,
+            "radius": None,
+        }
     return {
         "live": bool(getattr(viewer, "_sph_live", False)),
         "count": int(dump.get("count") or 0),
         "generation": dump.get("generation"),
         "draw_ms": float(getattr(viewer, "_sph_draw_ms", 0.0)),
+        "mesh_ms": float(getattr(viewer, "_water_mesh_ms", 0.0)),
+        "triangles": int(getattr(viewer, "_water_tris", 0)),
         "radius": dump.get("radius"),
     }
 
 
+def _publish_water_mesh(viewer, mesh, hidden):
+    """Author the sheet, bind water, then let the RTX viewer publish the copy."""
+    points = wp.array(np.ascontiguousarray(mesh["verts"]), dtype=wp.vec3)
+    indices = wp.array(np.ascontiguousarray(mesh["tris"].reshape(-1)), dtype=wp.int32)
+    normals = wp.array(np.ascontiguousarray(mesh["normals"]), dtype=wp.vec3)
+    kwargs = dict(normals=normals, hidden=hidden, backface_culling=False, dynamic=True)
+    if not getattr(viewer, "_water_mesh_bound", False):
+        from newton._src.viewer.viewer_usd import ViewerUSD
+
+        ViewerUSD.log_mesh(viewer, "fluid/water", points, indices, **kwargs)
+        prim = viewer.stage.GetPrimAtPath(viewer._get_path(viewer._qualify("fluid/water")))
+        if prim and prim.IsValid():
+            rtx_materials.bind_water(viewer, prim)
+            viewer._water_mesh_bound = True
+    viewer.log_mesh("fluid/water", points, indices, **kwargs)
+    viewer._water_mesh_last = mesh
+    viewer._water_mesh_visible = not hidden
+
+
+def _hide_sph_points(viewer):
+    if getattr(viewer, "_sph_logged", False):
+        viewer.log_points("fluid/sph", None, hidden=True)
+
+
+def _hide_water(viewer):
+    if not getattr(viewer, "_water_mesh_visible", False):
+        return
+    last = getattr(viewer, "_water_mesh_last", None)
+    if last is None:
+        return
+    _publish_water_mesh(viewer, last, hidden=True)
+    viewer._water_tris = 0
+
+
 def _draw_sph(viewer) -> bool:
-    """Paint Maelstrom positions when the sidecar dump is fresh."""
+    """Mesh fresh SPH positions into one water sheet. Isolated specks stay invisible."""
     started = time.perf_counter()
     live = dump_is_fresh(SPH_DUMP)
     viewer._sph_live = live
     if not live:
-        if getattr(viewer, "_sph_logged", False):
-            viewer.log_points("fluid/sph", None, hidden=True)
+        _hide_sph_points(viewer)
+        _hide_water(viewer)
         viewer._sph_draw_ms = (time.perf_counter() - started) * 1e3
+        viewer._water_mesh_ms = 0.0
         return False
     dump = read_positions(SPH_DUMP)
     viewer._sph_dump = dump
-    if dump is None or dump["count"] <= 0:
-        if getattr(viewer, "_sph_logged", False):
-            viewer.log_points("fluid/sph", None, hidden=True)
+    xyz = None if dump is None else dump["xyz"]
+    if xyz is not None and len(xyz):
+        xyz = xyz[np.isfinite(xyz).all(axis=1)]
+    if dump is None or xyz is None or len(xyz) == 0:
+        _hide_sph_points(viewer)
+        _hide_water(viewer)
+        viewer._sph_draw_ms = (time.perf_counter() - started) * 1e3
+        viewer._water_mesh_ms = 0.0
+        return True
+    settings = getattr(viewer, "_irrigation", None) or load_irrigation(IRRIGATION_PATH)
+    if settings.get("draw") == DRAW_SPHERES:
+        _hide_water(viewer)
+        radius = float(dump.get("radius") or 0.5 * float(settings["particle_mm"]) * MM_TO_SIM)
+        color = tuple(water_from_irrigation(settings, rtx_materials.WATER)["diffuse_reflection_color"])
+        viewer.log_points("fluid/sph", wp.array(xyz, dtype=wp.vec3), radii=radius, colors=color)
+        viewer._sph_logged = True
+        viewer._water_mesh_ms = 0.0
+        viewer._water_tris = 0
         viewer._sph_draw_ms = (time.perf_counter() - started) * 1e3
         return True
-    points = wp.array(dump["xyz"], dtype=wp.vec3)
-    viewer.log_points("fluid/sph", points, radii=float(dump["radius"]), colors=SPH_COLOR)
-    viewer._sph_logged = True
+    mesh_started = time.perf_counter()
+    mesh = water_surface(xyz)
+    viewer._water_mesh_ms = (time.perf_counter() - mesh_started) * 1e3
+    _hide_sph_points(viewer)
+    if mesh is None:
+        _hide_water(viewer)
+    else:
+        _publish_water_mesh(viewer, mesh, hidden=False)
+        viewer._water_tris = int(len(mesh["tris"]))
     viewer._sph_draw_ms = (time.perf_counter() - started) * 1e3
+    return True
+
+
+def _emit_requested(state) -> bool:
+    if state and state.get("on"):
+        return True
+    return (RUNTIME / "drill_hold").is_file()
+
+
+def _draw_live_irrigation(viewer, worker, dt) -> bool:
+    """Same tube as the tuner: a fixed-width jet to the first bone hit, then gone."""
+    settings = getattr(viewer, "_irrigation", None) or load_irrigation(IRRIGATION_PATH)
+    bench = getattr(viewer, "_irrigation_bench", None)
+    if bench is None:
+        return False
+    occupied = getattr(worker, "_occupied", None)
+    if occupied is not None:
+        bench.occupied = occupied
+    live = dict(settings)
+    live["draw"] = DRAW_TUBE
+    live["film_ms"] = 0.0
+    bench.apply(live)
+    _hide_sph_points(viewer)
+    _hide_water(viewer)
+    state = _read_drill_state()
+    pose = _visual_pose(state) if state else None
+    if pose is None or not _emit_requested(state):
+        bench.hide(viewer)
+        return False
+    bench.step(dt, pose["position"], pose["quat"])
+    if bench.last_hit is None:
+        bench.hide(viewer)
+        return False
+    bench.draw(viewer)
+    viewer._sph_draw_ms = bench.draw_ms
+    viewer._water_tris = 0
     return True
 
 
@@ -1594,10 +1750,29 @@ def _visual_pose(state):
 def _log_instrument(viewer, bridge):
     """Shaft plus the same tip AMBF draws, at the cutter radius rather than around it."""
     state = _read_drill_state()
-    size = int(state.get("size_mm") or bridge.burr_mm or 6)
-    pose = _visual_pose(state) or bridge.drill
+    pose = _visual_pose(state) if state else None
     if pose is None:
+        # A torn read used to fall through to mastoidectomy_drill, a different
+        # body. Skip the frame. Irrigation reads this file itself and is not held.
         return
+    quat = np.array(pose["quat"], dtype=np.float64)
+    previous_quat = getattr(viewer, "_shaft_quat", None)
+    if previous_quat is not None:
+        # q and -q are the same rotation. Taking the sign closest to the last
+        # drawn frame keeps a long shaft from whipping when the sign flips.
+        if float(np.dot(quat, previous_quat)) < 0.0:
+            quat = -quat
+            print("shaft quaternion sign flipped", flush=True)
+        jump = float(np.linalg.norm(pose["position"] - viewer._shaft_position))
+        if jump > 0.05:
+            print(
+                f"shaft jumped {jump / MM_TO_SIM:.1f} mm to {np.round(pose['position'], 3).tolist()}",
+                flush=True,
+            )
+    viewer._shaft_quat = quat
+    viewer._shaft_position = pose["position"].copy()
+    pose = {"position": pose["position"], "quat": tuple(float(v) for v in quat)}
+    size = int(state.get("size_mm") or bridge.burr_mm or 6)
     radius = float(size) * MM_TO_SIM * 0.5
     now = time.perf_counter()
     previous = getattr(viewer, "_burr_spin_t", now)
@@ -1686,6 +1861,10 @@ def main():
     except Exception as exc:
         print(f"OVStage patch skipped: {exc}", flush=True)
 
+    from pxr import Gf
+
+    # Solid field behind the bone. The path tracer was sampling a dark dome,
+    # so the clear water sheet read as black. Lighting stays on the scope rig.
     viewer = newton.viewer.ViewerRTX(
         width=args.width,
         height=args.height,
@@ -1701,6 +1880,10 @@ def main():
             "omni:rtx:indirectDiffuse:denoiser:enabled": ("bool", False),
             "omni:rtx:dlss:frameGeneration": ("bool", False),
             "omni:rtx:pt:maxBounces": ("int", 4),
+            # Opacity on the water sheet. Authored before the render product exists.
+            "omni:rtx:rt:fractionalOpacity": ("bool", True),
+            "omni:rtx:background:source:type": ("token", "color"),
+            "omni:rtx:background:source:color": ("color3f", Gf.Vec3f(0.62, 0.78, 0.90)),
         },
     )
     model = newton.ModelBuilder().finalize()
@@ -1757,13 +1940,19 @@ def main():
     _bind_burr(viewer)
     stream = None
     if not args.no_stream:
-        stream_cfg = RUNTIME / "stream.json"
-        write_default_config(stream_cfg, args.stream_cc_s)
-        stream = PrescribedStream(cc_per_s=args.stream_cc_s, config_path=stream_cfg)
+        irrigation = load_irrigation(IRRIGATION_PATH)
+        stream = PrescribedStream(
+            cc_per_s=float(irrigation["cc_per_s"]),
+            particle_mm=float(irrigation["particle_mm"]),
+            jet_mm=float(irrigation["jet_mm"]),
+            offset_mm=float(irrigation["offset_mm"]),
+            proximal_mm=float(irrigation["proximal_mm"]),
+            config_path=IRRIGATION_PATH,
+        )
         print(
             f"Irrigation stream {stream.cc_per_s:g} cc/s, "
-            f"{stream.offset_mm:g} mm drill-right, "
-            f"{stream.proximal_mm:g} mm proximal. Edit {stream_cfg}",
+            f"{stream.jet_mm:g} mm jet, "
+            f"{stream.offset_mm:g} mm drill-right. {IRRIGATION_PATH.name}",
             flush=True,
         )
     viewer._volume_translation = np.asarray(bridge.volume["translation"], dtype=np.float64)
@@ -1786,6 +1975,18 @@ def main():
     except OSError:
         viewer._markings_mtime = None
     markings.push_look(viewer, viewer._markings_params_live)
+    _sync_irrigation(viewer)
+    viewer._irrigation_bench = IrrigationBench(
+        occupied,
+        VolumeFrame(
+            np.asarray(bridge.volume["translation"], dtype=np.float64),
+            np.asarray(bridge.volume["rotation"], dtype=np.float64),
+            np.asarray(bridge.volume["dimensions"], dtype=np.float64),
+            np.asarray(occupied.shape, dtype=np.float64),
+        ),
+    )
+    viewer._irrigation_bench.apply(getattr(viewer, "_irrigation", None) or load_irrigation(IRRIGATION_PATH))
+    viewer._irrigation_bench.prime(viewer)
     uploads = [
         _begin_upload(
             _prepare_blocks(blocks, bridge.volume, None, appearance),
@@ -1971,23 +2172,16 @@ def main():
             last_upload_ms = (time.perf_counter() - t0) * 1e3
         if bridge.drill is not None:
             _log_instrument(viewer, bridge)
-        sph_live = _draw_sph(viewer)
+        dt = min(frame_ms[-1] * 1e-3, 0.05) if frame_ms else 0.0
+        settings = getattr(viewer, "_irrigation", None) or load_irrigation(IRRIGATION_PATH)
+        if settings.get("draw") == DRAW_SPHERES:
+            if getattr(viewer, "_irrigation_bench", None) is not None:
+                viewer._irrigation_bench.hide(viewer)
+            _draw_sph(viewer)
+        else:
+            _draw_live_irrigation(viewer, worker, dt)
         if stream is not None:
-            stream._reload_config()
-            if sph_live:
-                stream.hide(viewer)
-            elif stream.enabled:
-                state = _read_drill_state()
-                pose = _visual_pose(state) or bridge.drill
-                if pose is not None:
-                    # last completed RTX frame, not the few microseconds
-                    # between end_frame and this loop's start-of-work `now`.
-                    dt = min(frame_ms[-1] * 1e-3, 0.05) if frame_ms else 0.0
-                    emitting = bool(state.get("on")) or stream.force_emit
-                    stream.step(dt, pose["position"], pose["quat"], emitting)
-                    stream.draw(viewer)
-            else:
-                stream.hide(viewer)
+            stream.hide(viewer)
         viewer.end_frame()
         _bind_window_input(viewer, bridge)
         frame += 1
@@ -2038,6 +2232,8 @@ def main():
             sph = summary.get("sph") or {}
             sph_note = (
                 f"   SPH {sph.get('count') or 0}"
+                f"   water {sph.get('mesh_ms') or 0:.1f} ms"
+                f"   {sph.get('triangles') or 0} tris"
                 if sph.get("live")
                 else ""
             )

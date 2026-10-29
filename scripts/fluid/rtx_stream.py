@@ -212,6 +212,10 @@ class PrescribedStream:
         self._config_mtime = mtime
         if "cc_per_s" in data:
             self.cc_per_s = float(data["cc_per_s"])
+        if "jet_mm" in data:
+            self.jet_mm = float(data["jet_mm"])
+        if "particle_mm" in data:
+            self.particle_mm = float(data["particle_mm"])
         if "offset_mm" in data:
             self.offset_mm = float(data["offset_mm"])
         if "proximal_mm" in data:

@@ -75,8 +75,7 @@ class FrozenBone:
         path.parent.mkdir(parents=True, exist_ok=True)
         dense = path.with_suffix(".dense.bin")
         write_dense(dense, self.origin, self.spacing, self.distance)
-        writer = ensure_writer()
-        subprocess.run([str(writer), "write", str(dense), str(path)], check=True)
+        run_writer(["write", str(dense), str(path)])
         dense.unlink(missing_ok=True)
         return path
 
@@ -208,8 +207,11 @@ def write_dense(path: Path, origin, spacing: float, distance: np.ndarray) -> Pat
 
 
 def inspect_vdb(path: Path) -> dict:
-    writer = ensure_writer()
-    out = subprocess.check_output([str(writer), "inspect", str(path)], text=True)
+    out = subprocess.check_output(
+        [str(ensure_writer()), "inspect", str(path)],
+        text=True,
+        env=writer_env(),
+    )
     parsed = {}
     for line in out.splitlines():
         key, _, rest = line.partition(" ")
@@ -295,6 +297,19 @@ def kind2_config(vdb_name: str, particle_radius: float) -> str:
     return json.dumps(payload, indent=2)
 
 
+def writer_env() -> dict:
+    """OpenVDB pulls log4cplus from the same VFX tree. RUNPATH does not."""
+    env = os.environ.copy()
+    prior = env.get("LD_LIBRARY_PATH", "")
+    env["LD_LIBRARY_PATH"] = os.pathsep.join(p for p in (str(VFX_LIB), prior) if p)
+    return env
+
+
+def run_writer(args: list[str], **kwargs):
+    writer = ensure_writer()
+    return subprocess.run([str(writer), *args], check=True, env=writer_env(), **kwargs)
+
+
 def ensure_writer() -> Path:
     WRITER_BIN.parent.mkdir(parents=True, exist_ok=True)
     if WRITER_BIN.exists() and WRITER_BIN.stat().st_mtime >= WRITER_SRC.stat().st_mtime:
@@ -310,6 +325,7 @@ def ensure_writer() -> Path:
         str(WRITER_BIN),
         *includes,
         *lib_dirs,
+        "-Wl,--disable-new-dtags",
         "-lopenvdb",
         "-ltbb",
         "-lblosc",

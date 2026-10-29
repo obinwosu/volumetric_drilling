@@ -369,8 +369,11 @@ class Ui(QtWidgets.QWidget):
         self._recording_study = False
         self._ambf_process = QProcess()
         self._rtx_process = QProcess()
+        self._fluid_process = QProcess()
         self._rtx_process.readyReadStandardOutput.connect(self._rtx_output)
         self._rtx_process.finished.connect(self._rtx_finished)
+        self._fluid_process.readyReadStandardOutput.connect(self._fluid_output)
+        self._fluid_process.finished.connect(self._fluid_finished)
         self._ambf_process.readyReadStandardOutput.connect(self.handle_stdout)
         self._ambf_process.readyReadStandardError.connect(self.handle_stderr)
         self._ambf_process.finished.connect(self._simulation_closed)
@@ -649,6 +652,8 @@ class Ui(QtWidgets.QWidget):
                 self.button_start_simulation.setText("Start Simulation")
                 self._set_sim_running_style(False)
                 return
+            if use_rtx:
+                self._start_fluid(repo_root)
             self.button_start_simulation.setText("Close Simulation")
             self._set_sim_running_style(True)
         else:
@@ -684,6 +689,37 @@ class Ui(QtWidgets.QWidget):
             self.print_info(f"ERROR! RTX bone view did not start: {self._rtx_process.errorString()}")
             return
         self.print_info("Starting RTX bone view")
+
+    def _start_fluid(self, repo_root):
+        """Maelstrom jet for the RTX window. AMBF and the view are already up."""
+        venv_python = pathlib.Path(repo_root) / "middle_ear_newton" / ".venv" / "bin" / "python"
+        script = pathlib.Path(repo_root) / "scripts" / "fluid" / "live_sph.py"
+        if not venv_python.is_file() or not script.is_file():
+            self.print_info("ERROR! Fluid jet needs middle_ear_newton/.venv and scripts/fluid/live_sph.py")
+            return
+        if self._fluid_process.state() != QProcess.NotRunning:
+            self._stop_fluid()
+        adf = self.active_volume_adf
+        command = (
+            "set +u && "
+            f"exec \"{venv_python}\" \"{script}\" --no-ambf --no-rtx --measure-s 0 "
+            f"--anatomy-adf \"{adf}\""
+        )
+        self._fluid_process.setWorkingDirectory(str(repo_root))
+        self._fluid_process.setProcessChannelMode(QProcess.MergedChannels)
+        self._fluid_process.start("bash", ["-lc", command])
+        if not self._fluid_process.waitForStarted(5000):
+            self.print_info(f"ERROR! Fluid jet did not start: {self._fluid_process.errorString()}")
+            return
+        self.print_info("Starting irrigation jet. Hold Space in the RTX window to shoot it at the bone.")
+
+    def _stop_fluid(self):
+        if self._fluid_process.state() == QProcess.NotRunning:
+            return
+        self._fluid_process.terminate()
+        if not self._fluid_process.waitForFinished(3000):
+            self._fluid_process.kill()
+            self._fluid_process.waitForFinished(1000)
 
     def add_plugin(self, plugin_path):
         if "--plugins" in self._current_args:
@@ -721,6 +757,19 @@ class Ui(QtWidgets.QWidget):
         if code not in (0, None) and self._ambf_process.state() == QProcess.Running:
             self.print_info(f"RTX bone view exited ({code}). See the Debug pane.")
 
+    def _fluid_output(self):
+        msg = bytes(self._fluid_process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        if not msg:
+            return
+        self.print_debug(msg if msg.endswith("\n") else msg + "\n")
+        for line in msg.splitlines():
+            if any(token in line for token in ("Traceback", "Error", "ERROR", "Exception", "exited", "DFSPH is live")):
+                self.print_info(line)
+
+    def _fluid_finished(self, code, status):
+        if code not in (0, None) and self._ambf_process.state() == QProcess.Running:
+            self.print_info(f"Irrigation jet exited ({code}). See the Debug pane.")
+
     def _simulation_closed(self, exit_code=0, exit_status=None):
         if self._recording_study:
             self._stop_study_logging(save_metadata=True)
@@ -738,6 +787,7 @@ class Ui(QtWidgets.QWidget):
         self._set_sim_running_style(False)
         if self._rtx_process.state() != QProcess.NotRunning:
             self._rtx_process.terminate()
+        self._stop_fluid()
 
     def _ambf_process_error(self, error):
         self.print_info(f"ERROR! AMBF process: {self._ambf_process.errorString()} ({error})")
@@ -900,6 +950,7 @@ class Ui(QtWidgets.QWidget):
         self.print_info("Terminate Called")
         if self._recording_study:
             self._stop_study_logging(save_metadata=True)
+        self._stop_fluid()
         self._ambf_process.close()
         self._pupil_process.close()
         self.study_manager.close()

@@ -13,7 +13,15 @@ HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
 from fluid.frozen_bone import write_domain_obj
-from fluid.live_sph import domain_bounds, prepare_live_config
+from fluid.irrigation_bench import IRRIGATION_PATH, load_irrigation
+from fluid.live_sph import (
+    domain_bounds,
+    gravity_vector,
+    live_irrigation,
+    prepare_live_config,
+    screen_down,
+)
+from fluid.moving_inlet import jet_speed_disk_mm_s
 from fluid.outlet import MM_TO_SIM
 from fluid.sph_dump import read_positions, write_positions
 
@@ -54,6 +62,17 @@ def test_domain_covers_outlet_outside_bone():
     assert lo[0] <= origin[0]
 
 
+def test_live_nozzle_follows_the_tuner_file():
+    settings = live_irrigation()
+    saved = load_irrigation(IRRIGATION_PATH)
+    assert settings["jet_mm"] == saved["jet_mm"]
+    assert settings["cc_per_s"] == saved["cc_per_s"]
+    assert settings["particle_mm"] == saved["particle_mm"]
+    assert settings["jet_mm"] > 0.0
+    speed = jet_speed_disk_mm_s(settings["cc_per_s"], settings["jet_mm"])
+    assert speed > 0.0
+
+
 def test_prepare_live_config_writes_gravity_and_domain(tmp_path=None):
     with tempfile.TemporaryDirectory() as tmp:
         root = pathlib.Path(tmp)
@@ -70,10 +89,16 @@ def test_prepare_live_config_writes_gravity_and_domain(tmp_path=None):
         payload = json.loads((root / "config.json").read_text())
         assert prepared["origin"][0] < outlet[0] < prepared["world_max"][0]
         assert payload["simulation_settings"]["numptcls"] == 40000
-        force = [float(v) for v in payload["simulation_settings"]["external_force"].split()]
-        assert force[2] < -90.0
+        force = np.array(
+            [float(v) for v in payload["simulation_settings"]["external_force"].split()[:3]],
+            dtype=np.float64,
+        )
+        down = screen_down()
+        assert np.dot(force, down) > 90.0
+        assert abs(float(np.linalg.norm(force)) - float(np.linalg.norm(gravity_vector()[:3]))) < 1e-3
+        assert payload["simulation_settings"]["timestep_max"] <= 0.00002
         assert payload["modules"]["volumeInlets"] is True
-        assert payload["modules"]["pressure"] == "None"
+        assert payload["modules"]["pressure"] == "DFSPH"
         assert payload["modules"]["resorting"] == "compactMLM"
         assert payload["modules"]["neighborhood"] == "constrained"
         assert payload["modules"]["density"] == "standard"
@@ -89,6 +114,7 @@ def main():
     test_dump_roundtrip()
     test_empty_dump_is_valid()
     test_domain_covers_outlet_outside_bone()
+    test_live_nozzle_follows_the_tuner_file()
     test_prepare_live_config_writes_gravity_and_domain()
     print("live sph tests passed", flush=True)
 
