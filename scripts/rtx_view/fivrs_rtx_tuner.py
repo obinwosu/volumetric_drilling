@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """FIVRS RTX Tuner.
 
-A fixed view of the undrilled bone and the burr. The light panel writes
-tuner_light.json. The structure panel writes tuner_materials.json, keyed by
-segmentation hex and by a regular name such as bone. Visibility stays in
-this window and is not saved.
+The view opens on the right transtemporal pose and can orbit. The light panel
+writes tuner_light.json. The structure panel writes tuner_materials.json,
+keyed by segmentation hex and by a regular name such as bone. The lateral
+cortex panel writes tuner_cortex_mask.json. The shaders panel writes
+tuner_markings.json. Visibility stays in this window.
 """
 
 from __future__ import annotations
@@ -19,6 +20,8 @@ import warp as wp
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
+import cortex_masks
+import markings
 import rtx_materials
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -99,13 +102,10 @@ def _right_ear_camera():
     return position, right, up, forward
 
 
-def _bone_groups():
-    from fivrs_rtx_view import _load_occupancy
+def _bone_groups(occupied, colors, bone_rgb):
     from surface import BLOCK
     from warp_mesh import WarpMesher
 
-    print("Loading bone slices", flush=True)
-    occupied, colors = _load_occupancy(ADF)
     print(f"Volume {occupied.shape}, {int(occupied.sum())} occupied voxels", flush=True)
     rotation = _rpy(1.57079, 1.4, 0.0)
     translation = np.array([-6.040592783505154, 0.0, 0.0], dtype=np.float64)
@@ -124,6 +124,9 @@ def _bone_groups():
         prepare_pose=(np.ones(3), np.array(shape, dtype=np.float64), rotation, translation),
     )
     groups: dict[int, list] = {}
+    bone_key = int(bone_rgb[0]) | (int(bone_rgb[1]) << 8) | (int(bone_rgb[2]) << 16)
+    bone_parts = {"index": [], "world": [], "normals": [], "rgb": [], "tris": []}
+    bone_base = 0
     for _block, mesh in outputs:
         _verts, tris, rgb, world, normals = mesh
         if world is None or len(tris) == 0:
@@ -153,8 +156,31 @@ def _bone_groups():
             bucket[0].append(world[used])
             bucket[1].append(normals[used])
             bucket[2].append(inverse.reshape(-1, 3).astype(np.int32) + base)
+        bone_faces = label == bone_key
+        if np.any(bone_faces):
+            group = tris[bone_faces]
+            used, inverse = np.unique(group, return_inverse=True)
+            bone_parts["index"].append(_verts[used])
+            bone_parts["world"].append(world[used])
+            bone_parts["normals"].append(normals[used])
+            bone_parts["rgb"].append(rgb[used])
+            bone_parts["tris"].append(inverse.reshape(-1, 3).astype(np.int32) + bone_base)
+            bone_base += int(len(used))
     print(f"Bone mesh in {len(groups)} colors", flush=True)
-    return groups
+
+    def _cat(parts, dtype):
+        if not parts:
+            return np.zeros((0, 3), dtype)
+        return np.ascontiguousarray(np.concatenate(parts), dtype)
+
+    bone_mesh = {
+        "index": _cat(bone_parts["index"], np.float64),
+        "world": _cat(bone_parts["world"], np.float32),
+        "normals": _cat(bone_parts["normals"], np.float32),
+        "rgb": _cat(bone_parts["rgb"], np.uint8),
+        "tris": _cat(bone_parts["tris"], np.int32),
+    }
+    return groups, bone_mesh, rotation, translation
 
 
 def _patch_open_usd():
@@ -236,22 +262,61 @@ def _author_burr(viewer, groups, camera):
 def _author_scene(viewer, lights, camera):
     from pxr import Gf, UsdLux
 
-    groups = _bone_groups()
+    print("Loading intact volume", flush=True)
+    occupied, colors, dimensions, laterality = cortex_masks.load_intact_volume(ADF)
+    document = viewer._material_document
+    bone_rgb = cortex_masks.named_rgb(document, "bone", "fff9db")
+    eac_rgb = cortex_masks.named_rgb(document, "eac", "ffe1d6")
+    print("Fitting the EAC lateral frame", flush=True)
+    frame = cortex_masks.derive_lateral_frame(
+        occupied, colors, eac_rgb, bone_rgb, dimensions, laterality
+    )
+    frame.dimensions = dimensions
+    groups, bone_mesh, rotation, translation = _bone_groups(occupied, colors, bone_rgb)
+    print("Classifying lateral cortex masks", flush=True)
+    cache = cortex_masks.build_surface_cache(
+        bone_mesh["index"],
+        bone_mesh["tris"],
+        bone_mesh["rgb"],
+        bone_mesh["world"],
+        bone_mesh["normals"],
+        bone_rgb,
+        occupied,
+        frame,
+    )
     segments = []
+    bone_surface = None
+    if cache.ok:
+        preview = cortex_masks.evaluate_masks(cache, cortex_masks.load_parameters())
+        bone_surface = cortex_masks.subset_mesh(
+            cache.world,
+            cache.normals,
+            cache.tris,
+            ~preview.masks["mask1"],
+            0.0,
+            with_normals=True,
+        )
     for key, (points, normals, tris) in groups.items():
         if sum(len(part) for part in tris) < 40:
             continue
         segment = rtx_materials.segment_id(key)
         name = rtx_materials.name_of(viewer._material_document, segment) or f"bone_{key:06x}"
         color = tuple(rtx_materials.identity_color(segment))
+        if bone_surface is not None and segment == frame.bone_hex and len(bone_surface[1]):
+            point_src, tri_src, normal_src = bone_surface
+        else:
+            point_src = np.concatenate(points)
+            tri_src = np.concatenate(tris)
+            normal_src = np.concatenate(normals)
         viewer.log_mesh(
             name,
-            wp.array(np.ascontiguousarray(np.concatenate(points), np.float32), dtype=wp.vec3),
-            wp.array(np.ascontiguousarray(np.concatenate(tris).reshape(-1), np.int32), dtype=wp.int32),
-            normals=wp.array(np.ascontiguousarray(np.concatenate(normals), np.float32), dtype=wp.vec3),
+            wp.array(np.ascontiguousarray(point_src, np.float32), dtype=wp.vec3),
+            wp.array(np.ascontiguousarray(tri_src.reshape(-1), np.int32), dtype=wp.int32),
+            normals=wp.array(np.ascontiguousarray(normal_src, np.float32), dtype=wp.vec3),
             color=color,
             roughness=0.55,
             metallic=0.0,
+            dynamic=segment == frame.bone_hex,
         )
         prim = viewer.stage.GetPrimAtPath(viewer._get_path(viewer._qualify(name)))
         if not prim.IsValid():
@@ -275,31 +340,25 @@ def _author_scene(viewer, lights, camera):
     dome = UsdLux.DomeLight.Define(viewer.stage, "/root/_ScopeFill")
     dome.CreateIntensityAttr(float(lights["fill"]))
     dome.CreateColorAttr(Gf.Vec3f(*lights["fill_color"]))
-    return segments
+    return segments, cache, frame, rotation, translation
 
 
-def _bind_light(viewer, lights, camera):
-    position, right, up, forward = camera
+def _bind_light(viewer, lights):
+    """Keep the scope light on the camera the user is orbiting."""
     original = viewer._update_ovrtx_camera
 
     def update():
         original()
         if viewer._rtx is None:
             return
-        mat = np.eye(4, dtype=np.float64)
-        mat[0, :3] = right
-        mat[1, :3] = up
-        mat[2, :3] = -forward
-        mat[3, :3] = position
-        light = mat.copy()
+        position = np.array(viewer.camera.pos, dtype=np.float64)
+        forward = np.array(viewer.camera.get_front(), dtype=np.float64)
+        length = np.linalg.norm(forward)
+        if length > 1e-8:
+            forward = forward / length
+        light = np.array(viewer._compute_camera_matrix(), dtype=np.float64, copy=True)
         light[3, :3] = position + forward * float(lights["disk_standoff"])
         try:
-            viewer._write_runtime_attribute(
-                [viewer._camera_prim_path],
-                "omni:xform",
-                np.ascontiguousarray(mat)[np.newaxis, ...],
-                is_matrix=True,
-            )
             viewer._write_runtime_attribute(
                 ["/root/_ScopeLight"],
                 "omni:xform",
@@ -324,6 +383,7 @@ def _bind_light(viewer, lights, camera):
                 print(f"light write failed: {exc}", flush=True)
                 viewer._tune_warned = True
         rtx_materials.flush_materials(viewer)
+        markings.flush_runtime(viewer)
 
     viewer._update_ovrtx_camera = update
 
@@ -408,25 +468,40 @@ def main():
     viewer.show_ground = False
     viewer.picking_enabled = False
     rtx_materials.attach(viewer)
-    segments = _author_scene(viewer, lights, camera)
-    _bind_light(viewer, lights, camera)
+    segments, cache, frame, rotation, translation = _author_scene(viewer, lights, camera)
+    _bind_light(viewer, lights)
     status = {"text": "Moves save as you drag."}
     materials = rtx_materials.MaterialUi(viewer, segments)
+    cortex = cortex_masks.CortexPanel(
+        viewer,
+        materials,
+        cache,
+        frame,
+        rotation,
+        translation,
+        str(ADF.relative_to(REPO)),
+    )
+    if cortex.pivot is not None:
+        viewer.camera.set_pivot(tuple(float(value) for value in cortex.pivot))
+    shaders = markings.ShaderPanel(viewer, cortex)
+    cortex.on_masks_changed = shaders.apply_pattern
     viewer.register_ui_callback(lambda imgui: _draw_panel(imgui, document, status), position="free")
     viewer.register_ui_callback(materials.draw, position="free")
-    print(f"Tuner ready. Light {SAVE_PATH.name}  materials {rtx_materials.MATERIALS_PATH.name}", flush=True)
-    locked = False
+    viewer.register_ui_callback(cortex.draw, position="free")
+    viewer.register_ui_callback(shaders.draw, position="free")
+    print(
+        f"Tuner ready. Light {SAVE_PATH.name}  materials {rtx_materials.MATERIALS_PATH.name}  "
+        f"cortex {cortex_masks.CONFIG_PATH.name}  shaders {markings.CONFIG_PATH.name}",
+        flush=True,
+    )
+    titled = False
     while viewer.is_running():
         viewer._camera_dirty = True
         viewer.begin_frame(0.0)
         viewer.end_frame()
-        if not locked and viewer._window is not None:
+        if not titled and viewer._window is not None:
             viewer._window.set_caption("FIVRS RTX Tuner")
-            if viewer.gui is not None:
-                viewer.gui.handle_mouse_drag = lambda *args, **kwargs: None
-                viewer.gui.handle_mouse_scroll = lambda *args, **kwargs: None
-                viewer.gui.update_camera_from_keys = lambda *args, **kwargs: None
-            locked = True
+            titled = True
     viewer.close()
 
 

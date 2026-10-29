@@ -23,13 +23,33 @@ KNOWN_NAMES = {
     "fff9db": "bone",
 }
 
-# Name-only instrument parts. They are not a volume hex.
+# Name-only parts. They are not a volume hex. The cortex entries are appearance
+# layers on the bone masks: same ivory, different coat. The bone hex stays bone.
+_BONE_IVORY = [255 / 255, 249 / 255, 219 / 255]
 EXTRA_DEFAULTS = {
     "burr": {
         "diffuse_reflection_color": [0.82, 0.83, 0.85],
         "metalness": 0.92,
         "specular_reflection_roughness": 0.18,
     },
+    "lateral_cortex": {
+        "diffuse_reflection_color": list(_BONE_IVORY),
+        "specular_reflection_roughness": 0.12,
+        "coat_weight": 0.22,
+        "coat_roughness": 0.05,
+        "coat_color": [1.0, 1.0, 1.0],
+    },
+    "cortex_markings": {
+        "diffuse_reflection_color": list(_BONE_IVORY),
+        "specular_reflection_roughness": 0.42,
+        "coat_weight": 0.0,
+        "coat_roughness": 0.2,
+        "coat_color": [0.45, 0.08, 0.06],
+    },
+}
+APPEARANCE_LABELS = {
+    "lateral_cortex": "lateral cortex",
+    "cortex_markings": "cortex markings",
 }
 
 # Matches the bone the live view already draws: segment color, roughness 0.55,
@@ -237,6 +257,8 @@ def aliases(document: dict, segment: str) -> list[str]:
 
 def display_name(document: dict, segment: str) -> str:
     """List label. A named structure shows bone, not #fff9db."""
+    if segment in APPEARANCE_LABELS:
+        return APPEARANCE_LABELS[segment]
     return name_of(document, segment) or extra_or_hex(document, segment)
 
 
@@ -625,6 +647,8 @@ class MaterialUi:
                 self._rename(segment, value)
                 self._name_edit = name_of(self.document, segment)
             imgui.text_disabled("Identity is the original hex. Display color can change.")
+        elif segment in APPEARANCE_LABELS:
+            imgui.text_disabled("Bone appearance inside this mask. The bone segmentation is unchanged.")
         else:
             imgui.text_disabled("Instrument part. Materials save under this name.")
         if imgui.button("Reset structure"):

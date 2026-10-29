@@ -5,6 +5,10 @@ AMBF stays in charge of the volume, the drill constraint, haptics, and the
 camera. This process only draws. It reads the anatomy slices in the same order
 the simulator does, subscribes to the camera, drill, and voxel-removal topics,
 and paints each surface from the label color stored in that voxel.
+Bone triangles that still lie on the lateral-cortex mask use that tuner
+material. The cortical-markings mask is drawn again, just off that surface,
+with the shader saved from the tuner. Removing a voxel still comes only from
+the simulator.
 
 RTX FPS is the rate of this viewer's frames. It is not the AMBF graphics Hz.
 """
@@ -27,10 +31,18 @@ import yaml
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
+import cortex_masks
+import markings
 import rtx_materials
 from fluid.rtx_stream import PrescribedStream, write_default_config
 from fluid.sph_dump import DEFAULT_PATH as SPH_DUMP, dump_is_fresh, read_positions
 from surface import BlockVolume, blocks_touched_by, index_to_local, local_to_world, vertex_normals
+
+# Chunk colors for bone faces that take a tuner appearance. They are not
+# segmentation labels, and they never go back into the occupancy grid.
+CORTEX_CHUNK = -1
+MARKINGS_CHUNK = -2
+MARKINGS_LIFT = 0.05 * cortex_masks.MM_TO_SIM
 
 # DrillManager stores a millimetre as 0.01007 simulation units, then the
 # cutter and the fluted mesh both use half of that as the radius. Converting
@@ -719,6 +731,7 @@ def _remember_cone_angle(angle):
 def _push_exposure(viewer):
     _reload_tuner_lights(viewer)
     rtx_materials.reload_if_changed(viewer)
+    _sync_markings(viewer)
     rtx_materials.flush_materials(viewer)
     for path in LIGHT_BASE:
         value = _light_intensity(viewer, path)
@@ -917,21 +930,69 @@ def _color_tuple(packed: int):
     return ((packed & 255) / 255.0, ((packed >> 8) & 255) / 255.0, ((packed >> 16) & 255) / 255.0)
 
 
-def _send_chunk(viewer, key, points, tris, normals, color):
+def _sync_markings(viewer):
+    """Pick up tuner_markings.json. Looks update in place. Pattern edits rebake the channels."""
+    path = markings.CONFIG_PATH
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = None
+    params = getattr(viewer, "_markings_params_live", None)
+    if mtime != getattr(viewer, "_markings_mtime", None):
+        viewer._markings_mtime = mtime
+        fresh = markings.load_parameters()
+        appearance = getattr(viewer, "_appearance", None)
+        if appearance is not None and markings.pattern_differs(params, fresh):
+            appearance.rebuild_channels(fresh)
+            for name, index_pts in list(getattr(viewer, "_markings_surfaces", {}).items()):
+                prim = viewer.stage.GetPrimAtPath(viewer._get_path(viewer._qualify(name)))
+                if prim and prim.IsValid():
+                    markings.write_channels(viewer, prim, appearance.sample_channels(index_pts), name)
+        markings.push_look(viewer, fresh)
+        viewer._markings_params_live = fresh
+    markings.flush_runtime(viewer)
+
+
+def _send_chunk(viewer, key, points, tris, normals, color, channels=None, index_pts=None):
     spatial, packed = key
+    if packed == CORTEX_CHUNK:
+        segment = "lateral_cortex"
+        token = "cortex"
+        color = tuple(rtx_materials.EXTRA_DEFAULTS["lateral_cortex"]["diffuse_reflection_color"])
+    elif packed == MARKINGS_CHUNK:
+        segment = "cortex_markings"
+        token = "markings"
+    else:
+        segment = rtx_materials.segment_id(packed)
+        token = f"{packed:06x}"
     names = getattr(viewer, "_chunk_names", {})
-    name = names.get(key, f"anatomy/bone_{spatial}_{packed:06x}")
+    name = names.get(key, f"anatomy/bone_{spatial}_{token}")
     try:
         _log_chunk(viewer, name, points, tris, normals, color)
     except Exception as exc:
-        name = f"anatomy/bone_{spatial}_{packed:06x}_{time.time_ns()}"
+        name = f"anatomy/bone_{spatial}_{token}_{time.time_ns()}"
         print(f"chunk {key} resize failed ({exc}); new prim", flush=True)
         _log_chunk(viewer, name, points, tris, normals, color)
     names[key] = name
     viewer._chunk_names = names
+    if packed == MARKINGS_CHUNK:
+        surfaces = getattr(viewer, "_markings_surfaces", None)
+        if surfaces is None:
+            surfaces = {}
+            viewer._markings_surfaces = surfaces
+        if index_pts is None or len(np.asarray(index_pts)) == 0:
+            surfaces.pop(name, None)
+            return
+        surfaces[name] = np.asarray(index_pts, np.float64)
+        prim = viewer.stage.GetPrimAtPath(viewer._get_path(viewer._qualify(name)))
+        if prim and prim.IsValid():
+            markings.bind_shader(viewer, prim)
+            if channels is not None:
+                markings.write_channels(viewer, prim, channels, name)
+        return
     try:
         rtx_materials.bind_named_mesh(
-            viewer, name, rtx_materials.segment_id(packed), viewer._material_document
+            viewer, name, segment, viewer._material_document
         )
     except Exception as exc:
         if not getattr(viewer, "_material_bind_warned", False):
@@ -962,8 +1023,12 @@ def _spatial_key(block):
     return int(bx + by * 16 + bz * 256)
 
 
-def _prepare_block_mesh(mesh, volume, spatial):
-    """Color-split one block. A missing color is cleared later from this spatial id."""
+def _prepare_block_mesh(mesh, volume, spatial, appearance=None):
+    """Color-split one block. A missing color is cleared later from this spatial id.
+
+    Bone faces still on the original lateral-cortex mask are a separate chunk.
+    Their voxels stay bone voxels; only the bound material changes.
+    """
     marker = (spatial, None, _EMPTY_POINTS, _EMPTY_TRIS, _EMPTY_NORMALS)
     if len(mesh.tris) == 0:
         return [marker]
@@ -978,6 +1043,18 @@ def _prepare_block_mesh(mesh, volume, spatial):
         world = local_to_world(index_to_local(mesh.verts, dims, counts), rotation, translation).astype(np.float32)
         normals = vertex_normals(world.astype(np.float64), mesh.tris).astype(np.float32)
     labels = _face_labels(mesh, mesh.tris)
+    markings_group = None
+    if appearance is not None:
+        bone = np.flatnonzero(labels == appearance.bone_packed)
+        if len(bone):
+            centroids = mesh.verts[mesh.tris[bone]].mean(axis=1)
+            kind = appearance.classify(centroids)
+            cortex = kind > 0
+            if np.any(cortex):
+                labels = labels.copy()
+                labels[bone[cortex]] = CORTEX_CHUNK
+            if np.any(kind == 2):
+                markings_group = mesh.tris[bone[kind == 2]]
     order = np.argsort(labels, kind="mergesort")
     ordered = labels[order]
     breaks = np.flatnonzero(np.diff(ordered)) + 1
@@ -996,17 +1073,32 @@ def _prepare_block_mesh(mesh, volume, spatial):
                 normals[sub_used],
             )
         )
+    if markings_group is not None and len(markings_group):
+        sub_used, sub_inverse = np.unique(markings_group, return_inverse=True)
+        lifted = world[sub_used] + normals[sub_used] * np.float32(MARKINGS_LIFT)
+        index_pts = np.asarray(mesh.verts[sub_used], np.float64)
+        chunks.append(
+            (
+                spatial,
+                MARKINGS_CHUNK,
+                np.ascontiguousarray(lifted, np.float32),
+                sub_inverse.reshape(-1, 3).astype(np.int32),
+                normals[sub_used],
+                appearance.sample_channels(index_pts),
+                index_pts,
+            )
+        )
     return chunks
 
 
-def _prepare_blocks(blocks, volume, dirty):
+def _prepare_blocks(blocks, volume, dirty, appearance=None):
     """Upload payloads for the rebuilt blocks. ``dirty`` None means every block."""
     chosen = blocks.meshes if dirty is None else {key: blocks.meshes[key] for key in dirty if key in blocks.meshes}
     chunks = []
     for block, mesh in chosen.items():
         if dirty is None and len(mesh.tris) == 0:
             continue
-        chunks.extend(_prepare_block_mesh(mesh, volume, _spatial_key(block)))
+        chunks.extend(_prepare_block_mesh(mesh, volume, _spatial_key(block), appearance))
     return chunks
 
 
@@ -1033,8 +1125,11 @@ def _drain_upload(viewer, upload, budget_s):
     started = time.perf_counter()
     chunks = upload["chunks"]
     while upload["cursor"] < len(chunks) and time.perf_counter() - started < budget_s:
-        spatial, color, points, tris, normals = chunks[upload["cursor"]]
+        item = chunks[upload["cursor"]]
         upload["cursor"] += 1
+        spatial, color, points, tris, normals = item[:5]
+        channels = item[5] if len(item) > 5 else None
+        index_pts = item[6] if len(item) > 6 else None
         upload["dirty"].add(spatial)
         if color is None:
             continue
@@ -1046,7 +1141,7 @@ def _drain_upload(viewer, upload, budget_s):
             )
             viewer._bbox_printed = True
         key = (spatial, color)
-        _send_chunk(viewer, key, points, tris, normals, _color_tuple(color))
+        _send_chunk(viewer, key, points, tris, normals, _color_tuple(color), channels, index_pts)
         upload["sent"].add(key)
     if upload["cursor"] < len(chunks):
         return False
@@ -1064,11 +1159,12 @@ def _drain_upload(viewer, upload, budget_s):
 class SurfaceWorker:
     """Rebuilds drilled blocks away from the camera and drill update."""
 
-    def __init__(self, blocks, occupied, colors, volume):
+    def __init__(self, blocks, occupied, colors, volume, appearance=None):
         self._blocks = blocks
         self._occupied = occupied
         self._colors = colors
         self._volume = volume
+        self._appearance = appearance
         self._inbox = queue.Queue()
         self._outbox = queue.Queue()
         self.busy = False
@@ -1263,7 +1359,7 @@ class SurfaceWorker:
             detail["queue_wait_ms"] = (started - receipt) * 1e3
         detail["receipt_wall"] = receipt_wall
         preparing = time.perf_counter()
-        chunks = _prepare_blocks(self._blocks, self._volume, dirty)
+        chunks = _prepare_blocks(self._blocks, self._volume, dirty, self._appearance)
         detail["prepare_ms"] = (time.perf_counter() - preparing) * 1e3 + phases.get("prepare_gpu_ms", 0.0)
         detail["mesh_ms"] = (
             phases["extract_ms"]
@@ -1671,8 +1767,34 @@ def main():
             flush=True,
         )
     viewer._volume_translation = np.asarray(bridge.volume["translation"], dtype=np.float64)
-    uploads = [_begin_upload(_prepare_blocks(blocks, bridge.volume, None), True, extract_s * 1e3, None)]
-    worker = SurfaceWorker(blocks, occupied, colors, bridge.volume)
+    document = rtx_materials.load_document()
+    print("Fitting the lateral cortex onto the live surface", flush=True)
+    appearance = cortex_masks.build_appearance_index(
+        blocks,
+        occupied,
+        colors,
+        bridge.volume["dimensions"],
+        "",
+        cortex_masks.named_rgb(document, "bone", "fff9db"),
+        cortex_masks.named_rgb(document, "eac", "ffe1d6"),
+    )
+    viewer._appearance = appearance
+    viewer._markings_surfaces = {}
+    viewer._markings_params_live = markings.load_parameters()
+    try:
+        viewer._markings_mtime = markings.CONFIG_PATH.stat().st_mtime
+    except OSError:
+        viewer._markings_mtime = None
+    markings.push_look(viewer, viewer._markings_params_live)
+    uploads = [
+        _begin_upload(
+            _prepare_blocks(blocks, bridge.volume, None, appearance),
+            True,
+            extract_s * 1e3,
+            None,
+        )
+    ]
+    worker = SurfaceWorker(blocks, occupied, colors, bridge.volume, appearance)
     _install_frame_probes(viewer)
     print("RTX brightness: [ darker    ] brighter    \\ reset    L distant beam", flush=True)
     waiting_dump_since = None
