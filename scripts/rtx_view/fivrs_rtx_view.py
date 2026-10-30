@@ -33,7 +33,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 import cortex_masks
 import markings
+import pause_menu
 import rtx_materials
+from fluid.cannula import SIZES as CANNULA_SIZES, load_obj as load_cannula_obj, mesh_path as cannula_mesh_path
 from fluid.irrigation_bench import (
     DRAW_SPHERES,
     DRAW_TUBE,
@@ -232,17 +234,21 @@ def _sphere(radius: float, stacks: int = 8, slices: int = 12):
     return points, np.asarray(tris, dtype=np.int32).reshape(-1, 3)
 
 
-def _load_obj(path):
-    """Positions and authored normals. Corners stay split so flute edges stay sharp."""
+def _read_obj_groups(path):
+    """Positions, normals, and face corners grouped by usemtl, in file order."""
     positions = []
     normals = []
-    corners = []
+    groups = {}
+    current = ""
     with open(path) as handle:
         for line in handle:
             if line.startswith("v "):
                 positions.append([float(item) for item in line.split()[1:4]])
             elif line.startswith("vn "):
                 normals.append([float(item) for item in line.split()[1:4]])
+            elif line.startswith("usemtl "):
+                current = line.split(None, 1)[1].strip()
+                groups.setdefault(current, [])
             elif line.startswith("f "):
                 face = []
                 for token in line.split()[1:]:
@@ -250,8 +256,14 @@ def _load_obj(path):
                     vertex = int(parts[0]) - 1
                     normal = int(parts[2]) - 1 if len(parts) > 2 and parts[2] else vertex
                     face.append((vertex, normal))
+                corners = groups.setdefault(current, [])
                 for index in range(1, len(face) - 1):
                     corners.extend((face[0], face[index], face[index + 1]))
+    return positions, normals, groups
+
+
+def _weld_corners(positions, normals, corners):
+    """One mesh. Corners with the same position and normal stay one vertex."""
     lookup = {}
     points = []
     point_normals = []
@@ -269,9 +281,73 @@ def _load_obj(path):
         indices.append(slot)
     points = np.asarray(points, dtype=np.float32)
     point_normals = np.asarray(point_normals, dtype=np.float32)
-    lengths = np.linalg.norm(point_normals, axis=1, keepdims=True)
-    point_normals /= np.maximum(lengths, 1e-8)
-    return points, np.asarray(indices, dtype=np.int32).reshape(-1, 3), point_normals
+    if len(point_normals):
+        lengths = np.linalg.norm(point_normals, axis=1, keepdims=True)
+        point_normals /= np.maximum(lengths, 1e-8)
+    tris = np.asarray(indices, dtype=np.int32).reshape(-1, 3) if indices else np.zeros((0, 3), dtype=np.int32)
+    return points, tris, point_normals
+
+
+def _merge_mesh(existing, mesh):
+    if existing is None:
+        return mesh
+    points, tris, normals = existing
+    extra_points, extra_tris, extra_normals = mesh
+    return (
+        np.concatenate((points, extra_points)),
+        np.concatenate((tris, extra_tris + len(points))),
+        np.concatenate((normals, extra_normals)),
+    )
+
+
+def _combine_shaft(parts):
+    """One mesh per burr size. Face ranges keep each paint addressable."""
+    points = []
+    tris = []
+    normals = []
+    ranges = {}
+    vertex = 0
+    face = 0
+    for part_id, (part_points, part_tris, part_normals) in parts.items():
+        if len(part_tris) == 0:
+            continue
+        points.append(part_points)
+        tris.append(part_tris + vertex)
+        normals.append(part_normals)
+        ranges[part_id] = (face, int(len(part_tris)))
+        vertex += len(part_points)
+        face += int(len(part_tris))
+    if not points:
+        return None
+    return np.concatenate(points), np.concatenate(tris), np.concatenate(normals), ranges
+
+
+def _load_obj(path):
+    """Positions and authored normals. Corners stay split so flute edges stay sharp."""
+    positions, normals, groups = _read_obj_groups(path)
+    corners = []
+    for group in groups.values():
+        corners.extend(group)
+    return _weld_corners(positions, normals, corners)
+
+
+def _load_obj_parts(path):
+    """Same triangles as _load_obj, one mesh per Blender material."""
+    positions, normals, groups = _read_obj_groups(path)
+    merged = {}
+    for mtl, corners in groups.items():
+        if not corners:
+            continue
+        part_id = rtx_materials.shaft_part_id(mtl)
+        merged[part_id] = _merge_mesh(merged.get(part_id), _weld_corners(positions, normals, corners))
+    ordered = {}
+    for part_id in rtx_materials.SHAFT_PART_ORDER:
+        if part_id in merged:
+            ordered[part_id] = merged[part_id]
+    for part_id, mesh in merged.items():
+        if part_id not in ordered:
+            ordered[part_id] = mesh
+    return ordered
 
 
 def _mul_quat(left, right):
@@ -815,6 +891,11 @@ def _bind_exposure_keys(viewer):
     import pyglet.window.key as key
 
     def on_key_press(symbol, modifiers):
+        if symbol == key.P and modifiers & key.MOD_CTRL and not (modifiers & key.MOD_ALT):
+            pause_menu.toggle(viewer)
+            return True
+        if pause_menu.is_open(viewer):
+            return True
         if symbol == key.SPACE:
             _set_drill_hold(True)
             return True
@@ -853,7 +934,7 @@ def _bind_exposure_keys(viewer):
     viewer._exposure_keys_bound = True
     print(
         "RTX lighting keys ready: [ darker   ] brighter   \\ reset   "
-        "- narrower cone   = wider cone   L distant beam   Space hold drill",
+        "- narrower cone   = wider cone   L distant beam   Space hold drill   Ctrl+P pause",
         flush=True,
     )
 
@@ -902,12 +983,14 @@ def _bind_window_input(viewer, bridge):
     _bind_exposure_keys(viewer)
 
     def on_mouse_drag(x, y, dx, dy, buttons, modifiers):
-        _rtx_mouse_drag(viewer, bridge, x, y, dx, dy, buttons, None, modifiers)
+        if not pause_menu.is_open(viewer):
+            _rtx_mouse_drag(viewer, bridge, x, y, dx, dy, buttons, None, modifiers)
         return True
 
     def on_mouse_scroll(x, y, scroll_x, scroll_y):
         del x, y, scroll_x
-        _rtx_mouse_scroll(viewer, bridge, scroll_y)
+        if not pause_menu.is_open(viewer):
+            _rtx_mouse_scroll(viewer, bridge, scroll_y)
         return True
 
     window.push_handlers(on_mouse_drag, on_mouse_scroll)
@@ -1559,17 +1642,107 @@ def _log_instance(viewer, name, mesh, position, quat, scale, hidden=False):
     )
 
 
-def _bind_burr(viewer):
+def _tuck_baked_tip(points, tris, normals, nominal_mm):
+    """Pull the leftover tip sphere inside the burr. The neck past the gap stays put.
+
+    Those vertices also anchor the long triangles that run back to the shaft,
+    so deleting them would open the nose. The ring sits inside the flute
+    grooves and inside the diamond grains.
+    """
+    if len(points) == 0:
+        return points, tris, normals, 0
+    radius = 0.5 * float(nominal_mm) * MM_TO_SIM
+    cut = 10.0 * MM_TO_SIM
+    tip = points[:, 0] < cut
+    count = int(np.count_nonzero(tip))
+    if count == 0:
+        return points, tris, normals, 0
+    points = np.array(points, copy=True, dtype=np.float32)
+    yz = points[tip, 1:].astype(np.float64)
+    radial = np.linalg.norm(yz, axis=1, keepdims=True)
+    direction = np.divide(yz, np.maximum(radial, 1e-8))
+    points[tip, 0] = np.float32(0.20 * radius)
+    points[tip, 1:] = np.ascontiguousarray(direction * (0.45 * radius), dtype=np.float32)
+    return points, tris, normals, count
+
+
+def _material_preview(viewer, part_id):
+    document = getattr(viewer, "_material_document", None) or rtx_materials.empty_document()
+    params = rtx_materials.resolve(document, part_id)
+    color = tuple(float(channel) for channel in params["diffuse_reflection_color"])
+    return color, float(params["specular_reflection_roughness"]), float(params["metalness"])
+
+
+def _bind_named(viewer, name, part_id, document, warned_attr):
+    try:
+        rtx_materials.bind_named_mesh(viewer, name, part_id, document)
+    except Exception as exc:
+        if not getattr(viewer, warned_attr, False):
+            print(f"{part_id} material bind failed: {exc}", flush=True)
+            setattr(viewer, warned_attr, True)
+
+
+def _bind_shaft_paints(viewer, mesh_name, ranges, document):
+    """Four paints on one mesh. Face subsets, not four copies of the handpiece."""
+    from pxr import UsdGeom
+
+    if not ranges or document is None:
+        return
+    path = viewer._get_path(viewer._qualify(mesh_name))
+    prim = viewer.stage.GetPrimAtPath(path)
+    if not prim:
+        return
+    for part_id, (start, count) in ranges.items():
+        subset_path = prim.GetPath().AppendChild(part_id)
+        subset_prim = viewer.stage.GetPrimAtPath(subset_path)
+        subset = UsdGeom.Subset(subset_prim) if subset_prim else UsdGeom.Subset.Define(viewer.stage, subset_path)
+        subset.CreateElementTypeAttr().Set(UsdGeom.Tokens.face)
+        subset.CreateFamilyNameAttr().Set("materialBind")
+        subset.CreateIndicesAttr().Set(list(range(int(start), int(start) + int(count))))
+        try:
+            rtx_materials.bind_prim(viewer, subset.GetPrim(), part_id, document)
+        except Exception as exc:
+            if not getattr(viewer, "_shaft_material_warned", False):
+                print(f"{part_id} material bind failed: {exc}", flush=True)
+                viewer._shaft_material_warned = True
+    UsdGeom.Subset.SetFamilyType(UsdGeom.Imageable(prim), "materialBind", UsdGeom.Tokens.nonOverlapping)
+
+
+def _bind_shown_head(viewer, instance_name, part_id):
+    bound = getattr(viewer, "_bound_instance_materials", None)
+    if bound is None:
+        bound = set()
+        viewer._bound_instance_materials = bound
+    if instance_name in bound:
+        return
+    prim = viewer.stage.GetPrimAtPath(viewer._get_path(viewer._qualify(instance_name)) + "/instance_0")
+    if not prim:
+        return
     document = getattr(viewer, "_material_document", None)
     if document is None:
         return
-    for name in ("drill/sphere", "drill/flutes", "drill/cutting", "drill/diamond"):
-        try:
-            rtx_materials.bind_named_mesh(viewer, name, "burr", document)
-        except Exception as exc:
-            if not getattr(viewer, "_burr_material_warned", False):
-                print(f"burr material bind failed: {exc}", flush=True)
-                viewer._burr_material_warned = True
+    _bind_named(viewer, instance_name, part_id, document, "_burr_material_warned")
+    bound.add(instance_name)
+
+
+def _bind_instrument(viewer):
+    document = getattr(viewer, "_material_document", None)
+    if document is None:
+        return
+    for name in ("drill/sphere", "drill/flutes", "drill/cutting"):
+        _bind_named(viewer, name, "burr", document, "_burr_material_warned")
+    meshes = getattr(viewer, "_instrument_meshes", {}) or {}
+    diamond = meshes.get("diamond")
+    if diamond:
+        for name in (diamond, "drill/diamond"):
+            _bind_named(viewer, name, "burr_diamond", document, "_burr_material_warned")
+    faces = meshes.get("shaft_faces", {})
+    for size, mesh in meshes.get("shafts", {}).items():
+        if isinstance(mesh, str):
+            _bind_shaft_paints(viewer, mesh, faces.get(size, {}), document)
+    for mesh in meshes.get("cannulas", {}).values():
+        if isinstance(mesh, str):
+            _bind_named(viewer, mesh, "cannula", document, "_cannula_material_warned")
 
 
 def _log_static_mesh(viewer, name, points, tris, normals, color, roughness, metallic):
@@ -1724,7 +1897,11 @@ def _draw_live_irrigation(viewer, worker, dt) -> bool:
     if pose is None or not _emit_requested(state):
         bench.hide(viewer)
         return False
-    bench.step(dt, pose["position"], pose["quat"])
+    try:
+        size_mm = int(state.get("size_mm") or 6)
+    except (AttributeError, TypeError, ValueError):
+        size_mm = 6
+    bench.step(dt, pose["position"], pose["quat"], size_mm=size_mm)
     if bench.last_hit is None:
         bench.hide(viewer)
         return False
@@ -1785,26 +1962,76 @@ def _log_instrument(viewer, bridge):
     meshes = getattr(viewer, "_instrument_meshes", {})
     cutting = state.get("style") != "diamond"
     head = meshes.get("cutting") or "drill/sphere"
-    head_quat = _mul_quat(pose["quat"], _spin_about_x(angle)) if cutting else pose["quat"]
+    # Same spin for both heads. The angle only advances while the drill is on.
+    head_quat = _mul_quat(pose["quat"], _spin_about_x(angle))
+    diamond = meshes.get("diamond") or "drill/sphere"
+    # Hidden sizes and the unused head stay where they were. Updating all of
+    # them every frame was a renderer write for geometry the scope cannot see.
+    active_name = "drill/cutting" if cutting else "drill/diamond"
+    active_mesh = head if cutting else diamond
+    previous_head = getattr(viewer, "_rtx_active_head", None)
+    if previous_head and previous_head != active_name:
+        previous_mesh = head if previous_head == "drill/cutting" else diamond
+        _log_instance(
+            viewer, previous_head, previous_mesh, pose["position"], head_quat, radius, hidden=True
+        )
+    viewer._rtx_active_head = active_name
     _log_instance(
-        viewer, "drill/cutting", head, pose["position"], head_quat, radius, hidden=not cutting
+        viewer, active_name, active_mesh, pose["position"], head_quat, radius, hidden=False
     )
-    _log_instance(
-        viewer, "drill/diamond", "drill/sphere", pose["position"], pose["quat"], radius, hidden=cutting
-    )
-    for shaft_size, mesh in meshes.get("shafts", {}).items():
+    _bind_shown_head(viewer, active_name, "burr" if cutting else "burr_diamond")
+    shafts = meshes.get("shafts", {})
+    previous_size = getattr(viewer, "_rtx_active_shaft", None)
+    if previous_size is not None and previous_size != size and previous_size in shafts:
         _log_instance(
             viewer,
-            f"drill/shaft_inst_{shaft_size}",
-            mesh,
+            f"drill/shaft_inst_{previous_size}",
+            shafts[previous_size],
             pose["position"],
             pose["quat"],
             1.0,
-            hidden=shaft_size != size,
+            hidden=True,
         )
-    if not getattr(viewer, "_burr_material_bound", False):
-        _bind_burr(viewer)
-        viewer._burr_material_bound = True
+    if size in shafts:
+        viewer._rtx_active_shaft = size
+        _log_instance(
+            viewer,
+            f"drill/shaft_inst_{size}",
+            shafts[size],
+            pose["position"],
+            pose["quat"],
+            1.0,
+            hidden=False,
+        )
+    # The cannula is fixed to the shaft. It does not take the burr's spin,
+    # and it is not part of the shaft's region paints.
+    cannulas = meshes.get("cannulas", {})
+    previous_cannula = getattr(viewer, "_rtx_active_cannula", None)
+    if previous_cannula is not None and previous_cannula != size and previous_cannula in cannulas:
+        _log_instance(
+            viewer,
+            f"drill/cannula_inst_{previous_cannula}",
+            cannulas[previous_cannula],
+            pose["position"],
+            pose["quat"],
+            1.0,
+            hidden=True,
+        )
+    if size in cannulas:
+        viewer._rtx_active_cannula = size
+        _log_instance(
+            viewer,
+            f"drill/cannula_inst_{size}",
+            cannulas[size],
+            pose["position"],
+            pose["quat"],
+            1.0,
+            hidden=False,
+        )
+        _bind_shown_head(viewer, f"drill/cannula_inst_{size}", "cannula")
+    if not getattr(viewer, "_instrument_material_bound", False):
+        _bind_instrument(viewer)
+        viewer._instrument_material_bound = True
 
 
 def main():
@@ -1896,7 +2123,7 @@ def main():
     viewer.camera.height = args.height
     _author_lights(viewer)
     _bind_lights(viewer)
-    viewer.show_ui = False
+    pause_menu.install(viewer)
     if hasattr(viewer, "show_ground"):
         viewer.show_ground = False
     viewer.picking_enabled = False
@@ -1906,7 +2133,7 @@ def main():
     _log_static_mesh(
         viewer, "drill/sphere", sphere_local, sphere_tris, sphere_normals, (0.86, 0.87, 0.88), 0.12, 0.95
     )
-    instrument = {"cutting": "drill/sphere", "shafts": {}}
+    instrument = {"cutting": "drill/sphere", "shafts": {}, "shaft_faces": {}, "cannulas": {}}
     flute_path = MESH_DIR / "fluted_burr.obj"
     try:
         flute_points, flute_tris, flute_normals = _load_obj(flute_path)
@@ -1917,27 +2144,87 @@ def main():
         print(f"Fluted burr {len(flute_tris)} tris", flush=True)
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"Fluted burr unavailable ({exc}); using the diamond sphere", flush=True)
+    diamond_path = MESH_DIR / "diamond_burr.obj"
+    try:
+        diamond_points, diamond_tris, diamond_normals = _load_obj(diamond_path)
+        color, roughness, metallic = _material_preview(viewer, "burr_diamond")
+        _log_static_mesh(
+            viewer,
+            "drill/diamond_grit",
+            diamond_points,
+            diamond_tris,
+            diamond_normals,
+            color,
+            roughness,
+            metallic,
+        )
+        instrument["diamond"] = "drill/diamond_grit"
+        print(f"Diamond burr {len(diamond_tris)} tris", flush=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"Diamond burr unavailable ({exc}); using the smooth sphere", flush=True)
     for size in (1, 2, 4, 6):
         shaft_path = MESH_DIR / f"{size}mm.OBJ"
         try:
-            shaft_points, shaft_tris, shaft_normals = _load_obj(shaft_path)
-            _log_static_mesh(
-                viewer,
-                f"drill/shaft_{size}",
-                shaft_points,
-                shaft_tris,
-                shaft_normals,
-                (0.55, 0.56, 0.58),
-                0.35,
-                0.75,
-            )
+            parts = _load_obj_parts(shaft_path)
         except (OSError, RuntimeError, ValueError) as exc:
             print(f"Shaft {size} mm unavailable ({exc})", flush=True)
             continue
-        instrument["shafts"][size] = f"drill/shaft_{size}"
-        print(f"Shaft {size} mm {len(shaft_tris)} tris", flush=True)
+        tucked_parts = {}
+        counts = []
+        tucked_tip = 0
+        for part_id, (shaft_points, shaft_tris, shaft_normals) in parts.items():
+            shaft_points, shaft_tris, shaft_normals, tucked = _tuck_baked_tip(
+                shaft_points, shaft_tris, shaft_normals, size
+            )
+            tucked_tip += tucked
+            if len(shaft_tris) == 0:
+                continue
+            tucked_parts[part_id] = (shaft_points, shaft_tris, shaft_normals)
+            label = rtx_materials.display_name(viewer._material_document, part_id)
+            counts.append(f"{label} {len(shaft_tris)}")
+        combined = _combine_shaft(tucked_parts)
+        if combined is None:
+            continue
+        shaft_points, shaft_tris, shaft_normals, ranges = combined
+        mesh_name = f"drill/shaft_{size}"
+        color, roughness, metallic = _material_preview(viewer, "shaft_silver")
+        _log_static_mesh(
+            viewer,
+            mesh_name,
+            shaft_points,
+            shaft_tris,
+            shaft_normals,
+            color,
+            roughness,
+            metallic,
+        )
+        instrument["shafts"][size] = mesh_name
+        instrument["shaft_faces"][size] = ranges
+        tip = f", tucked {tucked_tip} tip verts inside the burr" if tucked_tip else ""
+        print(f"Shaft {size} mm {', '.join(counts)} tris, one mesh{tip}", flush=True)
+    for size in CANNULA_SIZES:
+        try:
+            cannula_points, cannula_tris = load_cannula_obj(cannula_mesh_path(size))
+        except (OSError, ValueError) as exc:
+            print(f"Cannula {size} mm unavailable ({exc})", flush=True)
+            continue
+        cannula_normals = vertex_normals(cannula_points, cannula_tris).astype(np.float32)
+        color, roughness, metallic = _material_preview(viewer, "cannula")
+        mesh_name = f"drill/cannula_{size}"
+        _log_static_mesh(
+            viewer,
+            mesh_name,
+            np.ascontiguousarray(cannula_points, dtype=np.float32),
+            cannula_tris,
+            cannula_normals,
+            color,
+            roughness,
+            metallic,
+        )
+        instrument["cannulas"][size] = mesh_name
+        print(f"Cannula {size} mm {len(cannula_tris)} tris, stainless", flush=True)
     viewer._instrument_meshes = instrument
-    _bind_burr(viewer)
+    _bind_instrument(viewer)
     stream = None
     if not args.no_stream:
         irrigation = load_irrigation(IRRIGATION_PATH)
@@ -2170,6 +2457,7 @@ def main():
                     )
                     print(f"Bone upload finished, {len(getattr(viewer, '_chunk_names', {}))} meshes", flush=True)
             last_upload_ms = (time.perf_counter() - t0) * 1e3
+        pause_menu.sync(viewer, _read_drill_state())
         if bridge.drill is not None:
             _log_instrument(viewer, bridge)
         dt = min(frame_ms[-1] * 1e-3, 0.05) if frame_ms else 0.0

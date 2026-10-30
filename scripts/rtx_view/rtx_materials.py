@@ -1,9 +1,9 @@
 """Shared OmniSurface materials for the tuner and the live RTX window.
 
 A volume structure is keyed by its segmentation hex and, when it has one,
-by a regular name such as bone. The burr is name-only. Display color is a
-separate OmniSurface input, so a saved preset can recolor a structure
-without renaming it. Lighting stays in tuner_light.json.
+by a regular name such as bone. The burr and the shaft paints are name-only.
+Display color is a separate OmniSurface input, so a saved preset can recolor
+a structure without renaming it. Lighting stays in tuner_light.json.
 """
 
 from __future__ import annotations
@@ -45,12 +45,72 @@ WATER = {
 
 # Name-only parts. They are not a volume hex. The cortex entries are appearance
 # layers on the bone masks: same ivory, different coat. The bone hex stays bone.
+# Shaft colors are the Kd lines in ADF/meshes/high_res/*mm.mtl. Metalness and
+# roughness are the OmniSurface stand-in for the AMBF matcap on those paints.
 _BONE_IVORY = [255 / 255, 249 / 255, 219 / 255]
+# Blender material stem, without the .019 suffix, to the tuner id.
+SHAFT_MTL = {
+    "silver": "shaft_silver",
+    "golden": "shaft_gold",
+    "gold": "shaft_gold",
+    "black": "shaft_black",
+    "grey": "shaft_grey",
+    "gray": "shaft_grey",
+}
+SHAFT_PART_ORDER = ("shaft_silver", "shaft_gold", "shaft_black", "shaft_grey")
+PART_LABELS = {
+    "burr": "burr",
+    "burr_diamond": "diamond burr",
+    "shaft_silver": "shaft silver",
+    "shaft_gold": "shaft gold",
+    "shaft_black": "shaft black",
+    "shaft_grey": "shaft grey",
+    "cannula": "irrigation cannula",
+}
 EXTRA_DEFAULTS = {
     "burr": {
         "diffuse_reflection_color": [0.82, 0.83, 0.85],
         "metalness": 0.92,
         "specular_reflection_roughness": 0.18,
+    },
+    # Abrasive grit, not a polished ball. Facet normals on the mesh make the grains.
+    "burr_diamond": {
+        "diffuse_reflection_color": [0.74, 0.72, 0.68],
+        "metalness": 0.68,
+        "specular_reflection_roughness": 0.38,
+        "coat_weight": 0.12,
+        "coat_roughness": 0.22,
+    },
+    "shaft_silver": {
+        "diffuse_reflection_color": [0.531616, 0.501214, 0.514546],
+        "metalness": 0.90,
+        "specular_reflection_roughness": 0.22,
+        "specular_reflection_color": [0.792453, 0.792453, 0.792453],
+    },
+    "shaft_gold": {
+        "diffuse_reflection_color": [0.800000, 0.619847, 0.019031],
+        "metalness": 0.94,
+        "specular_reflection_roughness": 0.14,
+        "specular_reflection_color": [1.0, 1.0, 1.0],
+    },
+    "shaft_black": {
+        "diffuse_reflection_color": [0.004148, 0.004148, 0.004148],
+        "metalness": 0.15,
+        "specular_reflection_roughness": 0.32,
+        "specular_reflection_color": [0.5, 0.5, 0.5],
+    },
+    "shaft_grey": {
+        "diffuse_reflection_color": [0.617706, 0.617706, 0.617706],
+        "metalness": 0.35,
+        "specular_reflection_roughness": 0.35,
+        "specular_reflection_color": [0.5, 0.5, 0.5],
+    },
+    # Separate from the shaft paints. Polished stainless, one material.
+    "cannula": {
+        "diffuse_reflection_color": [0.78, 0.80, 0.82],
+        "metalness": 0.97,
+        "specular_reflection_roughness": 0.08,
+        "specular_reflection_color": [1.0, 1.0, 1.0],
     },
     "lateral_cortex": {
         "diffuse_reflection_color": list(_BONE_IVORY),
@@ -275,8 +335,19 @@ def aliases(document: dict, segment: str) -> list[str]:
     return seen
 
 
+def shaft_part_id(mtl_name: str) -> str:
+    """Tuner id for one OBJ usemtl name. Unknown paints stay their own part."""
+    stem = str(mtl_name or "").split(".", 1)[0].strip().lower()
+    if stem in SHAFT_MTL:
+        return SHAFT_MTL[stem]
+    cleaned = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in stem)
+    return f"shaft_{cleaned}" if cleaned else "shaft_unassigned"
+
+
 def display_name(document: dict, segment: str) -> str:
     """List label. A named structure shows bone, not #fff9db."""
+    if segment in PART_LABELS:
+        return PART_LABELS[segment]
     if segment in APPEARANCE_LABELS:
         return APPEARANCE_LABELS[segment]
     return name_of(document, segment) or extra_or_hex(document, segment)
@@ -294,6 +365,8 @@ def display_label(document: dict, segment: str) -> str:
     hex_id = hex_of(document, segment)
     if alias and hex_id:
         return f"{alias}  #{hex_id}"
+    if segment in PART_LABELS:
+        return PART_LABELS[segment]
     if alias:
         return alias
     if hex_id:

@@ -54,7 +54,7 @@ enum class AudioState{
 
 enum class BurrStyle{
     CUTTING = 0,  // Fluted / metal cutting burr
-    DIAMOND = 1   // Smooth diamond sphere
+    DIAMOND = 1   // Diamond grit burr
 };
 
 
@@ -167,7 +167,11 @@ public:
 
     // Visual only. Cutting radius stays on the tool cursor sphere.
     cMultiMesh* m_burrMesh = nullptr;          // Cutting / fluted tip
-    cMultiMesh* m_diamondBurrMesh = nullptr;   // Diamond sphere tip
+    cMultiMesh* m_diamondBurrMesh = nullptr;   // Diamond grit tip
+
+    // One stainless tube per shaft. Not merged into the region-painted drill OBJ,
+    // and not spun with the burr. Index matches m_drills.
+    std::vector<cMultiMesh*> m_cannulaMeshes;
 
     BurrStyle m_burrStyle = BurrStyle::CUTTING;
 

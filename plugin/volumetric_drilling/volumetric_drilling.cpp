@@ -331,6 +331,25 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
     return 1;
 }
 
+static std::string jsonEscape(const std::string& text)
+{
+    std::string out;
+    out.reserve(text.size());
+    for (unsigned char character : text){
+        if (character == '"' || character == '\\'){
+            out.push_back('\\');
+            out.push_back(static_cast<char>(character));
+        }
+        else if (character < 0x20){
+            out.push_back(' ');
+        }
+        else{
+            out.push_back(static_cast<char>(character));
+        }
+    }
+    return out;
+}
+
 void afVolmetricDrillingPlugin::publishDrillVisualState()
 {
     namespace fs = std::filesystem;
@@ -370,6 +389,10 @@ void afVolmetricDrillingPlugin::publishDrillVisualState()
     }
     previousQuat = tipRot;
     havePreviousQuat = true;
+    std::string drillName = "unknown";
+    if (m_drillManager.m_activeDrill){
+        drillName = m_drillManager.m_activeDrill->m_name;
+    }
     const fs::path finalPath = dir / "drill_state.json";
     const fs::path tempPath = dir / "drill_state.json.tmp";
     {
@@ -383,7 +406,13 @@ void afVolmetricDrillingPlugin::publishDrillVisualState()
             << ",\"size_mm\":" << sizeMm
             << ",\"px\":" << tip.x() << ",\"py\":" << tip.y() << ",\"pz\":" << tip.z()
             << ",\"qx\":" << tipRot.x << ",\"qy\":" << tipRot.y
-            << ",\"qz\":" << tipRot.z << ",\"qw\":" << tipRot.w << "}\n";
+            << ",\"qz\":" << tipRot.z << ",\"qw\":" << tipRot.w
+            << ",\"paused\":" << (m_simPaused ? "true" : "false")
+            << ",\"user\":\"" << jsonEscape(m_sessionUser) << "\""
+            << ",\"anatomy\":\"" << jsonEscape(m_sessionAnatomy) << "\""
+            << ",\"laterality\":\"" << jsonEscape(m_anatomyLaterality) << "\""
+            << ",\"drill\":\"" << jsonEscape(drillName) << "\""
+            << "}\n";
     }
     std::error_code renameError;
     fs::rename(tempPath, finalPath, renameError);
@@ -764,6 +793,7 @@ void afVolmetricDrillingPlugin::graphicsUpdate(){
     serviceRtxCatchup();
     serviceRtxFlush();
     serviceRtxCamera();
+    serviceRtxPauseMenu();
 
     // update region of voxels to be updated
     if (m_flagMarkVolumeForUpdate)
@@ -2278,34 +2308,89 @@ string afVolmetricDrillingPlugin::controlHelpText(bool paused) const
     return s;
 }
 
+void afVolmetricDrillingPlugin::applySimPause(bool paused)
+{
+    if (paused == m_simPaused){
+        return;
+    }
+    m_simPaused = paused;
+    // Freeze AMBF Sim Time via pausePhysics. Wall Time keeps ticking during the
+    // pause, but on resume we rewind wall by the pause duration so
+    // computeStepSize() does not catch Sim Time up through the paused interval.
+    if (!m_worldPtr){
+        return;
+    }
+    if (m_simPaused){
+        m_wallTimeAtPause = m_worldPtr->getWallTime();
+        m_worldPtr->pausePhysics(true);
+    }
+    else{
+        m_worldPtr->pausePhysics(false);
+        if (m_wallTimeAtPause >= 0.0){
+            double now = m_worldPtr->getWallTime();
+            double pauseDur = now - m_wallTimeAtPause;
+            if (pauseDur > 0.0){
+                m_worldPtr->m_wallClock.stop();
+                m_worldPtr->m_wallClock.reset(now - pauseDur);
+                m_worldPtr->m_wallClock.start(false);
+            }
+            m_wallTimeAtPause = -1.0;
+        }
+    }
+}
+
+void afVolmetricDrillingPlugin::serviceRtxPauseMenu()
+{
+    // The RTX desktop card writes one command per seq. Physics pause stays here
+    // so the headset text menu is not forced on when the desktop card opens.
+    std::ifstream in("/tmp/fivrs-rtx/pause_menu.txt");
+    unsigned long long seq = 0;
+    std::string verb;
+    if (!(in >> seq >> verb)){
+        return;
+    }
+    std::string id;
+    in >> id;
+    if (seq == m_rtxPauseSeq){
+        return;
+    }
+    m_rtxPauseSeq = seq;
+    if (verb == "pause"){
+        applySimPause(true);
+        return;
+    }
+    if (verb == "resume"){
+        if (m_vrHudVisible){
+            setVrHudVisible(false);
+        }
+        else{
+            applySimPause(false);
+        }
+        return;
+    }
+    if (id.empty()){
+        return;
+    }
+    for (char character : id){
+        bool digit = character >= '0' && character <= '9';
+        bool lower = character >= 'a' && character <= 'z';
+        bool upper = character >= 'A' && character <= 'Z';
+        if (!(digit || lower || upper || character == '_')){
+            return;
+        }
+    }
+    if (verb == "apply"){
+        applyNamedView(id);
+    }
+    else if (verb == "save"){
+        saveCurrentIntoView(id);
+    }
+}
+
 void afVolmetricDrillingPlugin::setVrHudVisible(bool visible)
 {
     m_vrHudVisible = visible;
-    m_simPaused = visible;
-
-    // Freeze AMBF Sim Time via pausePhysics. Wall Time keeps ticking during the
-    // pause for the HUD, but on resume we rewind wall by the pause duration so
-    // computeStepSize() does not catch Sim Time up through the paused interval
-    // (which would put pause time back into simulated task time).
-    if (m_worldPtr){
-        if (m_simPaused){
-            m_wallTimeAtPause = m_worldPtr->getWallTime();
-            m_worldPtr->pausePhysics(true);
-        }
-        else{
-            m_worldPtr->pausePhysics(false);
-            if (m_wallTimeAtPause >= 0.0){
-                double now = m_worldPtr->getWallTime();
-                double pauseDur = now - m_wallTimeAtPause;
-                if (pauseDur > 0.0){
-                    m_worldPtr->m_wallClock.stop();
-                    m_worldPtr->m_wallClock.reset(now - pauseDur);
-                    m_worldPtr->m_wallClock.start(false);
-                }
-                m_wallTimeAtPause = -1.0;
-            }
-        }
-    }
+    applySimPause(visible);
 
     ensurePauseMenuLabel();
     if (!m_vrHudLabel){

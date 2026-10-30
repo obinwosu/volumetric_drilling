@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 
 from fluid.moving_inlet import disk_offsets
+from fluid.cannula import cannula_frame
 from fluid.outlet import MM_TO_SIM, outlet_frame
 from fluid.occupancy import VolumeFrame
 
@@ -272,13 +273,17 @@ class IrrigationBench:
     def apply(self, settings: dict) -> None:
         self.settings.update(settings)
 
-    def step(self, dt: float, tip, quat) -> dict:
+    def step(self, dt: float, tip, quat, size_mm: int | None = None) -> dict:
         dt = float(max(dt, 0.0))
         self.time += dt
         jet_mm = float(self.settings["jet_mm"])
-        offset_mm = float(self.settings["offset_mm"])
-        proximal_mm = float(self.settings["proximal_mm"])
-        frame = outlet_frame(tip, quat, offset_mm=offset_mm, proximal_mm=proximal_mm, azimuth_deg=0.0)
+        if size_mm is None:
+            # Tuner preview: a jet aimed at the bone, not a drill nozzle.
+            offset_mm = float(self.settings["offset_mm"])
+            proximal_mm = float(self.settings["proximal_mm"])
+            frame = outlet_frame(tip, quat, offset_mm=offset_mm, proximal_mm=proximal_mm, azimuth_deg=0.0)
+        else:
+            frame = cannula_frame(tip, quat, int(size_mm))
         self.last_frame = frame
         hit = first_hit(frame["outlet"], frame["emit"], self.frame, self.occupied)
         film_ms = float(self.settings.get("film_ms") or 0.0)

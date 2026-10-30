@@ -1,12 +1,11 @@
 {
   "version": 1,
   "lights": {
-    "cone_angle_deg": 8.899999618530273,
+    "cone_angle_deg": 12.800000190734863,
     "cone_softness": 0.550000011920929,
     "intensity_nits": 20000000.0,
     "fill": 80.0,
-    "beam": 0.0,
-    "disk_radius": 0.03999999910593033,
+    "disk_radius": 0.25600001215934753,
     "disk_standoff": 0.3,
     "disk_color": [
       1.0,
@@ -17,6 +16,7 @@
       0.45,
       0.58,
       0.82
-    ]
+    ],
+    "beam": 0.0
   }
 }

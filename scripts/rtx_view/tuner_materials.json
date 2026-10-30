@@ -5,7 +5,8 @@
     "f4d631": "nerve",
     "d8644f": "artery",
     "6eb8d1": "connective_tissue",
-    "ffe1d6": "eac"
+    "ffe1d6": "eac",
+    "640000": "condyle"
   },
   "fallback": {
     "diffuse_reflection_weight": 1.0,
@@ -173,9 +174,9 @@
     },
     "fff9db": {
       "diffuse_reflection_color": [
-        0.8470588326454163,
-        0.7372549176216125,
-        0.5176470875740051
+        0.8992537260055542,
+        0.8254343867301941,
+        0.6777957677841187
       ],
       "diffuse_reflection_weight": 1.0,
       "diffuse_reflection_roughness": 0.49399998784065247,
@@ -257,9 +258,9 @@
     },
     "640000": {
       "diffuse_reflection_color": [
-        0.8470588326454163,
-        0.7372549176216125,
-        0.5176470875740051
+        0.8980392217636108,
+        0.8235294222831726,
+        0.6784313917160034
       ],
       "diffuse_reflection_weight": 1.0,
       "diffuse_reflection_roughness": 0.0,
@@ -425,9 +426,9 @@
     },
     "bone": {
       "diffuse_reflection_color": [
-        0.8470588326454163,
-        0.7372549176216125,
-        0.5176470875740051
+        0.8992537260055542,
+        0.8254343867301941,
+        0.6777957677841187
       ],
       "diffuse_reflection_weight": 1.0,
       "diffuse_reflection_roughness": 0.49399998784065247,
@@ -677,9 +678,9 @@
     },
     "lateral_cortex": {
       "diffuse_reflection_color": [
-        0.8470588326454163,
-        0.7372549176216125,
-        0.5176470875740051
+        0.8980392217636108,
+        0.8235294222831726,
+        0.6784313917160034
       ],
       "diffuse_reflection_weight": 1.0,
       "diffuse_reflection_roughness": 0.0,
@@ -761,9 +762,9 @@
     },
     "cortex_markings": {
       "diffuse_reflection_color": [
-        0.8470588326454163,
-        0.7372549176216125,
-        0.5176470875740051
+        0.8980392217636108,
+        0.8235294222831726,
+        0.6784313917160034
       ],
       "diffuse_reflection_weight": 1.0,
       "diffuse_reflection_roughness": 0.0,
@@ -848,6 +849,90 @@
         0.95686274766922,
         0.5568627715110779,
         0.5176470875740051
+      ],
+      "diffuse_reflection_weight": 1.0,
+      "diffuse_reflection_roughness": 0.0,
+      "metalness": 0.0,
+      "specular_reflection_weight": 1.0,
+      "specular_reflection_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "specular_reflection_roughness": 0.55,
+      "specular_reflection_ior": 1.5,
+      "specular_reflection_anisotropy": 0.0,
+      "specular_reflection_anisotropy_rotation": 0.0,
+      "coat_weight": 0.0,
+      "coat_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "coat_roughness": 0.1,
+      "coat_ior": 1.5,
+      "coat_anisotropy": 0.0,
+      "coat_anisotropy_rotation": 0.0,
+      "coat_affect_color": 0.0,
+      "coat_affect_roughness": 0.0,
+      "enable_diffuse_transmission": false,
+      "subsurface_weight": 0.0,
+      "subsurface_transmission_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "subsurface_scattering_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "subsurface_scale": 1.0,
+      "subsurface_anisotropy": 0.0,
+      "enable_specular_transmission": false,
+      "specular_transmission_weight": 0.0,
+      "specular_transmission_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "specular_transmission_scattering_depth": 0.0,
+      "specular_transmission_scattering_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "specular_transmission_scatter_anisotropy": 0.0,
+      "specular_transmission_dispersion_abbe": 0.0,
+      "thin_walled": false,
+      "specular_retro_reflection_weight": 0.0,
+      "specular_retro_reflection_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "specular_retro_reflection_roughness": 0.3,
+      "enable_opacity": false,
+      "geometry_opacity": 1.0,
+      "geometry_opacity_threshold": 0.0,
+      "emission_weight": 0.0,
+      "emission_intensity": 1.0,
+      "emission_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "emission_use_temperature": false,
+      "emission_temperature": 6500.0,
+      "enable_thin_film": false,
+      "thin_film_thickness": 400.0,
+      "thin_film_ior": 1.52
+    },
+    "condyle": {
+      "diffuse_reflection_color": [
+        0.8980392217636108,
+        0.8235294222831726,
+        0.6784313917160034
       ],
       "diffuse_reflection_weight": 1.0,
       "diffuse_reflection_roughness": 0.0,

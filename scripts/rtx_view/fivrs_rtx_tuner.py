@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """FIVRS RTX Tuner.
 
-The view opens on the right transtemporal pose and can orbit. The light panel
-writes tuner_light.json. The structure panel writes tuner_materials.json,
-keyed by segmentation hex and by a regular name such as bone. The lateral
-cortex panel writes tuner_cortex_mask.json. The shaders panel writes
-tuner_markings.json. The irrigation panel writes tuner_irrigation.json.
-Visibility stays in this window.
+The view opens on the right transtemporal pose and can orbit. The camera
+panel reads and writes ADF/world/canonical_views.yaml, the same slots the
+simulator pause menu uses. The light panel writes tuner_light.json. The
+structure panel writes tuner_materials.json, keyed by segmentation hex and
+by a regular name such as bone. The lateral cortex panel writes
+tuner_cortex_mask.json. The shaders panel writes tuner_markings.json. The
+irrigation panel writes tuner_irrigation.json. Visibility stays in this window.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ import warp as wp
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
+import camera_views
 import cortex_masks
 import markings
 import rtx_materials
@@ -415,6 +417,92 @@ def _author_burr(viewer, groups, camera):
     }
 
 
+def _author_shaft(viewer, burr):
+    """6 mm handpiece on the burr axis, one mesh per OBJ material."""
+    from fivrs_rtx_view import MESH_DIR, _load_obj_parts
+
+    center = np.asarray(burr["center"], dtype=np.float64)
+    axes = np.column_stack(
+        (
+            np.asarray(burr["forward"], dtype=np.float64),
+            np.asarray(burr["right"], dtype=np.float64),
+            np.asarray(burr["up"], dtype=np.float64),
+        )
+    )
+    try:
+        parts = _load_obj_parts(MESH_DIR / "6mm.OBJ")
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"Tuner shaft unavailable ({exc})", flush=True)
+        return []
+    segments = []
+    for part_id, (points, tris, normals) in parts.items():
+        if len(tris) == 0:
+            continue
+        world = np.ascontiguousarray(points @ axes.T + center, np.float32)
+        world_normals = np.ascontiguousarray(normals @ axes.T, np.float32)
+        params = rtx_materials.resolve(viewer._material_document, part_id)
+        name = f"shaft/{part_id}"
+        viewer.log_mesh(
+            name,
+            wp.array(world, dtype=wp.vec3),
+            wp.array(np.ascontiguousarray(tris.reshape(-1), np.int32), dtype=wp.int32),
+            normals=wp.array(world_normals, dtype=wp.vec3),
+            color=tuple(float(channel) for channel in params["diffuse_reflection_color"]),
+            roughness=float(params["specular_reflection_roughness"]),
+            metallic=float(params["metalness"]),
+        )
+        prim = viewer.stage.GetPrimAtPath(viewer._get_path(viewer._qualify(name)))
+        if not prim or not prim.IsValid():
+            print(f"No mesh prim for {part_id}", flush=True)
+            continue
+        rtx_materials.bind_prim(viewer, prim, part_id, viewer._material_document)
+        segments.append({"id": part_id, "prim": prim})
+        label = rtx_materials.display_name(viewer._material_document, part_id)
+        print(f"Tuner {label} {len(tris)} tris", flush=True)
+    return segments
+
+
+def _author_diamond(viewer, burr):
+    """Grit burr beside the fluted head, at the same 6 mm diameter."""
+    from fivrs_rtx_view import MESH_DIR, MM_TO_SIM, _load_obj
+
+    try:
+        points, tris, normals = _load_obj(MESH_DIR / "diamond_burr.obj")
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"Tuner diamond burr unavailable ({exc})", flush=True)
+        return None
+    scale = 6.0 * MM_TO_SIM * 0.5
+    center = np.asarray(burr["center"], dtype=np.float64)
+    right = np.asarray(burr["right"], dtype=np.float64)
+    center = center + right * (8.0 * MM_TO_SIM)
+    axes = np.column_stack(
+        (
+            np.asarray(burr["forward"], dtype=np.float64),
+            right,
+            np.asarray(burr["up"], dtype=np.float64),
+        )
+    )
+    world = np.ascontiguousarray(points @ axes.T * scale + center, np.float32)
+    world_normals = np.ascontiguousarray(normals @ axes.T, np.float32)
+    params = rtx_materials.resolve(viewer._material_document, "burr_diamond")
+    viewer.log_mesh(
+        "burr_diamond",
+        wp.array(world, dtype=wp.vec3),
+        wp.array(np.ascontiguousarray(tris.reshape(-1), np.int32), dtype=wp.int32),
+        normals=wp.array(world_normals, dtype=wp.vec3),
+        color=tuple(float(channel) for channel in params["diffuse_reflection_color"]),
+        roughness=float(params["specular_reflection_roughness"]),
+        metallic=float(params["metalness"]),
+    )
+    prim = viewer.stage.GetPrimAtPath(viewer._get_path(viewer._qualify("burr_diamond")))
+    if not prim or not prim.IsValid():
+        print("No mesh prim for diamond burr", flush=True)
+        return None
+    rtx_materials.bind_prim(viewer, prim, "burr_diamond", viewer._material_document)
+    print(f"Tuner diamond burr {len(tris)} tris", flush=True)
+    return {"id": "burr_diamond", "prim": prim}
+
+
 def _author_scene(viewer, lights, camera):
     from pxr import Gf, UsdLux
 
@@ -484,6 +572,10 @@ def _author_scene(viewer, lights, camera):
     burr = _author_burr(viewer, groups, camera)
     if burr:
         segments.append(burr)
+        diamond = _author_diamond(viewer, burr)
+        if diamond:
+            segments.append(diamond)
+        segments.extend(_author_shaft(viewer, burr))
     disk_color = Gf.Vec3f(*lights["disk_color"])
     disk = UsdLux.DiskLight.Define(viewer.stage, "/root/_ScopeLight")
     disk.CreateIntensityAttr(float(lights["intensity_nits"]))
@@ -553,6 +645,165 @@ def _bind_light(viewer, lights):
         markings.flush_runtime(viewer)
 
     viewer._update_ovrtx_camera = update
+
+
+def _apply_scope(scope, position, right, up, forward):
+    scope["position"] = np.asarray(position, dtype=np.float64).copy()
+    scope["right"] = np.asarray(right, dtype=np.float64).copy()
+    scope["up"] = np.asarray(up, dtype=np.float64).copy()
+    scope["forward"] = np.asarray(forward, dtype=np.float64).copy()
+
+
+def _apply_ear(state, chosen, write=True):
+    side = state.get("side_draft") or ""
+    if side not in ("left", "right"):
+        state["status"] = "Choose left or right ear."
+        return False
+    if chosen is None or chosen.get("laterality") == side:
+        return True
+    chosen["laterality"] = side
+    if write:
+        camera_views.save_views(state["views"])
+        label = chosen.get("label") or chosen["id"]
+        state["status"] = f"{label} is a {side} ear view"
+    return True
+
+
+def _rename_view(state, chosen, write=True):
+    name = state.get("name_draft", "").strip()
+    if chosen is None:
+        return False
+    if not name:
+        state["name_draft"] = chosen.get("label") or chosen["id"]
+        state["status"] = "A view needs a name."
+        return False
+    previous_side = chosen.get("laterality")
+    if not _apply_ear(state, chosen, write=False):
+        return False
+    renamed = name != (chosen.get("label") or "")
+    if renamed:
+        chosen["label"] = name
+    if write and (renamed or chosen.get("laterality") != previous_side):
+        camera_views.save_views(state["views"])
+        if renamed:
+            state["status"] = f"Renamed to {name}"
+        else:
+            label = chosen.get("label") or chosen["id"]
+            state["status"] = f"{label} is a {chosen['laterality']} ear view"
+    return True
+
+
+def _add_named_view(state, translation, quat):
+    name = state.get("name_draft", "").strip()
+    if not name:
+        state["status"] = "Type a name, then add the view."
+        return
+    if not _apply_ear(state, None, write=False):
+        return
+    view = {
+        "id": camera_views.unique_id(name, [item["id"] for item in state["views"]]),
+        "label": name,
+        "laterality": state["side_draft"],
+        "valid": True,
+        "t": [float(channel) for channel in translation],
+        "q": [float(channel) for channel in quat],
+    }
+    state["views"].append(view)
+    state["selected"] = view["id"]
+    state["name_draft_id"] = view["id"]
+    camera_views.save_views(state["views"])
+    state["status"] = f"Added {name}"
+
+
+def _draw_camera_panel(imgui, viewer, state):
+    """Current microscope pose, and the named views the simulator recalls."""
+    scope = getattr(viewer, "_scope_cam", None)
+    if scope is None:
+        return
+    imgui.set_next_window_pos(imgui.ImVec2(390, 16), imgui.Cond_.first_use_ever)
+    imgui.set_next_window_size(imgui.ImVec2(380, 520), imgui.Cond_.first_use_ever)
+    imgui.begin("Camera")
+    imgui.text("Main camera")
+    imgui.text_disabled("Name a view, mark left or right ear, then save.")
+    imgui.separator()
+    position = [float(channel) for channel in scope["position"]]
+    changed, edited = imgui.drag_float3("Position", position, 0.01, 0.0, 0.0, "%.3f")
+    if changed:
+        scope["position"] = np.asarray(edited, dtype=np.float64)
+    translation, quat = camera_views.view_offset(
+        scope["position"], scope["right"], scope["up"], scope["forward"]
+    )
+    imgui.text_disabled(
+        "Home offset  "
+        + "  ".join(f"{channel:.3f}" for channel in translation)
+    )
+    imgui.text_disabled(
+        "Quaternion  "
+        + "  ".join(f"{channel:.4f}" for channel in quat)
+    )
+    imgui.separator()
+    views = state["views"]
+    selected = state.get("selected") or ""
+    chosen = None
+    for view in views:
+        mark = "saved" if view["valid"] else "empty"
+        side = view["laterality"] or "either"
+        label = f"{view['label'] or view['id']}   {side}   {mark}##{view['id']}"
+        clicked, _ = imgui.selectable(label, view["id"] == selected)
+        if clicked:
+            state["selected"] = view["id"]
+        if view["id"] == state.get("selected"):
+            chosen = view
+    if state.get("name_draft_id") != (chosen["id"] if chosen else None):
+        state["name_draft_id"] = chosen["id"] if chosen else None
+        state["name_draft"] = (chosen.get("label") or chosen["id"]) if chosen else ""
+        stored_side = (chosen or {}).get("laterality") or ""
+        state["side_draft"] = stored_side if stored_side in ("left", "right") else ""
+    submitted, drafted = imgui.input_text(
+        "Name", state.get("name_draft") or "", imgui.InputTextFlags_.enter_returns_true
+    )
+    state["name_draft"] = drafted
+    if submitted:
+        _rename_view(state, chosen)
+    side = state.get("side_draft") or ""
+    if imgui.radio_button("Left ear", side == "left"):
+        state["side_draft"] = "left"
+        _apply_ear(state, chosen)
+    imgui.same_line()
+    if imgui.radio_button("Right ear", side == "right"):
+        state["side_draft"] = "right"
+        _apply_ear(state, chosen)
+    imgui.separator()
+    if imgui.button("Rename"):
+        _rename_view(state, chosen)
+    imgui.same_line()
+    if imgui.button("New view"):
+        _add_named_view(state, translation, quat)
+    imgui.separator()
+    if imgui.button("Home"):
+        _apply_scope(scope, *camera_views.home_pose())
+        state["status"] = "Home. This is the ADF camera, not a saved slot."
+    imgui.same_line()
+    if imgui.button("Go to view") and chosen is not None:
+        if chosen["valid"]:
+            _apply_scope(scope, *camera_views.pose_from_view(chosen))
+            state["status"] = f"Showing {chosen['label'] or chosen['id']}"
+        else:
+            state["status"] = f"{chosen['label'] or chosen['id']} is empty. Frame it, then save."
+    imgui.same_line()
+    if imgui.button("Save this view") and chosen is not None and _rename_view(state, chosen, write=False):
+        chosen["t"] = [float(channel) for channel in translation]
+        chosen["q"] = [float(channel) for channel in quat]
+        chosen["valid"] = True
+        camera_views.save_views(views)
+        state["status"] = f"Saved {chosen['label'] or chosen['id']}"
+    if imgui.button("Reload file"):
+        state["views"] = camera_views.load_views()
+        state["name_draft_id"] = None
+        state["status"] = f"Loaded {camera_views.VIEWS_PATH.name}"
+    imgui.text_disabled(state["status"])
+    imgui.text_disabled(str(camera_views.VIEWS_PATH))
+    imgui.end()
 
 
 def _slider(imgui, label, value, low, high, fmt, flags=0):
@@ -748,6 +999,11 @@ def main():
     rtx_materials.apply_params(viewer, "water", _ensure_water(irrigation))
     bench.prime(viewer)
     status = {"text": "Moves save as you drag."}
+    camera_state = {
+        "views": camera_views.load_views(),
+        "selected": "right",
+        "status": "Frame the shot, then save it into a slot.",
+    }
     materials = rtx_materials.MaterialUi(viewer, segments)
     cortex = cortex_masks.CortexPanel(
         viewer,
@@ -764,6 +1020,9 @@ def main():
     shaders = markings.ShaderPanel(viewer, cortex)
     cortex.on_masks_changed = shaders.apply_pattern
     viewer.register_ui_callback(lambda imgui: _draw_panel(imgui, document, status), position="free")
+    viewer.register_ui_callback(
+        lambda imgui: _draw_camera_panel(imgui, viewer, camera_state), position="free"
+    )
     viewer.register_ui_callback(materials.draw, position="free")
     viewer.register_ui_callback(cortex.draw, position="free")
     viewer.register_ui_callback(shaders.draw, position="free")
@@ -771,7 +1030,8 @@ def main():
         lambda imgui: _draw_irrigation_panel(imgui, viewer, irrigation, status), position="free"
     )
     print(
-        f"Tuner ready. Light {SAVE_PATH.name}  materials {rtx_materials.MATERIALS_PATH.name}  "
+        f"Tuner ready. Views {camera_views.VIEWS_PATH.name}  light {SAVE_PATH.name}  "
+        f"materials {rtx_materials.MATERIALS_PATH.name}  "
         f"cortex {cortex_masks.CONFIG_PATH.name}  shaders {markings.CONFIG_PATH.name}  "
         f"irrigation {IRRIGATION_PATH.name}",
         flush=True,

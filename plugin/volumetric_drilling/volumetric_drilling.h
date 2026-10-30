@@ -96,6 +96,8 @@ protected:
     void publishRtxStatus(double now);
     void publishDrillVisualState();
     void serviceRtxCamera();
+    void serviceRtxPauseMenu();
+    void applySimPause(bool paused);
     bool takeRtxCameraFile(double& yawDeg, double& pitchDeg, double& panRight, double& panUp, double& dolly);
     void panCamera(double rightAmount, double upAmount);
 
@@ -280,6 +282,7 @@ private:
     bool m_helpVisible = true;
     // Last totals read from the RTX camera-nudge file. The difference is applied.
     unsigned long long m_cameraNudgeSeq = 0;
+    unsigned long long m_rtxPauseSeq = 0;
     double m_cameraNudgeYaw = 0.0;
     double m_cameraNudgePitch = 0.0;
     double m_cameraNudgePanRight = 0.0;

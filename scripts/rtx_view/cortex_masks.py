@@ -59,12 +59,12 @@ DEFAULT_PARAMETERS = {
     "crop_margin_voxels": 0,
     "opacity": 0.62,
     "selected_mask": "off",
-    "show_plane": True,
-    "show_anterior_plane": True,
-    "show_superior_plane": True,
-    "show_centroid": True,
-    "show_cap": True,
-    "show_vector": True,
+    "show_plane": False,
+    "show_anterior_plane": False,
+    "show_superior_plane": False,
+    "show_centroid": False,
+    "show_cap": False,
+    "show_vector": False,
 }
 
 
@@ -1595,10 +1595,9 @@ class CortexPanel:
         imgui.text("Lateral cortex")
         imgui.text_disabled("Diagnostic masks. They do not change the bone.")
         if not self._authored:
-            imgui.text_wrapped(self.frame.summary if self.frame is not None else "No frame.")
+            imgui.text_disabled("No lateral frame for this volume.")
             imgui.end()
             return
-        imgui.text_wrapped(self.frame.summary)
         imgui.separator()
         imgui.text("View")
         imgui.text_disabled("Left-drag looks. Middle-drag orbits the cap. Scroll zooms.")

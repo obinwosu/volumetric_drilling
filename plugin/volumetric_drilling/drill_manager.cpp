@@ -69,6 +69,50 @@ void DrillManager::cleanup()
         delete m_deviceHandler;
 }
 
+// The shaft OBJs still carry the old tip sphere. Local +X points from the
+// burr toward the handle, and a gap of about 20 mm separates that sphere
+// from the neck, so every vertex with X below 10 mm belongs to it. Those
+// vertices also anchor the triangles that run back to the neck, so they are
+// pulled onto a ring inside the burr instead of deleted. The collision shape
+// was already built from its own mesh.
+static int tuckBakedTip(cMultiMesh* visual, double cut, double radius)
+{
+    if (!visual){
+        return 0;
+    }
+    const double ringR = 0.45 * radius;
+    const double ringX = 0.20 * radius;
+    int moved = 0;
+    for (int mi = 0; mi < visual->getNumMeshes(); mi++){
+        cMesh* mesh = visual->getMesh(mi);
+        if (!mesh || !mesh->m_vertices){
+            continue;
+        }
+        int meshMoved = 0;
+        const unsigned int count = mesh->m_vertices->getNumElements();
+        for (unsigned int vi = 0; vi < count; vi++){
+            cVector3d pos = mesh->m_vertices->getLocalPos(vi);
+            if (pos.x() >= cut){
+                continue;
+            }
+            const double radial = sqrt(pos.y() * pos.y() + pos.z() * pos.z());
+            if (radial > 1e-8){
+                const double scale = ringR / radial;
+                mesh->m_vertices->setLocalPos(vi, ringX, pos.y() * scale, pos.z() * scale);
+            }
+            else{
+                mesh->m_vertices->setLocalPos(vi, ringX, 0.0, 0.0);
+            }
+            meshMoved++;
+        }
+        if (meshMoved){
+            mesh->markForUpdate(false);
+            moved += meshMoved;
+        }
+    }
+    return moved;
+}
+
 int DrillManager::init(afWorldPtr a_worldPtr, CameraPanelManager* a_panelManager, p_opt::variables_map& var_map){
     // importing drill model
 
@@ -114,6 +158,16 @@ int DrillManager::init(afWorldPtr a_worldPtr, CameraPanelManager* a_panelManager
         return -1;
     }
 
+    const double tipCut = 10.0 * m_units_mmToSim;
+    for (int di = 0; di < (int)m_drills.size(); di++){
+        const double radius = m_drills[di]->m_size * 0.5;
+        int moved = tuckBakedTip(m_drills[di]->m_rigidBody->getVisualObject(), tipCut, radius);
+        if (moved){
+            cerr << "INFO! Tucked baked tip sphere inside " << m_drills[di]->m_name
+                 << " (" << moved << " vertices). Collision mesh unchanged." << endl;
+        }
+    }
+
     m_activeDrillIdx = m_drills.size() - 1;
     m_activeDrill = m_drills[m_activeDrillIdx];
     if (var_map.count("sb")){
@@ -149,22 +203,64 @@ int DrillManager::init(afWorldPtr a_worldPtr, CameraPanelManager* a_panelManager
     m_burrMesh->setShowEnabled(true);
     a_worldPtr->addSceneObjectToWorld(m_burrMesh);
 
-    // Diamond tip: unit-radius sphere (matches fluted apex radius of 1).
+    // Diamond tip: unit radius is the outermost grain, same scale as the flutes.
     m_diamondBurrMesh = new cMultiMesh();
-    cMesh* diamondMesh = m_diamondBurrMesh->newMesh();
-    cCreateSphere(diamondMesh, 1.0, 32, 32);
-    diamondMesh->computeAllNormals();
-    diamondMesh->m_material->setWhite();
-    diamondMesh->m_material->m_specular.set(0.9, 0.9, 0.9);
-    diamondMesh->m_material->setShininess(120);
+    string diamondMeshPath = current_filepath + "/../../ADF/meshes/high_res/diamond_burr.obj";
+    if (m_diamondBurrMesh->loadFromFile(diamondMeshPath)){
+        m_diamondVisualRadius = 1.0;
+        cerr << "INFO! LOADED DIAMOND BURR " << diamondMeshPath << endl;
+    }
+    else{
+        cMesh* diamondMesh = m_diamondBurrMesh->newMesh();
+        cCreateSphere(diamondMesh, 1.0, 32, 32);
+        diamondMesh->computeAllNormals();
+        m_diamondVisualRadius = 1.0;
+        cerr << "FAILED TO LOAD DIAMOND BURR FROM " << diamondMeshPath << endl;
+    }
     m_diamondBurrMesh->m_material->setWhite();
-    m_diamondBurrMesh->m_material->m_specular.set(0.9, 0.9, 0.9);
-    m_diamondBurrMesh->m_material->setShininess(120);
-    m_diamondVisualRadius = 1.0;
+    m_diamondBurrMesh->m_material->m_specular.set(0.75, 0.75, 0.75);
+    m_diamondBurrMesh->m_material->setShininess(80);
     m_diamondBurrMesh->setShowEnabled(false);
     a_worldPtr->addSceneObjectToWorld(m_diamondBurrMesh);
 
     applyBurrVisualScale();
+
+    // Irrigation tube. Its own mesh so the shaft's silver/gold/black/grey
+    // regions do not paint it. Pose follows the drill body, without burr spin.
+    for (int di = 0; di < (int)m_drills.size(); di++){
+        string cannulaPath = current_filepath + "/../../ADF/meshes/high_res/cannula_"
+            + m_drills[di]->m_name + ".obj";
+        cMultiMesh* cannula = new cMultiMesh();
+        if (!cannula->loadFromFile(cannulaPath)){
+            cerr << "FAILED TO LOAD IRRIGATION CANNULA " << cannulaPath << endl;
+            delete cannula;
+            m_cannulaMeshes.push_back(nullptr);
+            continue;
+        }
+        cannula->m_material->m_ambient.set(0.55, 0.56, 0.58);
+        cannula->m_material->m_diffuse.set(0.78, 0.80, 0.82);
+        cannula->m_material->m_specular.set(0.96, 0.97, 0.98);
+        cannula->m_material->setShininess(110);
+        for (int mi = 0; mi < cannula->getNumMeshes(); mi++){
+            cMesh* mesh = cannula->getMesh(mi);
+            if (!mesh){
+                continue;
+            }
+            mesh->computeAllNormals();
+            mesh->m_material->m_ambient.set(0.55, 0.56, 0.58);
+            mesh->m_material->m_diffuse.set(0.78, 0.80, 0.82);
+            mesh->m_material->m_specular.set(0.96, 0.97, 0.98);
+            mesh->m_material->setShininess(110);
+        }
+        cannula->setShowEnabled(false);
+        if (m_drills[di]->m_rigidBody){
+            cannula->setLocalTransform(m_drills[di]->m_rigidBody->getLocalTransform());
+        }
+        a_worldPtr->addSceneObjectToWorld(cannula);
+        m_cannulaMeshes.push_back(cannula);
+        cerr << "INFO! LOADED IRRIGATION CANNULA " << cannulaPath << endl;
+    }
+
     showOnlyActive();
 
     initializeLabels();
@@ -380,6 +476,12 @@ void DrillManager::update(double dt)
         spin.setAxisAngleRotationRad(cVector3d(1.0, 0.0, 0.0), m_burrSpinAngle);
         burrPose.setLocalRot(burrPose.getLocalRot() * spin);
         activeTip->setLocalTransform(burrPose);
+    }
+    if (m_activeDrillIdx >= 0 && m_activeDrillIdx < (int)m_cannulaMeshes.size()){
+        cMultiMesh* cannula = m_cannulaMeshes[m_activeDrillIdx];
+        if (cannula && m_activeDrill && m_activeDrill->m_rigidBody){
+            cannula->setLocalTransform(m_activeDrill->m_rigidBody->getLocalTransform());
+        }
     }
 
     if (m_isOn && m_audioSource){
@@ -930,5 +1032,11 @@ void DrillManager::showOnlyActive(){
     }
     if (m_diamondBurrMesh){
         m_diamondBurrMesh->setShowEnabled(m_show && m_burrStyle == BurrStyle::DIAMOND);
+    }
+    for (int di = 0; di < (int)m_cannulaMeshes.size(); di++){
+        if (!m_cannulaMeshes[di]){
+            continue;
+        }
+        m_cannulaMeshes[di]->setShowEnabled(m_show && di == m_activeDrillIdx);
     }
 }
