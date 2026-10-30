@@ -115,6 +115,7 @@ static int tuckBakedTip(cMultiMesh* visual, double cut, double radius)
 
 int DrillManager::init(afWorldPtr a_worldPtr, CameraPanelManager* a_panelManager, p_opt::variables_map& var_map){
     // importing drill model
+    m_afWorld = a_worldPtr;
 
     int nt = var_map["nt"].as<int>();
     bool mute = var_map["mute"].as<bool>();
@@ -261,6 +262,54 @@ int DrillManager::init(afWorldPtr a_worldPtr, CameraPanelManager* a_panelManager
         cerr << "INFO! LOADED IRRIGATION CANNULA " << cannulaPath << endl;
     }
 
+    m_suctionBody = a_worldPtr->getRigidBody("frazier_suction");
+    if (!m_suctionBody){
+        cerr << "WARNING! No frazier_suction body. Suction will not be tracked or logged." << endl;
+    }
+    else{
+        m_T_s_init = m_suctionBody->getLocalTransform();
+        m_T_s = m_T_s_init;
+        const int sizes[] = {7, 5, 3};
+        for (int fr : sizes){
+            string suctionPath = current_filepath + "/../../ADF/meshes/high_res/suction_"
+                + to_string(fr) + "fr.obj";
+            cMultiMesh* tube = new cMultiMesh();
+            if (!tube->loadFromFile(suctionPath)){
+                cerr << "FAILED TO LOAD SUCTION " << suctionPath << endl;
+                delete tube;
+                continue;
+            }
+            // Satin stainless: same family as the irrigation tube, less shine.
+            tube->m_material->m_ambient.set(0.22, 0.23, 0.24);
+            tube->m_material->m_diffuse.set(0.64, 0.66, 0.68);
+            tube->m_material->m_specular.set(0.45, 0.46, 0.48);
+            tube->m_material->setShininess(42);
+            for (int mi = 0; mi < tube->getNumMeshes(); mi++){
+                cMesh* mesh = tube->getMesh(mi);
+                if (!mesh){
+                    continue;
+                }
+                mesh->computeAllNormals();
+                mesh->m_material->m_ambient.set(0.22, 0.23, 0.24);
+                mesh->m_material->m_diffuse.set(0.64, 0.66, 0.68);
+                mesh->m_material->m_specular.set(0.45, 0.46, 0.48);
+                mesh->m_material->setShininess(42);
+            }
+            tube->setShowEnabled(false);
+            tube->setLocalTransform(m_T_s);
+            a_worldPtr->addSceneObjectToWorld(tube);
+            m_suctionMeshes.push_back(tube);
+            m_suctionSizesFr.push_back(fr);
+            vector<ContactSphere> spheres;
+            buildSuctionContacts(fr, spheres);
+            m_suctionSpheres.push_back(spheres);
+            cerr << "INFO! LOADED SUCTION " << fr << " Fr" << endl;
+        }
+        m_suctionIdx = 0;
+        m_suctionSizeFr = m_suctionSizesFr.empty() ? 7 : m_suctionSizesFr[0];
+        showActiveSuction();
+    }
+
     showOnlyActive();
 
     initializeLabels();
@@ -311,6 +360,9 @@ int DrillManager::init(afWorldPtr a_worldPtr, CameraPanelManager* a_panelManager
         };
         applyMatcap(m_burrMesh);
         applyMatcap(m_diamondBurrMesh);
+        for (cMultiMesh* tube : m_suctionMeshes){
+            applyMatcap(tube);
+        }
     }
     else{
         cerr << "FAILED TO LOAD DRILL'S MATCAP TEXTURE" << endl;
@@ -354,8 +406,42 @@ int DrillManager::init(afWorldPtr a_worldPtr, CameraPanelManager* a_panelManager
         cout << "WARNING! No haptic device found; use keyboard (Ctrl+WASD/IK) or Ctrl+O for ROS." << endl;
     }
 
+    cout << "INFO! Haptic devices found: " << m_deviceHandler->getNumDevices() << endl;
+    m_suctionDevice = nullptr;
+    m_suctionTracked = false;
+    if (m_deviceHandler->getNumDevices() > 1 && m_deviceHandler->getDevice(m_suctionDevice, 1) && m_suctionDevice){
+        // The drill cursor calls open() on device 0. Nothing else opens device 1,
+        // and chai3d ignores position, rotation, and velocity until open().
+        if (m_suctionDevice->open()){
+            cHapticDeviceInfo info = m_suctionDevice->getSpecifications();
+            m_suctionTracked = true;
+            cout << "INFO! Haptic device [" << info.m_modelName << "] from "
+                 << info.m_manufacturerName << " opened for suction control." << endl;
+        }
+        else{
+            m_suctionDevice = nullptr;
+            cout << "WARNING! Second haptic device was found but could not be opened." << endl;
+        }
+    }
+    else{
+        m_suctionDevice = nullptr;
+        cout << "INFO! No second haptic device. USB only shows one Geomagic, so the "
+             << "7 Fr suction stays at its start pose. Both devices have to be listed "
+             << "by the Touch driver before launch." << endl;
+    }
+
     // Initializing tool cursors
     toolCursorInit(a_worldPtr);
+    buildDrillContacts();
+    refreshSuctionCursors();
+    if (m_hapticDevice && !m_toolCursorList.empty() && m_toolCursorList[0]){
+        double ws = m_toolCursorList[0]->getWorkspaceScaleFactor();
+        if (ws < 1e-6){
+            ws = 1.0;
+        }
+        m_contactStiffness = m_hapticDevice->getSpecifications().m_maxLinearStiffness / ws;
+        cout << "INFO! Drill and suction share one world frame, workspace scale " << ws << endl;
+    }
 
     return 1;
 }
@@ -451,6 +537,14 @@ void DrillManager::update(double dt)
         m_drillReferenceBody->setLocalTransform(m_T_d);
     }
 
+    updateSuctionPose(T_c_w);
+    // Contact force only. The drill pose above is left as the solver wrote it.
+    separateInstruments();
+    if (m_suctionBody){
+        m_suctionBody->setLocalTransform(m_T_s);
+    }
+    showActiveSuction();
+
     toolCursorsPosUpdate(m_T_d);
 
     // check for shaft collision
@@ -483,6 +577,7 @@ void DrillManager::update(double dt)
             cannula->setLocalTransform(m_activeDrill->m_rigidBody->getLocalTransform());
         }
     }
+    updateSuctionCursors(false);
 
     if (m_isOn && m_audioSource){
         if (m_audioState == AudioState::STOPPED){
@@ -653,6 +748,19 @@ void DrillManager::toolCursorsPosUpdate(cTransform a_targetPose){
 
 void DrillManager::reset(){
     m_hapticDevice->setForce(cVector3d(0., 0., 0.));
+    if (m_suctionDevice){
+        m_suctionDevice->setForce(cVector3d(0., 0., 0.));
+    }
+    m_instrumentForceDrill.zero();
+    m_instrumentForceSuction.zero();
+    m_haveDrillDevicePos = false;
+    m_haveSuctionDevicePos = false;
+    m_T_s = m_T_s_init;
+    if (m_suctionBody){
+        m_suctionBody->setLocalTransform(m_T_s);
+    }
+    showActiveSuction();
+    updateSuctionCursors(true);
     m_T_d = m_T_d_init;
     toolCursorsPosUpdate(m_T_d);
     toolCursorsInitialize();
@@ -809,6 +917,106 @@ bool DrillManager::snapToCameraView(const cVector3d& volumeOrigin,
     toolCursorsInitialize();
     updatePoseFromCursors();
     beginVolumeContactSuppression(10);
+    return true;
+}
+
+bool DrillManager::snapSuctionToCameraView(const cVector3d& volumeOrigin,
+                                           const cVector3d& volumeDims,
+                                           const cTransform& volumePose)
+{
+    if (!m_mainCamera){
+        return false;
+    }
+
+    cVector3d camPos = m_mainCamera->getLocalPos();
+    double volR = 0.5 * cMax(cMax(volumeDims.x(), volumeDims.y()), volumeDims.z());
+    if (volR < 1e-6){
+        volR = 0.5;
+    }
+    cVector3d right = m_mainCamera->getRightVector();
+    cVector3d up = m_mainCamera->getUpVector();
+    // Same aim as the drill recenter: just off the volume center, inside the view.
+    cVector3d aim = volumeOrigin + right * (0.05 * volR) + up * (-0.04 * volR);
+    cVector3d worldDir = aim - camPos;
+    if (worldDir.length() < 1e-6){
+        worldDir = cVector3d(1.0, 0.0, 0.0);
+    }
+    worldDir.normalize();
+    cVector3d towardCam = -worldDir;
+
+    const vector<ContactSphere>* spheres = nullptr;
+    if (m_suctionIdx >= 0 && m_suctionIdx < (int)m_suctionSpheres.size() && !m_suctionSpheres[m_suctionIdx].empty()){
+        spheres = &m_suctionSpheres[m_suctionIdx];
+    }
+    double tubeR = (spheres && !spheres->empty()) ? (*spheres)[0].radius : 0.012;
+    double maxR = tubeR;
+    if (spheres){
+        for (const ContactSphere& sphere : *spheres){
+            maxR = cMax(maxR, sphere.radius);
+        }
+    }
+    const double kStandoffMm = 10.0;
+    const double aabbPad = 0.05;
+    double standoff = cMax(tubeR + kStandoffMm * m_units_mmToSim, aabbPad);
+
+    cVector3d geomHalf(volumeDims.x() * 0.5, volumeDims.y() * 0.5, volumeDims.z() * 0.5);
+    cVector3d expandedHalf(geomHalf.x() + maxR + aabbPad,
+                           geomHalf.y() + maxR + aabbPad,
+                           geomHalf.z() + maxR + aabbPad);
+    const cMatrix3d rot = m_T_s.getLocalRot();
+
+    auto anySuctionInside = [&](const cVector3d& tip) -> bool {
+        if (!spheres){
+            return inExpandedAabb(worldToVolumeLocal(tip, volumePose), expandedHalf);
+        }
+        for (const ContactSphere& sphere : *spheres){
+            cVector3d P = tip + rot * sphere.local;
+            if (inExpandedAabb(worldToVolumeLocal(P, volumePose), expandedHalf)){
+                return true;
+            }
+        }
+        return false;
+    };
+
+    cVector3d oLocal = worldToVolumeLocal(camPos, volumePose);
+    cVector3d dLocal = cTranspose(volumePose.getLocalRot()) * worldDir;
+    if (dLocal.length() < 1e-6){
+        dLocal = cVector3d(1.0, 0.0, 0.0);
+    }
+    dLocal.normalize();
+
+    cVector3d tip;
+    if (inExpandedAabb(oLocal, expandedHalf)){
+        tip = camPos + worldDir * 0.2;
+    }
+    else{
+        double tEnter = 0.0;
+        double tExit = 0.0;
+        if (rayAabbIntersect(oLocal, dLocal, geomHalf, tEnter, tExit) && tEnter > 1e-6){
+            cVector3d hitLocal = oLocal + dLocal * tEnter;
+            cVector3d hitWorld = volumeLocalToWorld(hitLocal, volumePose);
+            tip = hitWorld - worldDir * standoff;
+        }
+        else{
+            tip = volumeOrigin - worldDir * (volR + standoff);
+        }
+    }
+
+    const double step = 0.02;
+    for (int iter = 0; iter < 80 && anySuctionInside(tip); iter++){
+        tip += towardCam * step;
+    }
+
+    m_T_s.setLocalPos(tip);
+    m_instrumentForceSuction.zero();
+    if (m_suctionDevice){
+        m_suctionDevice->setForce(cVector3d(0.0, 0.0, 0.0));
+    }
+    if (m_suctionBody){
+        m_suctionBody->setLocalTransform(m_T_s);
+    }
+    showActiveSuction();
+    updateSuctionCursors(true);
     return true;
 }
 
@@ -1040,3 +1248,321 @@ void DrillManager::showOnlyActive(){
         m_cannulaMeshes[di]->setShowEnabled(m_show && di == m_activeDrillIdx);
     }
 }
+
+void DrillManager::showActiveSuction()
+{
+    for (int i = 0; i < (int)m_suctionMeshes.size(); i++){
+        if (!m_suctionMeshes[i]){
+            continue;
+        }
+        const bool show = (i == m_suctionIdx);
+        m_suctionMeshes[i]->setShowEnabled(show);
+        if (show){
+            m_suctionMeshes[i]->setLocalTransform(m_T_s);
+        }
+    }
+}
+
+int DrillManager::cycleSuctionSize()
+{
+    if (m_suctionSizesFr.empty()){
+        return m_suctionSizeFr;
+    }
+    m_suctionIdx = (m_suctionIdx + 1) % (int)m_suctionSizesFr.size();
+    m_suctionSizeFr = m_suctionSizesFr[m_suctionIdx];
+    showActiveSuction();
+    refreshSuctionCursors();
+    cout << "Suction size changed to " << m_suctionSizeFr << " Fr" << endl;
+    return m_suctionSizeFr;
+}
+
+// 180° about the mesh shaft. Right-multiply so the tip stays put and the bend flips.
+static cMatrix3d suctionShaftRoll()
+{
+    cMatrix3d roll;
+    roll.setAxisAngleRotationRad(cVector3d(1.0, 0.0, 0.0), 3.141592653589793);
+    return roll;
+}
+
+void DrillManager::updateSuctionPose(const cTransform& cameraWorld)
+{
+    if (!m_suctionTracked || !m_suctionDevice || !m_suctionDevice->isDeviceAvailable()){
+        return;
+    }
+    cTransform devicePose;
+    cVector3d velocity;
+    m_suctionDevice->getTransform(devicePose);
+    m_suctionDevice->getLinearVelocity(velocity);
+    if (!std::isfinite(velocity.x()) || !std::isfinite(velocity.y()) || !std::isfinite(velocity.z())
+        || velocity.length() > 5.0){
+        velocity.zero();
+    }
+    double ws = 1.0;
+    if (!m_toolCursorList.empty() && m_toolCursorList[0]){
+        ws = m_toolCursorList[0]->getWorkspaceScaleFactor();
+        if (ws < 1e-6){
+            ws = 1.0;
+        }
+    }
+    velocity = cameraWorld.getLocalRot() * (velocity / ws);
+    // Same integration as the drill. Button 1 freezes translation only.
+    // The tip is the body origin, so the tube orbits that point when the hand rotates.
+    // Roll 180° about the shaft (+X) so the bend stays on the same side as the parked pose.
+    m_T_s.setLocalPos(m_T_s.getLocalPos() + velocity * 0.8 * !m_suctionClutch);
+    m_T_s.setLocalRot(cameraWorld.getLocalRot() * devicePose.getLocalRot() * suctionShaftRoll());
+}
+
+void DrillManager::shiftDrillHome(const cVector3d& offset)
+{
+    m_T_d_init.setLocalPos(m_T_d_init.getLocalPos() + offset);
+    m_T_d = m_T_d_init;
+    if (m_drillReferenceBody){
+        m_drillReferenceBody->setLocalTransform(m_T_d);
+    }
+    if (!m_toolCursorList.empty()){
+        toolCursorsPosUpdate(m_T_d);
+        toolCursorsInitialize();
+        updatePoseFromCursors();
+    }
+}
+
+void DrillManager::placeSuctionHome(const cVector3d& tip, const cMatrix3d& rotation)
+{
+    m_T_s_init.setLocalPos(tip);
+    m_T_s_init.setLocalRot(rotation * suctionShaftRoll());
+    m_T_s = m_T_s_init;
+    if (m_suctionBody){
+        m_suctionBody->setLocalTransform(m_T_s);
+    }
+    showActiveSuction();
+    updateSuctionCursors(true);
+}
+
+void DrillManager::refreshSuctionCursors()
+{
+    m_suctionCursorSphere.clear();
+    if (!m_afWorld || m_suctionIdx < 0 || m_suctionIdx >= (int)m_suctionSpheres.size()){
+        return;
+    }
+    const vector<ContactSphere>& spheres = m_suctionSpheres[m_suctionIdx];
+    if (spheres.empty()){
+        return;
+    }
+    // Distal tip first. Spacing is about 2 mm so the thin tube cannot slip between proxies.
+    const double spacing = 0.02;
+    const int kMax = 12;
+    m_suctionCursorSphere.push_back(0);
+    cVector3d last = spheres[0].local;
+    for (int i = 1; i < (int)spheres.size() && (int)m_suctionCursorSphere.size() < kMax; i++){
+        if ((spheres[i].local - last).length() < spacing){
+            continue;
+        }
+        m_suctionCursorSphere.push_back(i);
+        last = spheres[i].local;
+    }
+    while ((int)m_suctionCursors.size() < (int)m_suctionCursorSphere.size()){
+        cToolCursor* cursor = new cToolCursor(m_afWorld->getChaiWorld());
+        m_afWorld->addSceneObjectToWorld(cursor);
+        cursor->setShowEnabled(false);
+        cursor->setShowContactPoints(false, false);
+        if (cursor->m_hapticPoint){
+            cursor->m_hapticPoint->setShow(false, false);
+            if (cursor->m_hapticPoint->m_sphereProxy){
+                cursor->m_hapticPoint->m_sphereProxy->setShowEnabled(false);
+            }
+            if (cursor->m_hapticPoint->m_sphereGoal){
+                cursor->m_hapticPoint->m_sphereGoal->setShowEnabled(false);
+            }
+        }
+        m_suctionCursors.push_back(cursor);
+    }
+    updateSuctionCursors(true);
+    cout << "INFO! Suction bone contact uses " << m_suctionCursorSphere.size()
+         << " proxies on the " << m_suctionSizeFr << " Fr tube." << endl;
+}
+
+void DrillManager::updateSuctionCursors(bool snapProxies)
+{
+    if (m_suctionIdx < 0 || m_suctionIdx >= (int)m_suctionSpheres.size()){
+        return;
+    }
+    const vector<ContactSphere>& spheres = m_suctionSpheres[m_suctionIdx];
+    const int active = (int)m_suctionCursorSphere.size();
+    for (int i = 0; i < (int)m_suctionCursors.size(); i++){
+        cToolCursor* cursor = m_suctionCursors[i];
+        if (!cursor){
+            continue;
+        }
+        if (i >= active || m_suctionCursorSphere[i] < 0 || m_suctionCursorSphere[i] >= (int)spheres.size()){
+            cursor->setDeviceLocalForce(cVector3d(0.0, 0.0, 0.0));
+            continue;
+        }
+        const ContactSphere& sphere = spheres[m_suctionCursorSphere[i]];
+        const cVector3d world = m_T_s.getLocalPos() + m_T_s.getLocalRot() * sphere.local;
+        cursor->setRadius(sphere.radius);
+        cursor->setDeviceLocalPos(world);
+        cursor->setDeviceLocalRot(m_T_s.getLocalRot());
+        if (snapProxies && cursor->m_hapticPoint){
+            cursor->m_hapticPoint->initialize(cursor->getDeviceGlobalPos());
+        }
+    }
+}
+
+void DrillManager::computeSuctionInteractionForces()
+{
+    const int active = (int)m_suctionCursorSphere.size();
+    for (int i = 0; i < (int)m_suctionCursors.size(); i++){
+        cToolCursor* cursor = m_suctionCursors[i];
+        if (!cursor){
+            continue;
+        }
+        if (i < active){
+            cursor->computeInteractionForces();
+        }
+        else{
+            cursor->setDeviceLocalForce(cVector3d(0.0, 0.0, 0.0));
+        }
+    }
+}
+
+cVector3d DrillManager::suctionVolumeForce() const
+{
+    cVector3d sum(0.0, 0.0, 0.0);
+    const int active = (int)m_suctionCursorSphere.size();
+    for (int i = 0; i < active && i < (int)m_suctionCursors.size(); i++){
+        if (m_suctionCursors[i]){
+            sum.add(m_suctionCursors[i]->getDeviceLocalForce());
+        }
+    }
+    return sum;
+}
+
+void DrillManager::buildDrillContacts()
+{
+    m_drillSpheres.clear();
+    m_drillSpheres.resize(m_drills.size());
+    for (int di = 0; di < (int)m_drills.size(); di++){
+        vector<ContactSphere>& out = m_drillSpheres[di];
+        double tipRadius = m_drills[di]->m_size * 0.5;
+        out.push_back({cVector3d(0.0, 0.0, 0.0), tipRadius});
+        cMultiMesh* visual = m_drills[di]->m_rigidBody
+            ? m_drills[di]->m_rigidBody->getVisualObject()
+            : nullptr;
+        if (!visual){
+            continue;
+        }
+        const double bin = 0.02;
+        vector<double> radiusAt;
+        for (int mi = 0; mi < visual->getNumMeshes(); mi++){
+            cMesh* mesh = visual->getMesh(mi);
+            if (!mesh || !mesh->m_vertices){
+                continue;
+            }
+            const unsigned int count = mesh->m_vertices->getNumElements();
+            for (unsigned int vi = 0; vi < count; vi++){
+                cVector3d pos = mesh->m_vertices->getLocalPos(vi);
+                if (pos.x() < 0.004){
+                    continue;
+                }
+                int slot = (int)(pos.x() / bin);
+                if (slot < 0){
+                    continue;
+                }
+                if (slot >= (int)radiusAt.size()){
+                    radiusAt.resize(slot + 1, 0.0);
+                }
+                double radial = sqrt(pos.y() * pos.y() + pos.z() * pos.z());
+                radiusAt[slot] = cMax(radiusAt[slot], radial);
+            }
+        }
+        for (int slot = 1; slot < (int)radiusAt.size(); slot++){
+            if (radiusAt[slot] <= 0.0){
+                continue;
+            }
+            out.push_back({cVector3d((slot + 0.5) * bin, 0.0, 0.0), cMax(tipRadius, radiusAt[slot])});
+        }
+    }
+}
+
+void DrillManager::buildSuctionContacts(int fr, vector<ContactSphere>& out)
+{
+    out.clear();
+    const double tubeRadius = 0.5 * (fr / 3.0) * m_units_mmToSim;
+    const double bendStart = 100.0 * m_units_mmToSim;
+    const double bendRadius = 18.0 * m_units_mmToSim;
+    const double step = cMax(0.008, 0.75 * tubeRadius);
+    for (double x = 0.0; x <= bendStart; x += step){
+        out.push_back({cVector3d(x, 0.0, 0.0), tubeRadius});
+    }
+    const double bendAngle = 35.0 * 3.141592653589793 / 180.0;
+    for (int deg = 4; deg <= 35; deg += 4){
+        const double angle = deg * 3.141592653589793 / 180.0;
+        out.push_back({cVector3d(bendStart + bendRadius * sin(angle),
+                                 bendRadius * (1.0 - cos(angle)),
+                                 0.0), tubeRadius});
+    }
+    cVector3d exitPos(bendStart + bendRadius * sin(bendAngle),
+                      bendRadius * (1.0 - cos(bendAngle)),
+                      0.0);
+    cVector3d axial(cos(bendAngle), sin(bendAngle), 0.0);
+    for (double distMm = 2.0; distMm <= 26.5; distMm += 3.0){
+        double outerMm = fr / 3.0;
+        if (distMm >= 5.5 && distMm <= 19.0){
+            outerMm = 7.2;
+        }
+        else if (distMm > 19.0){
+            outerMm = 5.2;
+        }
+        else if (distMm >= 4.0){
+            outerMm = cMax(fr / 3.0, 6.4);
+        }
+        out.push_back({exitPos + axial * (distMm * m_units_mmToSim), 0.5 * outerMm * m_units_mmToSim});
+    }
+}
+
+void DrillManager::separateInstruments()
+{
+    m_instrumentForceDrill.zero();
+    m_instrumentForceSuction.zero();
+    if (!m_activeDrill || m_drillSpheres.empty() || m_suctionSpheres.empty()){
+        return;
+    }
+    if (m_activeDrillIdx < 0 || m_activeDrillIdx >= (int)m_drillSpheres.size()){
+        return;
+    }
+    if (m_suctionIdx < 0 || m_suctionIdx >= (int)m_suctionSpheres.size()){
+        return;
+    }
+
+    const vector<ContactSphere>& drillSpheres = m_drillSpheres[m_activeDrillIdx];
+    const vector<ContactSphere>& suctionSpheres = m_suctionSpheres[m_suctionIdx];
+    const cVector3d drillPos = m_T_d.getLocalPos();
+    const cMatrix3d drillRot = m_T_d.getLocalRot();
+    const cVector3d suctionPos = m_T_s.getLocalPos();
+    const cMatrix3d suctionRot = m_T_s.getLocalRot();
+    // Ignore less than about 0.3 mm so a resting touch does not buzz.
+    const double ignore = 0.0003;
+    double maxPen = 0.0;
+    cVector3d normal(0.0, 0.0, 1.0);
+    for (const ContactSphere& drillSphere : drillSpheres){
+        const cVector3d drillCenter = drillPos + drillRot * drillSphere.local;
+        for (const ContactSphere& suctionSphere : suctionSpheres){
+            const cVector3d suctionCenter = suctionPos + suctionRot * suctionSphere.local;
+            const cVector3d gap = drillCenter - suctionCenter;
+            const double dist = gap.length();
+            const double pen = drillSphere.radius + suctionSphere.radius - dist;
+            if (pen > maxPen){
+                maxPen = pen;
+                normal = (dist > 1e-6) ? gap / dist : cVector3d(0.0, 0.0, 1.0);
+            }
+        }
+    }
+    if (maxPen <= ignore || m_contactStiffness <= 0.0){
+        return;
+    }
+    // Equal and opposite. Poses stay on their own tracks.
+    const cVector3d push = normal * (m_contactStiffness * maxPen);
+    m_instrumentForceDrill = push;
+    m_instrumentForceSuction = -push;
+}
+

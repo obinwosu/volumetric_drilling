@@ -1743,6 +1743,9 @@ def _bind_instrument(viewer):
     for mesh in meshes.get("cannulas", {}).values():
         if isinstance(mesh, str):
             _bind_named(viewer, mesh, "cannula", document, "_cannula_material_warned")
+    for mesh in meshes.get("suctions", {}).values():
+        if isinstance(mesh, str):
+            _bind_named(viewer, mesh, "suction", document, "_suction_material_warned")
 
 
 def _log_static_mesh(viewer, name, points, tris, normals, color, roughness, metallic):
@@ -1759,6 +1762,56 @@ def _log_static_mesh(viewer, name, points, tris, normals, color, roughness, meta
         dynamic=False,
         hidden=True,
     )
+
+
+def _read_suction_state():
+    try:
+        return json.loads((RUNTIME / "suction_state.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _log_suction(viewer):
+    """7 Fr on the distal tip. 5 Fr and 3 Fr stay unloaded from the view until F cycles them."""
+    state = _read_suction_state()
+    pose = _visual_pose(state) if state else None
+    if pose is None:
+        return
+    quat = np.array(pose["quat"], dtype=np.float64)
+    previous_quat = getattr(viewer, "_suction_quat", None)
+    if previous_quat is not None and float(np.dot(quat, previous_quat)) < 0.0:
+        quat = -quat
+    viewer._suction_quat = quat
+    pose = {"position": pose["position"], "quat": tuple(float(v) for v in quat)}
+    try:
+        size = int(state.get("size_fr") or 7)
+    except (AttributeError, TypeError, ValueError):
+        size = 7
+    meshes = (getattr(viewer, "_instrument_meshes", {}) or {}).get("suctions", {})
+    previous = getattr(viewer, "_rtx_active_suction", None)
+    if previous is not None and previous != size and previous in meshes:
+        _log_instance(
+            viewer,
+            f"suction/inst_{previous}",
+            meshes[previous],
+            pose["position"],
+            pose["quat"],
+            1.0,
+            hidden=True,
+        )
+    if size not in meshes:
+        return
+    viewer._rtx_active_suction = size
+    _log_instance(
+        viewer,
+        f"suction/inst_{size}",
+        meshes[size],
+        pose["position"],
+        pose["quat"],
+        1.0,
+        hidden=False,
+    )
+    _bind_shown_head(viewer, f"suction/inst_{size}", "suction")
 
 
 def _read_drill_state():
@@ -2050,9 +2103,14 @@ def main():
     labels = np.unique(colors[occupied].reshape(-1, 3), axis=0)
     print(f"Volume {occupied.shape} with {len(labels)} segment colors", flush=True)
     bridge = Bridge()
-    deadline = time.perf_counter() + 45.0
+    deadline = time.perf_counter() + 180.0
+    announced = 0.0
     while bridge.volume is None and time.perf_counter() < deadline:
         bridge.spin()
+        now = time.perf_counter()
+        if now - announced > 5.0:
+            print("Waiting for AMBF volume_info before opening the RTX window", flush=True)
+            announced = now
         time.sleep(0.05)
     if bridge.volume is None:
         raise SystemExit("AMBF did not publish volume_info. Start the simulator first.")
@@ -2133,7 +2191,7 @@ def main():
     _log_static_mesh(
         viewer, "drill/sphere", sphere_local, sphere_tris, sphere_normals, (0.86, 0.87, 0.88), 0.12, 0.95
     )
-    instrument = {"cutting": "drill/sphere", "shafts": {}, "shaft_faces": {}, "cannulas": {}}
+    instrument = {"cutting": "drill/sphere", "shafts": {}, "shaft_faces": {}, "cannulas": {}, "suctions": {}}
     flute_path = MESH_DIR / "fluted_burr.obj"
     try:
         flute_points, flute_tris, flute_normals = _load_obj(flute_path)
@@ -2223,6 +2281,33 @@ def main():
         )
         instrument["cannulas"][size] = mesh_name
         print(f"Cannula {size} mm {len(cannula_tris)} tris, stainless", flush=True)
+    for french in (7, 5, 3):
+        suction_path = MESH_DIR / f"suction_{french}fr.obj"
+        try:
+            suction_points, suction_tris = load_cannula_obj(suction_path)
+            suction_normals = vertex_normals(suction_points, suction_tris).astype(np.float32)
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(f"Suction {french} Fr unavailable ({exc})", flush=True)
+            continue
+        color, roughness, metallic = _material_preview(viewer, "suction")
+        # USD prim names cannot start with a digit, so this is fr_7 rather than 7fr.
+        mesh_name = f"suction/fr_{french}"
+        try:
+            _log_static_mesh(
+                viewer,
+                mesh_name,
+                np.ascontiguousarray(suction_points, dtype=np.float32),
+                suction_tris,
+                suction_normals,
+                color,
+                roughness,
+                metallic,
+            )
+        except Exception as exc:
+            print(f"Suction {french} Fr was not added to RTX ({exc})", flush=True)
+            continue
+        instrument["suctions"][french] = mesh_name
+        print(f"Suction {french} Fr {len(suction_tris)} tris, satin stainless", flush=True)
     viewer._instrument_meshes = instrument
     _bind_instrument(viewer)
     stream = None
@@ -2460,6 +2545,7 @@ def main():
         pause_menu.sync(viewer, _read_drill_state())
         if bridge.drill is not None:
             _log_instrument(viewer, bridge)
+        _log_suction(viewer)
         dt = min(frame_ms[-1] * 1e-3, 0.05) if frame_ms else 0.0
         settings = getattr(viewer, "_irrigation", None) or load_irrigation(IRRIGATION_PATH)
         if settings.get("draw") == DRAW_SPHERES:
@@ -2543,4 +2629,17 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception:
+        import traceback
+        text = traceback.format_exc()
+        print(text, flush=True)
+        try:
+            RUNTIME.mkdir(parents=True, exist_ok=True)
+            (RUNTIME / "rtx_crash.log").write_text(text)
+        except OSError:
+            pass
+        raise

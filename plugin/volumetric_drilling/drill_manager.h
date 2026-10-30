@@ -138,6 +138,10 @@ public:
     bool snapToCameraView(const cVector3d& volumeOrigin,
                           const cVector3d& volumeDims,
                           const cTransform& volumePose);
+    // Same placement for the suction tip. Does not move the drill.
+    bool snapSuctionToCameraView(const cVector3d& volumeOrigin,
+                                 const cVector3d& volumeDims,
+                                 const cTransform& volumePose);
 
     void beginVolumeContactSuppression(int ticks = 10);
     bool isVolumeContactSuppressed() const { return m_suppressVolumeContact; }
@@ -148,6 +152,17 @@ public:
 
     // a pointer to the current haptic device
     cGenericHapticDevicePtr m_hapticDevice;
+
+    // Second Geomagic, when it was connected at launch. Device 0 stays the drill.
+    cGenericHapticDevicePtr m_suctionDevice;
+    bool m_suctionTracked = false;
+
+    int suctionSizeFr() const { return m_suctionSizeFr; }
+    cTransform suctionShownPose() const { return m_T_s; }
+    int cycleSuctionSize();
+    // One-time start placement. Does not change how the drill pose is solved.
+    void shiftDrillHome(const cVector3d& offset);
+    void placeSuctionHome(const cVector3d& tip, const cMatrix3d& rotation);
 
     DrillingPublisher* m_drillingPub;
 
@@ -161,6 +176,46 @@ public:
     double m_drillRate = 0.020f;
 
     afRigidBodyPtr m_drillReferenceBody;
+
+    // Frazier suction. Its own body and its own pose. Tip at the origin, shaft along +X.
+    afRigidBodyPtr m_suctionBody;
+    std::vector<cMultiMesh*> m_suctionMeshes;
+    std::vector<int> m_suctionSizesFr;
+    int m_suctionIdx = 0;
+    int m_suctionSizeFr = 7;
+    cTransform m_T_s, m_T_s_init;
+
+    // Both styli share this mapping. A device-meter on either Geomagic
+    // becomes the same world step, with the same camera rotation and scale.
+    cVector3d m_drillDevicePos;
+    cVector3d m_suctionDevicePos;
+    bool m_haveDrillDevicePos = false;
+    bool m_haveSuctionDevicePos = false;
+    cVector3d m_instrumentForceDrill;
+    cVector3d m_instrumentForceSuction;
+    double m_contactStiffness = 0.0;
+
+    struct ContactSphere {
+        cVector3d local;
+        double radius;
+    };
+    std::vector<std::vector<ContactSphere>> m_drillSpheres;
+    std::vector<std::vector<ContactSphere>> m_suctionSpheres;
+
+    // Volume proxies along the suction. They never own a Geomagic and never move m_T_s.
+    afWorldPtr m_afWorld = nullptr;
+    std::vector<cToolCursor*> m_suctionCursors;
+    std::vector<int> m_suctionCursorSphere;
+    void refreshSuctionCursors();
+    void updateSuctionCursors(bool snapProxies);
+
+    void updateSuctionPose(const cTransform& cameraWorld);
+    void computeSuctionInteractionForces();
+    cVector3d suctionVolumeForce() const;
+    void separateInstruments();
+    void buildDrillContacts();
+    void buildSuctionContacts(int fr, std::vector<ContactSphere>& out);
+    void showActiveSuction();
 
     // A map of drill burr names and their sizes in simulatio
     double m_units_mmToSim;
@@ -201,6 +256,9 @@ public:
     bool m_vrHmdOwnsCamClutch = false;
 
     bool m_deviceClutch = false;
+
+    // Device 2, stylus button 2. Freezes suction translation. Rotation still follows.
+    bool m_suctionClutch = false;
 
     // Shift + stylus button 2: orbit camera around the drill burr.
     bool m_camOrbitBurr = false;

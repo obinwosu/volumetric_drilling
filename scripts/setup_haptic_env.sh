@@ -26,3 +26,12 @@ esac
 [[ -f /etc/profile.d/3ds-touch-drivers.sh ]] && source /etc/profile.d/3ds-touch-drivers.sh
 # shellcheck disable=SC1091
 [[ -f /etc/profile.d/openhaptics.sh ]] && source /etc/profile.d/openhaptics.sh
+
+# Rebuilt libhdPhantom opens the second Touch as "Phantom2". It has to be
+# found before the one-device copy in /usr/local/lib. Keep this last so
+# profile snippets cannot put the old library ahead of it.
+HAPTIC_LIB_DIR="${HOME}/.local/lib"
+case ":${LD_LIBRARY_PATH:-}:" in
+  *":${HAPTIC_LIB_DIR}:"*) ;;
+  *) export LD_LIBRARY_PATH="${HAPTIC_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" ;;
+esac

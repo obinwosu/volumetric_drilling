@@ -48,6 +48,7 @@
 #include <boost/program_options.hpp>
 #include <atomic>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <dlfcn.h>
 #include <chrono>
@@ -315,6 +316,50 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
     m_cameraHomeUp = m_mainCamera->getUpVector();
     loadCanonicalViews();
     applyStartupView();
+    if (m_mainCamera){
+        cVector3d right = m_mainCamera->getRightVector();
+        cVector3d look = m_mainCamera->getLookVector();
+        if (right.length() > 1e-6 && look.length() > 1e-6){
+            right.normalize();
+            look.normalize();
+            const cTransform originalDrill = m_drillManager.m_T_d;
+            const cVector3d originalTip = originalDrill.getLocalPos();
+            const cVector3d camPos = m_mainCamera->getLocalPos();
+            double depth = look.dot(originalTip - camPos);
+            if (depth < 0.05){
+                depth = (originalTip - camPos).length();
+            }
+            const double halfHeight = depth * std::tan(m_mainCamera->getFieldViewAngle() * 0.5);
+            int displayW = 0;
+            int displayH = 0;
+            if (cCamera* camera = m_mainCamera->getInternalCamera()){
+                displayW = camera->getDisplayWidth();
+                displayH = camera->getDisplayHeight();
+            }
+            const double aspect = (displayW > 16 && displayH > 16)
+                ? (double)displayW / (double)displayH
+                : (16.0 / 9.0);
+            const double halfWidth = cMax(halfHeight * aspect, 0.02);
+            // Right side of this view, still inside the frame.
+            const cVector3d onAxis = camPos + look * depth;
+            const cVector3d drillTip = onAxis + right * (halfWidth * 0.5);
+            m_drillManager.shiftDrillHome(drillTip - originalTip);
+            cVector3d up = m_mainCamera->getUpVector();
+            if (up.length() < 1e-6){
+                up = cVector3d(0.0, 0.0, 1.0);
+            }
+            up.normalize();
+            // The drill's old yaw aims the tube down-left in this view. A quarter
+            // turn about the camera's up axis, through the tip, swings it down-right.
+            cMatrix3d yawAboutUp;
+            yawAboutUp.setAxisAngleRotationRad(up, -1.5707963267948966);
+            m_drillManager.placeSuctionHome(originalTip, yawAboutUp * originalDrill.getLocalRot());
+            cerr << "INFO! Suction tip at the previous drill start ("
+                 << originalTip.x() << ", " << originalTip.y() << ", " << originalTip.z()
+                 << "). Drill burr on the right of the view ("
+                 << drillTip.x() << ", " << drillTip.y() << ", " << drillTip.z() << ")." << endl;
+        }
+    }
     cFontPtr font = NEW_CFONTCALIBRI36();
     m_calibrationWarningLabel = new cLabel(font);
     m_calibrationWarningLabel->m_fontColor.setBlack();
@@ -412,6 +457,54 @@ void afVolmetricDrillingPlugin::publishDrillVisualState()
             << ",\"anatomy\":\"" << jsonEscape(m_sessionAnatomy) << "\""
             << ",\"laterality\":\"" << jsonEscape(m_anatomyLaterality) << "\""
             << ",\"drill\":\"" << jsonEscape(drillName) << "\""
+            << "}\n";
+    }
+    std::error_code renameError;
+    fs::rename(tempPath, finalPath, renameError);
+}
+
+void afVolmetricDrillingPlugin::publishSuctionVisualState()
+{
+    namespace fs = std::filesystem;
+    const fs::path dir = "/tmp/fivrs-rtx";
+    std::error_code mkdirError;
+    fs::create_directories(dir, mkdirError);
+    cVector3d tip(0.0, 0.0, 0.0);
+    cQuaternion tipRot;
+    tipRot.x = 0.0;
+    tipRot.y = 0.0;
+    tipRot.z = 0.0;
+    tipRot.w = 1.0;
+    const cTransform pose = m_drillManager.suctionShownPose();
+    tip = pose.getLocalPos();
+    tipRot.fromRotMat(pose.getLocalRot());
+    static cQuaternion previousQuat;
+    static bool havePreviousQuat = false;
+    if (havePreviousQuat){
+        const double dot = tipRot.x * previousQuat.x + tipRot.y * previousQuat.y
+            + tipRot.z * previousQuat.z + tipRot.w * previousQuat.w;
+        if (dot < 0.0){
+            tipRot.x = -tipRot.x;
+            tipRot.y = -tipRot.y;
+            tipRot.z = -tipRot.z;
+            tipRot.w = -tipRot.w;
+        }
+    }
+    previousQuat = tipRot;
+    havePreviousQuat = true;
+    const fs::path finalPath = dir / "suction_state.json";
+    const fs::path tempPath = dir / "suction_state.json.tmp";
+    {
+        std::ofstream out(tempPath, std::ios::trunc);
+        if (!out){
+            return;
+        }
+        out << std::setprecision(8)
+            << "{\"size_fr\":" << m_drillManager.suctionSizeFr()
+            << ",\"tracked\":" << (m_drillManager.m_suctionTracked ? "true" : "false")
+            << ",\"px\":" << tip.x() << ",\"py\":" << tip.y() << ",\"pz\":" << tip.z()
+            << ",\"qx\":" << tipRot.x << ",\"qy\":" << tipRot.y
+            << ",\"qz\":" << tipRot.z << ",\"qw\":" << tipRot.w
             << "}\n";
     }
     std::error_code renameError;
@@ -891,6 +984,7 @@ void afVolmetricDrillingPlugin::graphicsUpdate(){
     m_panelManager.update();
     if (m_rtxView){
         publishDrillVisualState();
+        publishSuctionVisualState();
     }
 }
 
@@ -903,6 +997,10 @@ void afVolmetricDrillingPlugin::physicsUpdate(double dt){
         if (m_drillManager.m_toolCursorList.size() > 0 && m_drillManager.m_toolCursorList[0]){
             m_drillManager.m_toolCursorList[0]->setDeviceLocalForce(0.0, 0.0, 0.0);
         }
+        if (m_drillManager.m_suctionDevice){
+            m_drillManager.m_suctionDevice->setForce(cVector3d(0.0, 0.0, 0.0));
+        }
+        m_suctionHoldSeconds = 0.0;
         if (m_drillManager.m_audioSource && m_drillManager.m_audioState == AudioState::PLAYING){
             m_drillManager.m_audioSource->stop();
             m_drillManager.m_audioState = AudioState::STOPPED;
@@ -1016,7 +1114,41 @@ void afVolmetricDrillingPlugin::physicsUpdate(double dt){
         m_hapticHoldSeconds = 0.0;
     }
 
+    if (m_drillManager.m_instrumentForceDrill.length() > 0.0 && m_mainCamera){
+        force.add(cTranspose(m_mainCamera->getLocalRot()) * m_drillManager.m_instrumentForceDrill);
+        double contactMax = m_drillManager.m_hapticDevice->getSpecifications().m_maxLinearForce;
+        if (contactMax > 0.5 && force.length() > contactMax){
+            force.mul(contactMax / force.length());
+        }
+    }
+
     m_drillManager.m_toolCursorList[0]->setDeviceLocalForce(force);
+    if (m_drillManager.m_suctionTracked && m_drillManager.m_suctionDevice && m_mainCamera){
+        // Same proxy-force path as the drill: world force, then into the stylus frame.
+        m_drillManager.computeSuctionInteractionForces();
+        cVector3d suctionForce = cTranspose(m_mainCamera->getLocalRot()) * m_drillManager.suctionVolumeForce();
+        const double kContactForce = 0.05;
+        const double kHoldSeconds = 0.012;
+        if (suctionForce.length() >= kContactForce){
+            m_heldSuctionForce = suctionForce;
+            m_suctionHoldSeconds = kHoldSeconds;
+        }
+        else if (m_suctionHoldSeconds > 0.0){
+            suctionForce = m_heldSuctionForce * (m_suctionHoldSeconds / kHoldSeconds);
+            m_suctionHoldSeconds = cMax(0.0, m_suctionHoldSeconds - dt);
+        }
+        double suctionMax = m_drillManager.m_suctionDevice->getSpecifications().m_maxLinearForce;
+        if (suctionMax > 0.5 && suctionForce.length() > suctionMax){
+            suctionForce.mul(suctionMax / suctionForce.length());
+        }
+        if (m_drillManager.m_instrumentForceSuction.length() > 0.0){
+            suctionForce.add(cTranspose(m_mainCamera->getLocalRot()) * m_drillManager.m_instrumentForceSuction);
+            if (suctionMax > 0.5 && suctionForce.length() > suctionMax){
+                suctionForce.mul(suctionMax / suctionForce.length());
+            }
+        }
+        m_drillManager.m_suctionDevice->setForce(suctionForce);
+    }
     m_drillManager.m_drillingPub->publishForceFeedback(force, force, m_worldPtr->getCurrentTimeStamp());
     double maxF = m_drillManager.m_hapticDevice->getSpecifications().m_maxLinearForce;
     double force_mag = cClamp(force.length(), 0.0, maxF);
@@ -1156,6 +1288,28 @@ void afVolmetricDrillingPlugin::updateButtons(){
     m_drillManager.m_camClutch = false;
     m_drillManager.m_deviceClutch = false;
     m_drillManager.m_camOrbitBurr = false;
+    m_drillManager.m_suctionClutch = false;
+    if (m_drillManager.m_suctionTracked && m_drillManager.m_suctionDevice
+        && m_drillManager.m_suctionDevice->isDeviceAvailable()){
+        bool suctionBtn1 = false; // stylus button 1 (switch index 1): double-tap recenters
+        bool suctionBtn2 = false; // stylus button 2 (switch index 0): hold clutches
+        m_drillManager.m_suctionDevice->getUserSwitch(1, suctionBtn1);
+        m_drillManager.m_suctionDevice->getUserSwitch(0, suctionBtn2);
+
+        const double doubleClickSec = 0.45;
+        double now = glfwGetTime();
+        if (suctionBtn1 && !m_suctionBtn1Prev){
+            if (m_suctionBtn1LastClickTime >= 0.0 && (now - m_suctionBtn1LastClickTime) <= doubleClickSec){
+                requestSuctionReposition();
+                m_suctionBtn1LastClickTime = -1.0;
+            }
+            else{
+                m_suctionBtn1LastClickTime = now;
+            }
+        }
+        m_suctionBtn1Prev = suctionBtn1;
+        m_drillManager.m_suctionClutch = suctionBtn2;
+    }
 
     if (m_footpedal.isAvailable()){
         m_drillManager.m_camClutch = m_footpedal.isCamClutchPressed();
@@ -1607,6 +1761,24 @@ void afVolmetricDrillingPlugin::requestDrillReposition()
     }
     showNotice("Drill repositioned");
     cerr << "INFO! DRILL REPOSITIONED INTO VIEW" << endl;
+}
+
+void afVolmetricDrillingPlugin::requestSuctionReposition()
+{
+    if (!m_volumeObject || !m_mainCamera){
+        showNotice("Cannot reposition suction (no volume or camera)");
+        return;
+    }
+
+    cVector3d dims = m_volumeObject->getDimensions();
+    if (!m_drillManager.snapSuctionToCameraView(m_volumeLookAt, dims, m_volumeObject->getLocalTransform())){
+        showNotice("Cannot reposition suction");
+        return;
+    }
+    m_heldSuctionForce.set(0.0, 0.0, 0.0);
+    m_suctionHoldSeconds = 0.0;
+    showNotice("Suction repositioned");
+    cerr << "INFO! SUCTION REPOSITIONED INTO VIEW" << endl;
 }
 
 afCameraPtr afVolmetricDrillingPlugin::findAndAppendCamera(string cam_name){
@@ -2290,6 +2462,7 @@ string afVolmetricDrillingPlugin::controlHelpText(bool paused) const
             "  Camera clutch          Hold 1  or  Stylus 1  or  Alt (HMD)\n"
             "  Drill (hold-to-run)    Middle pedal (b)  or  Space\n"
             "  Burr style / size      Left pedal (a) / Right pedal (c)\n"
+            "  Suction size           F  (7 / 5 / 3 Fr)\n"
             "  Place WiVRn scene      Hold F10 (drag) / F11 lap / F12 look\n"
             "  Device clutch          Hold Stylus 2\n"
             "  Look                   Arrow Keys\n"
@@ -2784,6 +2957,12 @@ void afVolmetricDrillingPlugin::keyboardUpdate(GLFWwindow *a_window, int a_key, 
             m_panelManager.setVisible(m_cameraPresetLabel, m_helpVisible);
         }
         showNotice(m_helpVisible ? "Controls shown" : "Controls hidden  (H)");
+        return;
+    }
+
+    if (a_action == GLFW_PRESS && a_key == GLFW_KEY_F && !ctrl && !alt && !shift){
+        const int fr = m_drillManager.cycleSuctionSize();
+        showNotice("Suction " + to_string(fr) + " Fr");
         return;
     }
 

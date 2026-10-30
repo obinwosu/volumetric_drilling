@@ -594,6 +594,10 @@ class Ui(QtWidgets.QWidget):
             for p in ("/usr/local/lib", "/usr/lib"):
                 if p not in ld.split(":"):
                     ld = f"{p}:{ld}" if ld else p
+            # Rebuilt libhdPhantom (opens Phantom2) must win over /usr/local/lib.
+            home_lib = str(pathlib.Path.home() / ".local" / "lib")
+            if home_lib not in ld.split(":"):
+                ld = f"{home_lib}:{ld}" if ld else home_lib
             env.insert("LD_LIBRARY_PATH", ld)
             # AMBF + VR on NVIDIA. Avoid PRIME offload when the desktop is
             # already driven by NVIDIA (causes see-through/frozen GL windows).

@@ -8,6 +8,7 @@ bodies:
 - BODY 4mm
 - BODY 6mm
 - BODY mastoidectomy_drill
+- BODY frazier_suction
 shaders:
   path: ./shaders/matcap/
   vertex: shader.vs
@@ -265,6 +266,43 @@ BODY mastoidectomy_drill:
       y: 0
   passive: false
   color: random
+  publish children names: false
+  publish joint names: false
+  publish joint positions: false
+# 7 Fr Frazier suction. Empty visual: the plugin draws the mesh and, once the
+# surgical camera exists, parks the tip on the left of the view. This pose is
+# only the fallback before that placement.
+BODY frazier_suction:
+  name: frazier_suction
+  mesh: ''
+  collision mesh: ''
+  collision mesh type: ''
+  mass: 0.0
+  inertia:
+    ix: 0.0
+    iy: 0.0
+    iz: 0.0
+  collision margin: 0.001
+  scale: 1.0
+  location:
+    position:
+      x: -3.993
+      y: 0.0
+      z: 0.0
+    orientation:
+      r: 0.0
+      p: -0.0
+      y: 0.9
+  inertial offset:
+    position:
+      x: 0
+      y: 0
+      z: 0
+    orientation:
+      r: 0
+      p: 0
+      y: 0
+  passive: false
   publish children names: false
   publish joint names: false
   publish joint positions: false

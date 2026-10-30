@@ -837,7 +837,7 @@ if __name__ == "__main__":
     parser.add_argument("--volume_prop_topic", default=ambf_prefix + "/plugin/volumetric_drilling/volume_info", type=str,)
 
     # CHANGED: This now includes multiple objects such as drill, main_camera, and potentially an anatomy object
-    parser.add_argument("--objects", default=["mastoidectomy_drill", "main_camera", "anatomy_object_name"], type=str, nargs="+")
+    parser.add_argument("--objects", default=["mastoidectomy_drill", "frazier_suction", "main_camera", "anatomy_object_name"], type=str, nargs="+")
     parser.add_argument("--drill_force_feedback_topic", default=ambf_prefix + "/plugin/volumetric_drilling/drill_force_feedback", type=str,)
 
     parser.add_argument("--sync", action="store_true")

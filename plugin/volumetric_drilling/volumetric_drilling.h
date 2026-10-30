@@ -95,6 +95,7 @@ protected:
     // occupancy. It does not change drilling.
     void publishRtxStatus(double now);
     void publishDrillVisualState();
+    void publishSuctionVisualState();
     void serviceRtxCamera();
     void serviceRtxPauseMenu();
     void applySimPause(bool paused);
@@ -162,6 +163,7 @@ protected:
     bool isDrillHoldRequested() const;
 
     void requestDrillReposition();
+    void requestSuctionReposition();
 
 private:
 
@@ -299,12 +301,16 @@ private:
     double m_btn1LastClickTime = -1.0;
     bool m_btn2Prev = false;
     double m_btn2LastClickTime = -1.0;
+    bool m_suctionBtn1Prev = false;
+    double m_suctionBtn1LastClickTime = -1.0;
     bool m_rtxView = false;
     bool m_rtxWindowSized = false;
     double m_rtxStatusTimer = 0.0;
     // Last contact force, held across the brief gap after a voxel is deleted.
     cVector3d m_heldHapticForce = cVector3d(0.0, 0.0, 0.0);
     double m_hapticHoldSeconds = 0.0;
+    cVector3d m_heldSuctionForce = cVector3d(0.0, 0.0, 0.0);
+    double m_suctionHoldSeconds = 0.0;
 
     // RTX deletions are queued in physics and published once per graphics frame.
     // A trial file clears named voxels through that same queue.

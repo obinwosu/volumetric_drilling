@@ -66,6 +66,7 @@ PART_LABELS = {
     "shaft_black": "shaft black",
     "shaft_grey": "shaft grey",
     "cannula": "irrigation cannula",
+    "suction": "Frazier suction",
 }
 EXTRA_DEFAULTS = {
     "burr": {
@@ -111,6 +112,13 @@ EXTRA_DEFAULTS = {
         "metalness": 0.97,
         "specular_reflection_roughness": 0.08,
         "specular_reflection_color": [1.0, 1.0, 1.0],
+    },
+    # Satin stainless. Same metal as the irrigation tube, duller and less bright.
+    "suction": {
+        "diffuse_reflection_color": [0.64, 0.66, 0.68],
+        "metalness": 0.84,
+        "specular_reflection_roughness": 0.26,
+        "specular_reflection_color": [0.82, 0.84, 0.86],
     },
     "lateral_cortex": {
         "diffuse_reflection_color": list(_BONE_IVORY),
