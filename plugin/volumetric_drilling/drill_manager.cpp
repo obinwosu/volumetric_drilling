@@ -269,7 +269,7 @@ int DrillManager::init(afWorldPtr a_worldPtr, CameraPanelManager* a_panelManager
     else{
         m_T_s_init = m_suctionBody->getLocalTransform();
         m_T_s = m_T_s_init;
-        const int sizes[] = {7, 5, 3};
+        const int sizes[] = {12, 7, 5, 3};
         for (int fr : sizes){
             string suctionPath = current_filepath + "/../../ADF/meshes/high_res/suction_"
                 + to_string(fr) + "fr.obj";
@@ -306,7 +306,7 @@ int DrillManager::init(afWorldPtr a_worldPtr, CameraPanelManager* a_panelManager
             cerr << "INFO! LOADED SUCTION " << fr << " Fr" << endl;
         }
         m_suctionIdx = 0;
-        m_suctionSizeFr = m_suctionSizesFr.empty() ? 7 : m_suctionSizesFr[0];
+        m_suctionSizeFr = m_suctionSizesFr.empty() ? 12 : m_suctionSizesFr[0];
         showActiveSuction();
     }
 
@@ -426,7 +426,7 @@ int DrillManager::init(afWorldPtr a_worldPtr, CameraPanelManager* a_panelManager
     else{
         m_suctionDevice = nullptr;
         cout << "INFO! No second haptic device. USB only shows one Geomagic, so the "
-             << "7 Fr suction stays at its start pose. Both devices have to be listed "
+             << "12 Fr suction stays at its start pose. Both devices have to be listed "
              << "by the Touch driver before launch." << endl;
     }
 

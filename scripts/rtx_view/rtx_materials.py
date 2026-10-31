@@ -23,24 +23,26 @@ KNOWN_NAMES = {
     "fff9db": "bone",
 }
 
-# One water sheet. Thin-walled, IOR 1: transmission and opacity, no refraction.
-# A single surface can sit clearer than stacked spheres, which added up to black.
+# Clear water. Opacity stays at 1: a partial opacity was the dark scrim.
+# Transmission does the see-through. A little white diffuse keeps a face that
+# misses the highlight from going black. The cool transmission tint is the
+# blue glimmer on the bone under the pool, not a blue body of water.
 WATER = {
-    "diffuse_reflection_color": [0.62, 0.82, 0.94],
-    "diffuse_reflection_weight": 0.15,
-    "diffuse_reflection_roughness": 0.0,
+    "diffuse_reflection_color": [1.0, 1.0, 1.0],
+    "diffuse_reflection_weight": 0.06,
+    "diffuse_reflection_roughness": 0.35,
     "metalness": 0.0,
-    "specular_reflection_weight": 0.65,
+    "specular_reflection_weight": 1.0,
     "specular_reflection_color": [1.0, 1.0, 1.0],
-    "specular_reflection_roughness": 0.03,
-    "specular_reflection_ior": 1.0,
+    "specular_reflection_roughness": 0.04,
+    "specular_reflection_ior": 1.33,
     "coat_weight": 0.0,
     "enable_specular_transmission": True,
-    "specular_transmission_weight": 0.85,
-    "specular_transmission_color": [0.78, 0.9, 1.0],
+    "specular_transmission_weight": 1.0,
+    "specular_transmission_color": [0.93, 0.96, 1.0],
     "thin_walled": True,
     "enable_opacity": True,
-    "geometry_opacity": 0.22,
+    "geometry_opacity": 1.0,
 }
 
 # Name-only parts. They are not a volume hex. The cortex entries are appearance
@@ -593,6 +595,64 @@ def bind_prim(viewer, prim, segment: str, document: dict):
         paths = {}
         viewer._segment_prims = paths
     paths.setdefault(segment, set()).add(str(prim.GetPath()))
+
+
+# Wet bone-dust paste. The bone itself is matte ivory (roughness 0.55, no coat).
+# This is the same family of color with a low roughness and a clear coat, so the
+# parcels read as a cloudy slurry instead of more bone.
+SLURRY = dict(FALLBACK)
+SLURRY.update({
+    "diffuse_reflection_color": [0.98, 0.93, 0.88],
+    "diffuse_reflection_weight": 0.7,
+    "specular_reflection_weight": 1.0,
+    "specular_reflection_color": [1.0, 0.98, 0.96],
+    "specular_reflection_roughness": 0.08,
+    "specular_reflection_ior": 1.4,
+    "coat_weight": 0.7,
+    "coat_color": [1.0, 0.97, 0.94],
+    "coat_roughness": 0.03,
+    "coat_ior": 1.35,
+})
+
+
+PASTE_PATH = HERE / "paste_look.json"
+
+
+def slurry_params() -> dict:
+    """Wet-paste shader. ``paste_look.json`` overrides the defaults while a view is open."""
+    params = dict(SLURRY)
+    try:
+        saved = json.loads(PASTE_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        return params
+    if isinstance(saved, dict):
+        params.update(saved)
+    return params
+
+
+def bind_slurry(viewer, prim):
+    """Wet paste on the debris spheres. Display color alone was still the bone shader."""
+    apply_params(viewer, "slurry", slurry_params())
+    bind_prim(viewer, prim, "slurry", getattr(viewer, "_material_document", None) or {"segments": {}, "names": {}})
+
+
+# Bone the sheet has reached. It stays glossy. Suction removes the water, not this.
+WET_BONE = dict(FALLBACK)
+WET_BONE.update({
+    "diffuse_reflection_color": [1.0, 0.976, 0.859],
+    "specular_reflection_roughness": 0.04,
+    "specular_reflection_ior": 1.4,
+    "coat_weight": 0.85,
+    "coat_color": [1.0, 1.0, 1.0],
+    "coat_roughness": 0.03,
+    "coat_ior": 1.33,
+})
+
+
+def bind_wet_bone(viewer, prim):
+    """Glossy bone under the film. The latch is the mesh, so this material does not fade."""
+    apply_params(viewer, "wet_bone", dict(WET_BONE))
+    bind_prim(viewer, prim, "wet_bone", getattr(viewer, "_material_document", None) or {"segments": {}, "names": {}})
 
 
 def bind_water(viewer, prim):

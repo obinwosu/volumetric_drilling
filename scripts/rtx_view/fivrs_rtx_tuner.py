@@ -7,7 +7,8 @@ simulator pause menu uses. The light panel writes tuner_light.json. The
 structure panel writes tuner_materials.json, keyed by segmentation hex and
 by a regular name such as bone. The lateral cortex panel writes
 tuner_cortex_mask.json. The shaders panel writes tuner_markings.json. The
-irrigation panel writes tuner_irrigation.json. Visibility stays in this window.
+irrigation panel writes tuner_irrigation.json. The paste panel writes
+paste_look.json and the grain size in debris.json. Visibility stays in this window.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ import camera_views
 import cortex_masks
 import markings
 import rtx_materials
+from bone_debris import CONFIG_PATH as DEBRIS_PATH, load_config as load_debris
 from fluid.irrigation_bench import (
     DRAW_SPHERES,
     DRAW_TUBE,
@@ -938,6 +940,115 @@ def _draw_irrigation_panel(imgui, viewer, irrigation, status):
     imgui.end()
 
 
+def _paste_smear(center, right, up, radius_mm, clump_mm):
+    rng = np.random.default_rng(4)
+    count = 48
+    angle = rng.random(count) * (2.0 * math.pi)
+    span = np.sqrt(rng.random(count)) * (2.2 * MM_TO_SIM)
+    points = (
+        np.asarray(center, dtype=np.float64)
+        + np.asarray(right, dtype=np.float64) * (np.cos(angle) * span)[:, None]
+        + np.asarray(up, dtype=np.float64) * (np.sin(angle) * span * 0.6)[:, None]
+    )
+    sizes = float(radius_mm) + (float(clump_mm) - float(radius_mm)) * np.sqrt(rng.random(count))
+    return points.astype(np.float32), (sizes * MM_TO_SIM).astype(np.float32)
+
+
+def _write_paste(state) -> None:
+    look = rtx_materials.slurry_params()
+    look["diffuse_reflection_color"] = [float(channel) for channel in state["color"]]
+    look["specular_reflection_roughness"] = float(state["roughness"])
+    look["coat_weight"] = float(state["coat"])
+    temporary = rtx_materials.PASTE_PATH.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(look, indent=2) + "\n")
+    temporary.replace(rtx_materials.PASTE_PATH)
+    try:
+        saved = json.loads(DEBRIS_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        saved = {}
+    if not isinstance(saved, dict):
+        saved = {}
+    saved["radius_mm"] = float(state["radius_mm"])
+    saved["clump_mm"] = float(state["clump_mm"])
+    saved["color"] = look["diffuse_reflection_color"]
+    temporary = DEBRIS_PATH.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(saved, indent=2) + "\n")
+    temporary.replace(DEBRIS_PATH)
+    state["look"] = look
+
+
+def _save_tuner_picture(viewer) -> str:
+    path = pathlib.Path("/tmp/fivrs-rtx/paste_preview.png")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frame = viewer.get_frame()
+    pixels = frame.numpy() if hasattr(frame, "numpy") else np.asarray(frame)
+    from PIL import Image
+
+    Image.fromarray(pixels).save(path)
+    return str(path)
+
+
+def _draw_paste_panel(imgui, viewer, state):
+    imgui.set_next_window_pos(imgui.ImVec2(16, 560), imgui.Cond_.first_use_ever)
+    imgui.set_next_window_size(imgui.ImVec2(340, 300), imgui.Cond_.first_use_ever)
+    imgui.begin("Paste")
+    imgui.text("Bone-dust paste")
+    imgui.text_disabled("Shown on the bone under the burr. A running microscope follows the file.")
+    changed, state["show"] = imgui.checkbox("Show smear", bool(state["show"]))
+    touched, state["radius_mm"] = _slider(imgui, "Small grain", state["radius_mm"], 0.05, 1.2, "%.2f mm")
+    changed |= touched
+    touched, state["clump_mm"] = _slider(
+        imgui, "Large grain", state["clump_mm"], state["radius_mm"], 1.4, "%.2f mm"
+    )
+    changed |= touched
+    touched, state["roughness"] = _slider(imgui, "Roughness", state["roughness"], 0.02, 0.6, "%.2f")
+    changed |= touched
+    touched, state["coat"] = _slider(imgui, "Wet coat", state["coat"], 0.0, 1.0, "%.2f")
+    changed |= touched
+    touched, color = imgui.color_edit3("Color", state["color"])
+    if touched:
+        state["color"] = [float(channel) for channel in color]
+        changed = True
+    if changed:
+        state["clump_mm"] = max(float(state["clump_mm"]), float(state["radius_mm"]))
+        _write_paste(state)
+        rtx_materials.apply_params(viewer, "slurry", state["look"])
+        state["status"] = "Wrote paste_look.json and debris.json"
+    if imgui.button("Save picture"):
+        try:
+            state["status"] = _save_tuner_picture(viewer)
+        except Exception as exc:
+            state["status"] = f"Picture failed: {exc}"
+    imgui.text_disabled(state["status"])
+    imgui.end()
+
+
+def _draw_paste(viewer, pose, state) -> None:
+    if pose is None or not state["show"]:
+        if state.get("visible"):
+            viewer.log_points("swatch/paste", None, hidden=True)
+            state["visible"] = False
+        return
+    bone = np.asarray(pose["center"], dtype=np.float64) + np.asarray(pose["forward"], dtype=np.float64) * (
+        STANDOFF_MM * MM_TO_SIM
+    )
+    lift = -np.asarray(pose["forward"], dtype=np.float64) * (0.4 * MM_TO_SIM)
+    points, radii = _paste_smear(bone + lift, pose["right"], pose["up"], state["radius_mm"], state["clump_mm"])
+    viewer.log_points(
+        "swatch/paste",
+        wp.array(points, dtype=wp.vec3),
+        radii=wp.array(radii, dtype=wp.float32),
+        colors=tuple(float(channel) for channel in state["color"]),
+    )
+    state["visible"] = True
+    if not state.get("bound"):
+        instancer = viewer._ensure_point_batch_primitive(viewer._qualify("swatch/paste"))
+        sphere = instancer.GetPrim().GetChild("sphere") if instancer is not None else None
+        if sphere:
+            rtx_materials.bind_slurry(viewer, sphere)
+            state["bound"] = True
+
+
 def main():
     _patch_open_usd()
     _quiet_stock_panels()
@@ -1029,11 +1140,26 @@ def main():
     viewer.register_ui_callback(
         lambda imgui: _draw_irrigation_panel(imgui, viewer, irrigation, status), position="free"
     )
+    debris = load_debris()
+    slurry = rtx_materials.slurry_params()
+    paste = {
+        "show": True,
+        "visible": False,
+        "bound": False,
+        "radius_mm": float(debris["radius_mm"]),
+        "clump_mm": float(debris["clump_mm"]),
+        "roughness": float(slurry["specular_reflection_roughness"]),
+        "coat": float(slurry["coat_weight"]),
+        "color": [float(channel) for channel in slurry["diffuse_reflection_color"]],
+        "look": slurry,
+        "status": "Drag a slider. Save picture writes a png you can drop in chat.",
+    }
+    viewer.register_ui_callback(lambda imgui: _draw_paste_panel(imgui, viewer, paste), position="free")
     print(
         f"Tuner ready. Views {camera_views.VIEWS_PATH.name}  light {SAVE_PATH.name}  "
         f"materials {rtx_materials.MATERIALS_PATH.name}  "
         f"cortex {cortex_masks.CONFIG_PATH.name}  shaders {markings.CONFIG_PATH.name}  "
-        f"irrigation {IRRIGATION_PATH.name}",
+        f"irrigation {IRRIGATION_PATH.name}  paste {rtx_materials.PASTE_PATH.name}",
         flush=True,
     )
     clock = time.perf_counter()
@@ -1061,6 +1187,8 @@ def main():
             rtx_materials.apply_params(viewer, "water", _ensure_water(irrigation))
             bench.step(dt, pose["center"], quat_aiming_at_bone(pose["forward"], pose["right"]))
             bench.draw(viewer)
+        _draw_paste(viewer, pose, paste)
+        rtx_materials.flush_materials(viewer)
         viewer.end_frame()
         if viewer._window is not None:
             fps = (1.0 / dt) if dt > 1e-4 else 0.0

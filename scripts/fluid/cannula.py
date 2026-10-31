@@ -18,9 +18,8 @@ import numpy as np
 
 MM_TO_SIM = 0.01007
 MESH_MM = 0.01
-# Pulls the geometric tangent slightly inside the burr so the jet meets the
-# cutting surface instead of skating past it. Same value for every size.
-AIM_INSET_MM = 0.35
+# The jet clears the burr and is aimed this far past the surface, onto the bone.
+AIM_PAST_MM = 1.5
 SIZES = (1, 2, 4, 6)
 # Clip on the 6.06 mm-radius neck, just proximal to the second taper.
 CLIP_MM = {1: 134.0, 2: 124.0, 4: 74.0, 6: 44.0}
@@ -363,31 +362,34 @@ def burr_radius(size_mm: int) -> float:
     return 0.5 * float(size_mm) * MM_TO_SIM
 
 
-def aim_point(outlet, radius: float, inset_mm: float = AIM_INSET_MM) -> np.ndarray:
-    """Point on the cannula side of the burr, just inside a geometric tangent."""
+def aim_point(outlet, radius: float, past_mm: float = AIM_PAST_MM) -> np.ndarray:
+    """Point just outside the burr, beyond the tangent, toward the bone."""
     outlet = np.asarray(outlet, dtype=np.float64).reshape(3)
-    inset = max(0.0, float(inset_mm)) * MM_TO_SIM
-    # Keep the aim near the surface. A fixed inset would bury the jet in a 1 mm burr.
-    aim_radius = max(float(radius) - inset, 0.72 * float(radius))
+    radius = float(radius)
     origin = outlet[:2]
     distance = float(np.linalg.norm(origin))
-    if distance <= aim_radius + 1e-8:
+    if distance <= radius + 1e-8:
         return np.zeros(3, dtype=np.float64)
     perpendicular = np.array((-origin[1], origin[0]), dtype=np.float64)
-    reach = float(np.sqrt(max(distance * distance - aim_radius * aim_radius, 0.0)))
-    base = (aim_radius * aim_radius) * origin
-    offset = aim_radius * reach * perpendicular
+    reach = float(np.sqrt(max(distance * distance - radius * radius, 0.0)))
+    base = (radius * radius) * origin
+    offset = radius * reach * perpendicular
     scale = distance * distance
     first = (base + offset) / scale
     second = (base - offset) / scale
     chosen = first if first[1] >= second[1] else second
-    return np.array((chosen[0], chosen[1], 0.0), dtype=np.float64)
+    length = float(np.linalg.norm(chosen))
+    if length < 1e-8:
+        return np.array((chosen[0], chosen[1], 0.0), dtype=np.float64)
+    past = max(0.0, float(past_mm)) * MM_TO_SIM
+    point = chosen + (chosen / length) * past
+    return np.array((point[0], point[1], 0.0), dtype=np.float64)
 
 
-def local_frame(size_mm: int, inset_mm: float = AIM_INSET_MM) -> dict:
+def local_frame(size_mm: int, past_mm: float = AIM_PAST_MM) -> dict:
     outlet = np.array(spec(size_mm)["outlet"], dtype=np.float64, copy=True)
     radius = burr_radius(size_mm)
-    target = aim_point(outlet, radius, inset_mm)
+    target = aim_point(outlet, radius, past_mm)
     emit = target - outlet
     length = float(np.linalg.norm(emit))
     if length < 1e-8:
@@ -397,11 +399,11 @@ def local_frame(size_mm: int, inset_mm: float = AIM_INSET_MM) -> dict:
     return {"outlet": outlet, "target": target, "emit": emit, "radius": radius}
 
 
-def cannula_frame(tip, quat, size_mm: int, inset_mm: float = AIM_INSET_MM) -> dict:
-    """World nozzle and jet. The nozzle is the mesh opening. The jet aims at the burr."""
+def cannula_frame(tip, quat, size_mm: int, past_mm: float = AIM_PAST_MM) -> dict:
+    """World nozzle and jet. The nozzle is the mesh opening. The jet clears the burr."""
     from fluid.outlet import quat_axes
 
-    local = local_frame(size_mm, inset_mm)
+    local = local_frame(size_mm, past_mm)
     axes = quat_axes(quat)
     tip = np.asarray(tip, dtype=np.float64).reshape(3)
     outlet = tip + axes @ local["outlet"]

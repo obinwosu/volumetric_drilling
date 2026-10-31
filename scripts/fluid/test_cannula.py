@@ -57,7 +57,7 @@ def test_tube_stays_outside_the_shaft():
         assert deepest_mm < 0.2, size
 
 
-def test_jet_leaves_the_nozzle_and_meets_the_burr():
+def test_jet_clears_the_burr_and_lands_just_past_it():
     tip = np.array((0.2, -0.4, 0.1))
     quat = (0.0, 0.0, 0.0, 1.0)
     for size in SIZES:
@@ -67,8 +67,8 @@ def test_jet_leaves_the_nozzle_and_meets_the_burr():
         assert travel > 0.0
         closest = frame["outlet"] + frame["emit"] * max(0.0, -float(np.dot(frame["outlet"] - tip, frame["emit"])))
         gap = float(np.linalg.norm(closest - tip))
-        assert gap < frame["radius"]
-        assert gap > 0.55 * frame["radius"]
+        assert gap > frame["radius"]
+        assert gap < frame["radius"] + 2.0 * 0.01007
 
 
 def test_pose_carries_the_nozzle():
@@ -86,6 +86,6 @@ def test_pose_carries_the_nozzle():
 if __name__ == "__main__":
     test_each_size_has_its_own_metal_mesh()
     test_tube_stays_outside_the_shaft()
-    test_jet_leaves_the_nozzle_and_meets_the_burr()
+    test_jet_clears_the_burr_and_lands_just_past_it()
     test_pose_carries_the_nozzle()
     print("cannula tests passed")

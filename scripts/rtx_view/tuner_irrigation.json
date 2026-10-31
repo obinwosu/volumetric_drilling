@@ -6,35 +6,35 @@
   "film_ms": 20.0,
   "offset_mm": 2.0,
   "proximal_mm": 0.0,
-  "opacity": 0.277,
+  "opacity": 1.0,
   "enabled": true,
   "water": {
     "diffuse_reflection_color": [
-      0.619608,
-      0.819608,
-      0.941176
+      1.0,
+      1.0,
+      1.0
     ],
-    "diffuse_reflection_weight": 0.149,
+    "diffuse_reflection_weight": 0.06,
     "diffuse_reflection_roughness": 0.0,
     "metalness": 0.0,
-    "specular_reflection_weight": 0.65,
+    "specular_reflection_weight": 1.0,
     "specular_reflection_color": [
       1.0,
       1.0,
       1.0
     ],
-    "specular_reflection_roughness": 0.03,
-    "specular_reflection_ior": 1.0,
+    "specular_reflection_roughness": 0.04,
+    "specular_reflection_ior": 1.33,
     "coat_weight": 0.0,
     "enable_specular_transmission": true,
     "specular_transmission_weight": 1.0,
     "specular_transmission_color": [
-      0.78,
-      0.9,
+      0.93,
+      0.96,
       1.0
     ],
     "thin_walled": true,
     "enable_opacity": true,
-    "geometry_opacity": 0.277
+    "geometry_opacity": 1.0
   }
 }

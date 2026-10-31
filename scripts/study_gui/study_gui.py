@@ -715,7 +715,7 @@ class Ui(QtWidgets.QWidget):
         if not self._fluid_process.waitForStarted(5000):
             self.print_info(f"ERROR! Fluid jet did not start: {self._fluid_process.errorString()}")
             return
-        self.print_info("Starting irrigation jet. Hold Space in the RTX window to shoot it at the bone.")
+        self.print_info("Starting irrigation jet. It runs while the drill is on.")
 
     def _stop_fluid(self):
         if self._fluid_process.state() == QProcess.NotRunning:

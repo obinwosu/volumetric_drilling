@@ -18,6 +18,10 @@ from fluid.irrigation_bench import (
     IrrigationBench,
     cylinder_mesh,
     first_hit,
+    splash_mesh,
+    splash_volume_mm3,
+    STREAM_SLICES,
+    stream_mesh,
     load_irrigation,
     packed_column,
     quat_aiming_at_bone,
@@ -115,6 +119,33 @@ def test_zero_film_does_not_pool():
     assert int(np.count_nonzero(bench.film_age >= 0.0)) == 0
 
 
+def test_stream_stays_within_twenty_percent_of_the_set_width():
+    start = np.zeros(3)
+    end = np.array((20.0 * MM_TO_SIM, 0.0, 0.0))
+    radius = 0.5 * 0.58 * MM_TO_SIM
+    mesh = stream_mesh(start, end, radius, time=0.37, cc_per_s=81.0)
+    assert mesh is not None
+    slices = STREAM_SLICES
+    radial = np.sqrt(mesh["verts"][:, 1] ** 2 + mesh["verts"][:, 2] ** 2)
+    assert float(radial.max()) <= radius * 1.20 + 1e-5
+    assert float(radial.min()) >= radius * 0.80 - 1e-5
+    assert float(radial.max() - radial.min()) > 0.05 * radius
+    nose = mesh["verts"][:slices].mean(axis=0)
+    tail = mesh["verts"][-slices:].mean(axis=0)
+    assert float(np.linalg.norm(nose - start)) < 1e-4
+    assert float(np.linalg.norm(tail - end)) < 1e-4
+    assert len(mesh["verts"]) <= 18 * slices
+
+
+def test_splash_is_one_to_two_cubic_millimetres():
+    volume = splash_volume_mm3()
+    assert 1.0 <= volume <= 2.0
+    mesh = splash_mesh(np.zeros(3), np.array((0.0, 0.0, 1.0)))
+    assert mesh is not None
+    assert len(mesh["verts"]) < 200
+    assert int(mesh["tris"].max()) < len(mesh["verts"])
+
+
 def test_flow_changes_how_fast_the_beads_move():
     assert visual_scroll_mm_s(CC_PER_S) == 40.0
     assert visual_scroll_mm_s(2.0 * CC_PER_S) == 80.0
@@ -162,6 +193,8 @@ if __name__ == "__main__":
     test_long_gap_still_hits()
     test_film_is_gone_after_tens_of_milliseconds()
     test_zero_film_does_not_pool()
+    test_splash_is_one_to_two_cubic_millimetres()
+    test_stream_stays_within_twenty_percent_of_the_set_width()
     test_flow_changes_how_fast_the_beads_move()
     test_save_irrigation_round_trips()
     test_jet_aims_at_the_bone()

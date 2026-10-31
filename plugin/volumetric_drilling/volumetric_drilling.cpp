@@ -303,7 +303,7 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
     }
     else{
         cerr << "WARNING! NO FOOTPEDAL /dev/input DEVICE OPEN "
-             << "(using keyboard a/b/c, Space hold-drill, + key 1 cam-clutch)\n";
+             << "(using keyboard a/b/c, + key 1 cam-clutch)\n";
     }
     cerr << "INFO! Ikkegol pedals: a=diamond/cutting, b or Space=hold drill, c=size; key 1=cam clutch" << endl;
 
@@ -1281,8 +1281,8 @@ void afVolmetricDrillingPlugin::updateButtons(){
         m_drillManager.cycleDrillTypes();
     }
 
-    // Hold-to-run drill: device pedal, keyboard 'b', or Space (RTX window included).
-    m_drillManager.m_isOn = m_footpedal.isDrillOn() || xDrillHeld || isDrillHoldRequested();
+    // Hold-to-run drill: device pedal or keyboard 'b'.
+    m_drillManager.m_isOn = m_footpedal.isDrillOn() || xDrillHeld;
     m_drillManager.updateBurrLabel();
 
     m_drillManager.m_camClutch = false;
@@ -1673,33 +1673,6 @@ bool afVolmetricDrillingPlugin::isDigit1Held() const
         }
     }
     return false;
-}
-
-bool afVolmetricDrillingPlugin::isDrillHoldRequested() const
-{
-    Display* dpy = glfwGetX11Display();
-    if (dpy){
-        KeyCode code = XKeysymToKeycode(dpy, XK_space);
-        if (isXKeycodeHeld(code)){
-            return true;
-        }
-    }
-    auto winSpace = [](GLFWwindow* win) -> bool {
-        return win && (glfwGetKey(win, GLFW_KEY_SPACE) == GLFW_PRESS);
-    };
-    if (m_mainCamera && winSpace(m_mainCamera->m_window)){
-        return true;
-    }
-    if (m_stereoCamera && winSpace(m_stereoCamera->m_window)){
-        return true;
-    }
-    for (const auto& kv : m_cameras){
-        if (kv.second && winSpace(kv.second->m_window)){
-            return true;
-        }
-    }
-    std::error_code existsError;
-    return fs::exists("/tmp/fivrs-rtx/drill_hold", existsError);
 }
 
 bool afVolmetricDrillingPlugin::isLetterKeyHeld(int glfwKey) const

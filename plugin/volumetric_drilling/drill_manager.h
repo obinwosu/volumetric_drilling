@@ -182,7 +182,7 @@ public:
     std::vector<cMultiMesh*> m_suctionMeshes;
     std::vector<int> m_suctionSizesFr;
     int m_suctionIdx = 0;
-    int m_suctionSizeFr = 7;
+    int m_suctionSizeFr = 12;
     cTransform m_T_s, m_T_s_init;
 
     // Both styli share this mapping. A device-meter on either Geomagic

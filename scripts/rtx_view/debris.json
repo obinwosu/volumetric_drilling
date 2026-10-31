@@ -1,0 +1,19 @@
+{
+  "enabled": true,
+  "emission_scale": 1.0,
+  "parcels_per_mm3": 8.0,
+  "max_active": 480,
+  "max_spawn_per_frame": 24,
+  "lifetime_s": 8.0,
+  "speed_mm_s": 2.0,
+  "drag_per_s": 3.0,
+  "scatter": 0.25,
+  "spread_voxels": 0.45,
+  "radius_mm": 0.22,
+  "clump_mm": 0.5,
+  "shaft_bias": 0.0,
+  "flute_bias": 0.0,
+  "gravity_mm_s2": 80.0,
+  "settle_s": 0.18,
+  "color": [0.98, 0.93, 0.88]
+}

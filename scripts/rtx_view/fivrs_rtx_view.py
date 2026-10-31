@@ -31,6 +31,7 @@ import yaml
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
+import bone_debris
 import cortex_masks
 import markings
 import pause_menu
@@ -45,6 +46,8 @@ from fluid.irrigation_bench import (
     water_from_irrigation,
 )
 from fluid.occupancy import VolumeFrame
+from fluid.surface_film import SurfaceFilm
+from fluid.surface_sph import SurfaceSph, film_surface
 from fluid.rtx_stream import PrescribedStream
 from fluid.sph_dump import DEFAULT_PATH as SPH_DUMP, dump_is_fresh, read_positions
 from fluid.water_mesh import water_surface
@@ -867,16 +870,6 @@ def _set_exposure(viewer, scale):
     print(f"RTX exposure {viewer._exposure:.2f}   [ darker   ] brighter   \\ reset", flush=True)
 
 
-def _set_drill_hold(held: bool) -> None:
-    """Hold-to-run flag the simulator and the fluid inlet both read."""
-    path = RUNTIME / "drill_hold"
-    if held:
-        RUNTIME.mkdir(parents=True, exist_ok=True)
-        path.write_text("hold\n")
-    else:
-        path.unlink(missing_ok=True)
-
-
 def _bind_exposure_keys(viewer):
     """Attach once the presentation window exists.
 
@@ -895,9 +888,6 @@ def _bind_exposure_keys(viewer):
             pause_menu.toggle(viewer)
             return True
         if pause_menu.is_open(viewer):
-            return True
-        if symbol == key.SPACE:
-            _set_drill_hold(True)
             return True
         if symbol == key.BRACKETLEFT:
             _set_exposure(viewer, viewer._exposure / 1.25)
@@ -920,21 +910,11 @@ def _bind_exposure_keys(viewer):
             return None
         return True
 
-    def on_key_release(symbol, modifiers):
-        del modifiers
-        if symbol == key.SPACE:
-            _set_drill_hold(False)
-            return True
-        return None
-
-    def on_deactivate():
-        _set_drill_hold(False)
-
-    window.push_handlers(on_key_press=on_key_press, on_key_release=on_key_release, on_deactivate=on_deactivate)
+    window.push_handlers(on_key_press=on_key_press)
     viewer._exposure_keys_bound = True
     print(
         "RTX lighting keys ready: [ darker   ] brighter   \\ reset   "
-        "- narrower cone   = wider cone   L distant beam   Space hold drill   Ctrl+P pause",
+        "- narrower cone   = wider cone   L distant beam   Ctrl+P pause",
         flush=True,
     )
 
@@ -1772,7 +1752,7 @@ def _read_suction_state():
 
 
 def _log_suction(viewer):
-    """7 Fr on the distal tip. 5 Fr and 3 Fr stay unloaded from the view until F cycles them."""
+    """12 Fr on the distal tip. Smaller sizes stay unloaded until F cycles them."""
     state = _read_suction_state()
     pose = _visual_pose(state) if state else None
     if pose is None:
@@ -1784,7 +1764,7 @@ def _log_suction(viewer):
     viewer._suction_quat = quat
     pose = {"position": pose["position"], "quat": tuple(float(v) for v in quat)}
     try:
-        size = int(state.get("size_fr") or 7)
+        size = int(state.get("size_fr") or 12)
     except (AttributeError, TypeError, ValueError):
         size = 7
     meshes = (getattr(viewer, "_instrument_meshes", {}) or {}).get("suctions", {})
@@ -1844,12 +1824,12 @@ def _sph_snapshot(viewer):
     }
 
 
-def _publish_water_mesh(viewer, mesh, hidden):
+def _publish_water_mesh(viewer, mesh, hidden, cull=False):
     """Author the sheet, bind water, then let the RTX viewer publish the copy."""
     points = wp.array(np.ascontiguousarray(mesh["verts"]), dtype=wp.vec3)
     indices = wp.array(np.ascontiguousarray(mesh["tris"].reshape(-1)), dtype=wp.int32)
     normals = wp.array(np.ascontiguousarray(mesh["normals"]), dtype=wp.vec3)
-    kwargs = dict(normals=normals, hidden=hidden, backface_culling=False, dynamic=True)
+    kwargs = dict(normals=normals, hidden=hidden, backface_culling=bool(cull), dynamic=True)
     if not getattr(viewer, "_water_mesh_bound", False):
         from newton._src.viewer.viewer_usd import ViewerUSD
 
@@ -1924,10 +1904,62 @@ def _draw_sph(viewer) -> bool:
     return True
 
 
+def _debris_zones(viewer) -> dict:
+    """Where live irrigation and the suction tip remove paste. No drawn sphere."""
+    from fluid.irrigation_bench import SPLASH_CLEAR_MM
+
+    spheres = []
+    segment = None
+    bench = getattr(viewer, "_irrigation_bench", None)
+    drilling = _read_drill_state()
+    if (
+        bench is not None
+        and bench.last_hit is not None
+        and bench.last_frame is not None
+        and _emit_requested(drilling)
+    ):
+        hit = np.asarray(bench.last_hit, dtype=np.float64)
+        spheres.append((hit, float(SPLASH_CLEAR_MM) * MM_TO_SIM))
+        outlet = np.asarray(bench.last_frame["outlet"], dtype=np.float64)
+        jet_r = 0.5 * float((bench.settings or {}).get("jet_mm") or 1.0) * MM_TO_SIM
+        segment = (outlet, hit, max(jet_r, 0.35 * MM_TO_SIM))
+    suction = _read_suction_state()
+    if suction and "px" in suction:
+        try:
+            tip = np.array(
+                [float(suction["px"]), float(suction["py"]), float(suction["pz"])],
+                dtype=np.float64,
+            )
+            radius = bone_debris.suction_radius_mm(float(suction.get("size_fr") or 12)) * MM_TO_SIM
+            spheres.append((tip, radius))
+        except (TypeError, ValueError):
+            pass
+    sph = getattr(viewer, "_surface_sph", None)
+    return {"spheres": spheres, "segment": segment, "film": sph}
+
+
+def _step_bone_debris(viewer, dt) -> None:
+    """Dust from this frame's removals. Irrigation and suction can clear it."""
+    debris = getattr(viewer, "_bone_debris", None)
+    if debris is None:
+        return
+    state = _read_drill_state()
+    if state and state.get("paused"):
+        dt = 0.0
+    pose = _visual_pose(state) if state else None
+    spin = float(getattr(viewer, "_burr_spin", 0.0))
+    bench = getattr(viewer, "_irrigation_bench", None)
+    down = getattr(bench, "down", None) if bench is not None else None
+    zones = _debris_zones(viewer)
+    if pose is None:
+        debris.step(dt, None, None, spin, down, zones)
+    else:
+        debris.step(dt, pose["position"], pose["quat"], spin, down, zones)
+    debris.draw(viewer)
+
+
 def _emit_requested(state) -> bool:
-    if state and state.get("on"):
-        return True
-    return (RUNTIME / "drill_hold").is_file()
+    return bool(state and state.get("on"))
 
 
 def _draw_live_irrigation(viewer, worker, dt) -> bool:
@@ -1958,10 +1990,82 @@ def _draw_live_irrigation(viewer, worker, dt) -> bool:
     if bench.last_hit is None:
         bench.hide(viewer)
         return False
-    bench.draw(viewer)
+    bench.draw(viewer, splash=False)
     viewer._sph_draw_ms = bench.draw_ms
     viewer._water_tris = 0
     return True
+
+
+def _suction_tip():
+    suction = _read_suction_state()
+    if not suction or "px" not in suction:
+        return None, 0.0
+    try:
+        tip = np.array(
+            [float(suction["px"]), float(suction["py"]), float(suction["pz"])],
+            dtype=np.float64,
+        )
+        radius = bone_debris.suction_radius_mm(float(suction.get("size_fr") or 12))
+    except (TypeError, ValueError):
+        return None, 0.0
+    return tip, radius
+
+
+def _draw_surface_film(viewer, sph, view) -> None:
+    """One sheet. The particles are not drawn."""
+    _hide_sph_points(viewer)
+    mesh = film_surface(sph.positions(), view)
+    started = time.perf_counter()
+    if mesh is None:
+        _hide_water(viewer)
+        viewer._water_tris = 0
+    else:
+        _publish_water_mesh(viewer, mesh, hidden=False, cull=True)
+        viewer._water_tris = int(len(mesh["tris"]))
+    viewer._water_mesh_ms = (time.perf_counter() - started) * 1e3
+
+
+def _step_surface_sph(viewer, worker, dt) -> None:
+    """Particles on the cut bone. The picture is a thin film, not the particles."""
+    sph = getattr(viewer, "_surface_sph", None)
+    bench = getattr(viewer, "_irrigation_bench", None)
+    if sph is None or bench is None:
+        return
+    occupied = getattr(worker, "_occupied", None)
+    if occupied is not None:
+        bench.occupied = occupied
+    settings = getattr(viewer, "_irrigation", None) or load_irrigation(IRRIGATION_PATH)
+    state = _read_drill_state()
+    if state and state.get("paused"):
+        dt = 0.0
+    hit = None
+    if settings.get("draw") != DRAW_SPHERES and _emit_requested(state) and bench.last_hit is not None:
+        hit = bench.last_hit
+    tip, radius = _suction_tip()
+    cam = getattr(viewer, "_fivrs_cam", None)
+    if cam is not None:
+        view = np.asarray(cam[3], dtype=np.float64)
+        gravity = -np.asarray(cam[2], dtype=np.float64)
+    else:
+        emit = (bench.last_frame or {}).get("emit")
+        view = np.asarray(emit if emit is not None else (0.0, 0.0, -1.0), dtype=np.float64)
+        gravity = np.asarray(bench.down, dtype=np.float64)
+    sph.step(
+        dt,
+        hit,
+        float(settings.get("jet_mm") or 0.58),
+        view,
+        gravity,
+        frame=bench.frame,
+        occupied=bench.occupied,
+        suction_tip=tip,
+        suction_radius_mm=radius,
+    )
+    # Keep the old square sheet hidden. This film replaces it.
+    old = getattr(viewer, "_surface_film", None)
+    if old is not None and (old._sheet_visible or old._wet_visible):
+        old.draw(viewer)
+    _draw_surface_film(viewer, sph, view)
 
 
 def _visual_pose(state):
@@ -2281,7 +2385,7 @@ def main():
         )
         instrument["cannulas"][size] = mesh_name
         print(f"Cannula {size} mm {len(cannula_tris)} tris, stainless", flush=True)
-    for french in (7, 5, 3):
+    for french in (12, 7, 5, 3):
         suction_path = MESH_DIR / f"suction_{french}fr.obj"
         try:
             suction_points, suction_tris = load_cannula_obj(suction_path)
@@ -2359,6 +2463,10 @@ def main():
     )
     viewer._irrigation_bench.apply(getattr(viewer, "_irrigation", None) or load_irrigation(IRRIGATION_PATH))
     viewer._irrigation_bench.prime(viewer)
+    viewer._surface_film = SurfaceFilm()
+    viewer._surface_film.prime(viewer)
+    viewer._surface_sph = SurfaceSph()
+    viewer._bone_debris = bone_debris.BoneDebris(viewer._irrigation_bench.frame)
     uploads = [
         _begin_upload(
             _prepare_blocks(blocks, bridge.volume, None, appearance),
@@ -2485,6 +2593,9 @@ def main():
                     }
                 )
             worker.submit_cuts(handed)
+            debris = getattr(viewer, "_bone_debris", None)
+            if debris is not None:
+                debris.note_removals(handed)
 
         while True:
             result = worker.poll()
@@ -2554,8 +2665,10 @@ def main():
             _draw_sph(viewer)
         else:
             _draw_live_irrigation(viewer, worker, dt)
+            _step_surface_sph(viewer, worker, dt)
         if stream is not None:
             stream.hide(viewer)
+        _step_bone_debris(viewer, dt)
         viewer.end_frame()
         _bind_window_input(viewer, bridge)
         frame += 1
@@ -2601,6 +2714,7 @@ def main():
                 "vertices": blocks.vertex_count,
                 "stream": None if stream is None else stream.snapshot(),
                 "sph": _sph_snapshot(viewer),
+                "debris": viewer._bone_debris.snapshot(),
             }
             (RUNTIME / "summary.json").write_text(json.dumps(summary, indent=2))
             sph = summary.get("sph") or {}

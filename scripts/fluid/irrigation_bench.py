@@ -177,6 +177,131 @@ def cylinder_mesh(start, end, radius, slices: int = 16):
     return {"verts": verts, "tris": tris, "normals": normals}
 
 
+# Sides around the tube. Twelve reads as a faceted rod under the microscope.
+STREAM_SLICES = 24
+
+
+def stream_mesh(start, end, radius, time: float, cc_per_s: float, slices: int = STREAM_SLICES):
+    """Same one tube, with necks and bulges so it is not a straight rod.
+
+    The nozzle and the bone hit stay put. A station is about 1.5 mm, capped
+    so a long jet does not grow the mesh.
+    """
+    start = np.asarray(start, dtype=np.float64).reshape(3)
+    end = np.asarray(end, dtype=np.float64).reshape(3)
+    axis = end - start
+    length = float(np.linalg.norm(axis))
+    if length < 1e-12:
+        return None
+    z = axis / length
+    helper = np.array((1.0, 0.0, 0.0) if abs(z[0]) < 0.9 else (0.0, 1.0, 0.0), dtype=np.float64)
+    x = np.cross(helper, z)
+    x = x / float(np.linalg.norm(x))
+    y = np.cross(z, x)
+    length_mm = length / MM_TO_SIM
+    stations = int(np.clip(round(length_mm / 1.5), 4, 18))
+    scales = stream_scales(stations, length_mm, time, cc_per_s)
+    along = np.linspace(0.0, 1.0, stations)
+    envelope = np.sin(math.pi * along)
+    travel = float(time) * visual_scroll_mm_s(cc_per_s)
+    wander = envelope * (0.05 * float(radius)) * np.sin((along * length_mm - travel) * (2.0 * math.pi / 7.0))
+    angles = np.linspace(0.0, 2.0 * math.pi, slices, endpoint=False)
+    ring = np.stack((np.cos(angles), np.sin(angles)), axis=1)
+    verts = np.empty((stations * slices, 3), dtype=np.float64)
+    normals = np.empty((stations * slices, 3), dtype=np.float64)
+    for i in range(stations):
+        center = start + z * (along[i] * length) + x * float(wander[i])
+        spoke = ring[:, 0:1] * x + ring[:, 1:2] * y
+        sl = i * slices
+        verts[sl : sl + slices] = center + spoke * (float(radius) * float(scales[i]))
+        normals[sl : sl + slices] = spoke
+    tris = []
+    for i in range(stations - 1):
+        base = i * slices
+        nxt = base + slices
+        for s in range(slices):
+            j = (s + 1) % slices
+            tris.append((base + s, base + j, nxt + j))
+            tris.append((base + s, nxt + j, nxt + s))
+    return {
+        "verts": verts.astype(np.float32),
+        "tris": np.asarray(tris, dtype=np.int32),
+        "normals": normals.astype(np.float32),
+    }
+
+
+def splash_volume_mm3() -> float:
+    """Disc plus three droplets. Kept between 1 and 2 mm³."""
+    puddle = math.pi * (PUDDLE_R_MM ** 2) * PUDDLE_H_MM
+    droplet = math.pi * (DROP_R_MM ** 2) * DROP_H_MM
+    return puddle + 3.0 * droplet
+
+
+def _coin(center, normal, x_axis, y_axis, radius, height, slices: int = 10):
+    angles = np.linspace(0.0, 2.0 * math.pi, slices, endpoint=False)
+    ring = np.stack((np.cos(angles), np.sin(angles)), axis=1)
+    spoke = ring[:, 0:1] * x_axis + ring[:, 1:2] * y_axis
+    bottom = center + spoke * float(radius)
+    top = bottom + normal * float(height)
+    verts = np.concatenate((bottom, top), axis=0)
+    normals = np.concatenate((spoke, np.repeat(normal.reshape(1, 3), slices, axis=0)), axis=0)
+    tris = []
+    for i in range(slices):
+        j = (i + 1) % slices
+        tris.append((i, j, slices + j))
+        tris.append((i, slices + j, slices + i))
+        tris.append((slices + i, slices + j, slices))  # filled below; center added by caller
+    return verts, np.asarray(tris, dtype=np.int32), normals
+
+
+def splash_mesh(hit, emit):
+    """Tiny splash where the jet meets bone. One mesh, no free particles."""
+    hit = np.asarray(hit, dtype=np.float64).reshape(3)
+    direction = np.asarray(emit, dtype=np.float64).reshape(3)
+    length = float(np.linalg.norm(direction))
+    if length < 1e-12:
+        direction = np.array((0.0, 0.0, 1.0), dtype=np.float64)
+    else:
+        direction = direction / length
+    normal = -direction
+    helper = np.array((1.0, 0.0, 0.0) if abs(normal[0]) < 0.9 else (0.0, 1.0, 0.0), dtype=np.float64)
+    x_axis = np.cross(helper, normal)
+    x_axis = x_axis / float(np.linalg.norm(x_axis))
+    y_axis = np.cross(normal, x_axis)
+    scale = MM_TO_SIM
+    parts = [(hit, PUDDLE_R_MM * scale, PUDDLE_H_MM * scale)]
+    for turn in (0.0, 2.0 * math.pi / 3.0, 4.0 * math.pi / 3.0):
+        offset = x_axis * math.cos(turn) + y_axis * math.sin(turn)
+        parts.append((hit + offset * (DROP_DIST_MM * scale), DROP_R_MM * scale, DROP_H_MM * scale))
+    verts = []
+    tris = []
+    normals = []
+    slices = 10
+    for center, radius, height in parts:
+        coin_v, coin_t, coin_n = _coin(center, normal, x_axis, y_axis, radius, height, slices)
+        base = sum(len(item) for item in verts)
+        # Drop the placeholder cap triangles from _coin (they reference a missing center).
+        side = coin_t[: slices * 2]
+        top = coin_v[slices:]
+        cap_center = top.mean(axis=0)
+        cap_index = base + len(coin_v)
+        coin_v = np.concatenate((coin_v, cap_center.reshape(1, 3)), axis=0)
+        coin_n = np.concatenate((coin_n, normal.reshape(1, 3)), axis=0)
+        cap = []
+        for i in range(slices):
+            j = (i + 1) % slices
+            cap.append((base + slices + i, base + slices + j, cap_index))
+        verts.append(coin_v)
+        normals.append(coin_n)
+        tris.append(side + base)
+        tris.append(np.asarray(cap, dtype=np.int32))
+    return {
+        "verts": np.concatenate(verts, axis=0).astype(np.float32),
+        "tris": np.concatenate(tris, axis=0).astype(np.int32),
+        "normals": np.concatenate(normals, axis=0).astype(np.float32),
+    }
+
+
 def load_irrigation(path: Path) -> dict:
     settings = dict(DEFAULTS)
     if not path.is_file():
@@ -233,6 +358,29 @@ def visual_scroll_mm_s(cc_per_s: float) -> float:
     return max(5.0, 40.0 * float(cc_per_s) / CC_PER_S)
 
 
+# The live jet stays one mesh. Its width only moves inside this fraction of the set flow.
+FLOW_SPREAD = 0.20
+# A puddle plus three droplets, together about 1.3 mm³. Nothing travels off the bone.
+PUDDLE_R_MM = 1.05
+PUDDLE_H_MM = 0.30
+DROP_R_MM = 0.30
+DROP_H_MM = 0.36
+DROP_DIST_MM = 1.20
+SPLASH_CLEAR_MM = DROP_DIST_MM + DROP_R_MM + 0.15
+
+
+def stream_scales(stations: int, length_mm: float, time: float, cc_per_s: float) -> np.ndarray:
+    """Thickness along the jet, within ±20% of the set width, traveling with the flow."""
+    count = max(2, int(stations))
+    length_mm = max(float(length_mm), 1e-3)
+    travel = float(time) * visual_scroll_mm_s(cc_per_s)
+    distance = np.linspace(0.0, length_mm, count)
+    coarse = np.sin((distance - travel) * (2.0 * math.pi / 5.0))
+    fine = np.sin((distance - travel * 1.6) * (2.0 * math.pi / 1.7) + 0.7)
+    wave = 0.62 * coarse + 0.38 * fine
+    return 1.0 + (FLOW_SPREAD * 0.75) * wave
+
+
 def _index_occupied(frame: VolumeFrame, occupied, points):
     counts = frame.counts.astype(np.int32)
     ijk = np.floor(frame.world_to_index(points)).astype(np.int32)
@@ -267,6 +415,8 @@ class IrrigationBench:
         self._water_tube_bound = False
         self._water_point_names = set()
         self._tube_visible = False
+        self._splash_visible = False
+        self._splash_bound = False
         self._spheres_logged = False
         self._film_logged = False
 
@@ -334,7 +484,7 @@ class IrrigationBench:
             self.film_vel[slot] = self.down * speed
             self.film_age[slot] = 0.0
 
-    def draw(self, viewer) -> None:
+    def draw(self, viewer, splash: bool = True) -> None:
         started = time.perf_counter()
         if not self.settings.get("enabled", True) or self.last_frame is None or self.last_hit is None:
             self.hide(viewer)
@@ -363,10 +513,21 @@ class IrrigationBench:
             self.live_spheres = int(len(points))
             self._draw_spheres(viewer, points, 0.5 * particle_mm * MM_TO_SIM)
             self._hide_tube(viewer)
+            self._hide_splash(viewer)
         else:
             self.live_spheres = 0
-            mesh = cylinder_mesh(frame["outlet"], hit, 0.5 * jet_mm * MM_TO_SIM)
+            mesh = stream_mesh(
+                frame["outlet"],
+                hit,
+                0.5 * jet_mm * MM_TO_SIM,
+                self.time,
+                float(self.settings["cc_per_s"]),
+            )
             self._draw_tube(viewer, mesh)
+            if splash:
+                self._draw_splash(viewer, splash_mesh(hit, frame["emit"]))
+            else:
+                self._hide_splash(viewer)
             self._hide_spheres(viewer)
         if float(self.settings.get("film_ms") or 0.0) > 0.0:
             film = self.film_pos[self.film_age >= 0.0]
@@ -378,6 +539,7 @@ class IrrigationBench:
     def hide(self, viewer) -> None:
         self._hide_spheres(viewer)
         self._hide_tube(viewer)
+        self._hide_splash(viewer)
         self._hide_film(viewer)
         self.live_spheres = 0
 
@@ -395,6 +557,7 @@ class IrrigationBench:
         radius = 0.5 * SPHERE_MM * MM_TO_SIM
         self._draw_spheres(viewer, seed, radius)
         self._draw_film(viewer, seed)
+        self._draw_splash(viewer, splash_mesh(start, np.array((0.0, 0.0, -1.0))))
         self.hide(viewer)
 
     def _wp(self):
@@ -460,7 +623,7 @@ class IrrigationBench:
             indices,
             normals=normals,
             hidden=False,
-            backface_culling=False,
+            backface_culling=True,
             dynamic=True,
             color=color,
             opacity=opacity,
@@ -493,6 +656,52 @@ class IrrigationBench:
             dynamic=True,
         )
         self._tube_visible = False
+
+    def _draw_splash(self, viewer, mesh) -> None:
+        if mesh is None:
+            self._hide_splash(viewer)
+            return
+        wp = self._wp()
+        color, opacity = self._water_look()
+        points = wp.array(np.ascontiguousarray(mesh["verts"]), dtype=wp.vec3)
+        indices = wp.array(np.ascontiguousarray(mesh["tris"].reshape(-1)), dtype=wp.int32)
+        normals = wp.array(np.ascontiguousarray(mesh["normals"]), dtype=wp.vec3)
+        viewer.log_mesh(
+            "fluid/splash",
+            points,
+            indices,
+            normals=normals,
+            hidden=False,
+            backface_culling=False,
+            dynamic=True,
+            color=color,
+            opacity=min(0.55, max(opacity, 0.35)),
+        )
+        if not self._splash_bound:
+            prim = viewer.stage.GetPrimAtPath(viewer._get_path(viewer._qualify("fluid/splash")))
+            self._bind_water_prim(viewer, prim)
+            self._splash_bound = True
+        self._splash_visible = True
+
+    def _hide_splash(self, viewer) -> None:
+        if not self._splash_visible:
+            return
+        wp = self._wp()
+        empty = {
+            "verts": np.zeros((3, 3), dtype=np.float32),
+            "tris": np.array([[0, 1, 2]], dtype=np.int32),
+            "normals": np.array([[0.0, 0.0, 1.0]] * 3, dtype=np.float32),
+        }
+        viewer.log_mesh(
+            "fluid/splash",
+            wp.array(empty["verts"], dtype=wp.vec3),
+            wp.array(empty["tris"].reshape(-1), dtype=wp.int32),
+            normals=wp.array(empty["normals"], dtype=wp.vec3),
+            hidden=True,
+            backface_culling=False,
+            dynamic=True,
+        )
+        self._splash_visible = False
 
     def _draw_film(self, viewer, points) -> None:
         if len(points) == 0:

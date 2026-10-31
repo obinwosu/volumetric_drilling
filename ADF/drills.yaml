@@ -269,7 +269,7 @@ BODY mastoidectomy_drill:
   publish children names: false
   publish joint names: false
   publish joint positions: false
-# 7 Fr Frazier suction. Empty visual: the plugin draws the mesh and, once the
+# 12 Fr Frazier suction. Empty visual: the plugin draws the mesh and, once the
 # surgical camera exists, parks the tip on the left of the view. This pose is
 # only the fallback before that placement.
 BODY frazier_suction:

@@ -1,0 +1,12 @@
+{
+  "diffuse_reflection_color": [0.98, 0.93, 0.88],
+  "diffuse_reflection_weight": 0.7,
+  "specular_reflection_weight": 1.0,
+  "specular_reflection_color": [1.0, 0.98, 0.96],
+  "specular_reflection_roughness": 0.08,
+  "specular_reflection_ior": 1.4,
+  "coat_weight": 0.7,
+  "coat_color": [1.0, 0.97, 0.94],
+  "coat_roughness": 0.03,
+  "coat_ior": 1.35
+}
