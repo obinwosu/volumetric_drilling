@@ -2291,8 +2291,10 @@ def main():
         viewer.show_ground = False
     viewer.picking_enabled = False
     
-    # Configure RTX for photorealistic water rendering with caustics
-    rtx_config.setup_water_rendering(viewer, enable_caustics=True, quality="high")
+    # Configure RTX for PHOTOREALISTIC water rendering (near-FLIP quality)
+    # Target: 30-40 FPS with realistic surface tension, refraction, and caustics
+    # Quality: "fast" (40+ FPS), "balanced" (30-35 FPS), "beautiful" (25-30 FPS)
+    rtx_config.setup_water_rendering(viewer, enable_caustics=True, quality="balanced")
 
     sphere_local, sphere_tris = _sphere(1.0)
     sphere_normals = vertex_normals(sphere_local.astype(np.float64), sphere_tris).astype(np.float32)
