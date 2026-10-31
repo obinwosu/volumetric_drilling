@@ -503,6 +503,12 @@ class SurfaceFilm:
         if sheet is None:
             self._hide(viewer, "fluid/sheet", water=True)
         else:
+            # Update water material based on current depth for realistic appearance
+            if getattr(self, "_sheet_bound", False):
+                import rtx_materials
+                avg_depth = rtx_materials.compute_average_depth_mm(self.depth)
+                rtx_materials.update_water_depth(viewer, avg_depth)
+            
             self._log(viewer, "fluid/sheet", sheet, water=True, hidden=False)
         # No second mesh on the bone. That overlay cut the surface and drew the black lines.
         self._hide(viewer, "fluid/wet_bone", water=False)
@@ -540,7 +546,9 @@ class SurfaceFilm:
             return
         prim = viewer.stage.GetPrimAtPath(viewer._get_path(viewer._qualify(name)))
         if water:
-            rtx_materials.bind_water(viewer, prim)
+            # Pass depth information for realistic material rendering
+            avg_depth = rtx_materials.compute_average_depth_mm(self.depth)
+            rtx_materials.bind_water(viewer, prim, depth_mm=avg_depth)
         else:
             rtx_materials.bind_wet_bone(viewer, prim)
         setattr(self, bound, True)

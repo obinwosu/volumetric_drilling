@@ -36,6 +36,7 @@ import cortex_masks
 import markings
 import pause_menu
 import rtx_materials
+import rtx_config
 from fluid.cannula import SIZES as CANNULA_SIZES, load_obj as load_cannula_obj, mesh_path as cannula_mesh_path
 from fluid.irrigation_bench import (
     DRAW_SPHERES,
@@ -2289,6 +2290,9 @@ def main():
     if hasattr(viewer, "show_ground"):
         viewer.show_ground = False
     viewer.picking_enabled = False
+    
+    # Configure RTX for photorealistic water rendering with caustics
+    rtx_config.setup_water_rendering(viewer, enable_caustics=True, quality="high")
 
     sphere_local, sphere_tris = _sphere(1.0)
     sphere_normals = vertex_normals(sphere_local.astype(np.float64), sphere_tris).astype(np.float32)
