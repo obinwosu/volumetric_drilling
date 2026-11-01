@@ -1,12 +1,24 @@
 {
   "draw": "tube",
-  "jet_mm": 0.58,
-  "particle_mm": 0.15,
-  "cc_per_s": 81.0,
+  "jet_mm": 1.22,
+  "particle_mm": 0.2,
+  "cc_per_s": 100.0,
   "film_ms": 20.0,
+  "film_spread_mm": 4.5,
+  "film_depth_mm": 4.08,
+  "film_life_s": 15.1,
+  "film_smooth": 1.0,
+  "film_ripple": 1.0,
+  "film_rivulets": 0.0,
+  "max_bounces": 4,
+  "gravity": [
+    0.0,
+    -1.0,
+    -0.51
+  ],
   "offset_mm": 2.0,
   "proximal_mm": 0.0,
-  "opacity": 1.0,
+  "opacity": 0.485,
   "enabled": true,
   "water": {
     "diffuse_reflection_color": [
@@ -35,6 +47,47 @@
     ],
     "thin_walled": true,
     "enable_opacity": true,
-    "geometry_opacity": 1.0
+    "geometry_opacity": 0.485
+  },
+  "film_look": {
+    "diffuse_reflection_color": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "diffuse_reflection_weight": 0.0,
+    "diffuse_reflection_roughness": 0.0,
+    "metalness": 0.0,
+    "specular_reflection_weight": 1.0,
+    "specular_reflection_color": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "specular_reflection_roughness": 0.04,
+    "specular_reflection_ior": 1.41,
+    "coat_weight": 0.0,
+    "enable_specular_transmission": true,
+    "specular_transmission_weight": 1.0,
+    "specular_transmission_color": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "thin_walled": false,
+    "enable_opacity": false,
+    "geometry_opacity": 0.2,
+    "specular_transmission_scattering_color": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "specular_transmission_scattering_depth": 0.0,
+    "specular_transmission_scatter_anisotropy": 0.0,
+    "glint_boost": 1.0,
+    "geometry_opacity_threshold": 0.0,
+    "specular_reflection_anisotropy": 0.0,
+    "specular_reflection_anisotropy_rotation": 0.0,
+    "specular_transmission_dispersion_abbe": 0.0
   }
 }

@@ -14,6 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
+from fluid.impact_film import DEPTH_MM, SPREAD_MM, ImpactFilm, film_gravity
 from fluid.moving_inlet import disk_offsets
 from fluid.cannula import cannula_frame
 from fluid.outlet import MM_TO_SIM, outlet_frame
@@ -28,6 +29,20 @@ JET_MM = 1.0
 CC_PER_S = 80.0
 FILM_MS = 50.0
 FILM_KEEP = 0.1
+# Triangle buffers grow in steps of this many triangles.
+TRI_BUCKET = 4096
+PROBE_PATH = Path("/tmp/fivrs-rtx/water_probe.txt")
+
+
+def _padded_indices(tris) -> np.ndarray:
+    """Flat indices padded with empty triangles to a TRI_BUCKET step, so a sheet
+    whose triangle count changes every frame keeps the same buffer sizes."""
+    flat = np.ascontiguousarray(np.asarray(tris).reshape(-1), dtype=np.int32)
+    bucket = 3 * TRI_BUCKET
+    padded = -(-len(flat) // bucket) * bucket
+    if padded == len(flat):
+        return flat
+    return np.concatenate([flat, np.zeros(padded - len(flat), dtype=np.int32)])
 RUNOFF_M_S = 2.5
 MAX_FILM = 512
 MISS_MM = 400.0
@@ -42,6 +57,14 @@ DEFAULTS = {
     "particle_mm": SPHERE_MM,
     "cc_per_s": CC_PER_S,
     "film_ms": FILM_MS,
+    "film_spread_mm": SPREAD_MM,
+    "film_depth_mm": DEPTH_MM,
+    "film_life_s": 8.0,
+    "film_smooth": 0.65,
+    "film_ripple": 0.5,
+    "film_rivulets": 0.5,
+    "max_bounces": 4,
+    "gravity": [0.0, 0.0, -1.0],
     "offset_mm": 2.0,
     "proximal_mm": 0.0,
     "opacity": 0.22,
@@ -317,6 +340,8 @@ def load_irrigation(path: Path) -> dict:
         settings["draw"] = DRAW_TUBE
     if isinstance(saved.get("water"), dict):
         settings["water"] = dict(saved["water"])
+    if isinstance(saved.get("film_look"), dict):
+        settings["film_look"] = dict(saved["film_look"])
     return settings
 
 
@@ -335,9 +360,11 @@ def _json_ready(value):
 
 
 def save_irrigation(path: Path, settings: dict) -> None:
-    payload = {key: settings[key] for key in DEFAULTS}
+    payload = {key: settings.get(key, DEFAULTS[key]) for key in DEFAULTS}
     if isinstance(settings.get("water"), dict):
         payload["water"] = dict(settings["water"])
+    if isinstance(settings.get("film_look"), dict):
+        payload["film_look"] = dict(settings["film_look"])
     temporary = path.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(_json_ready(payload), indent=2) + "\n")
     temporary.replace(path)
@@ -351,6 +378,17 @@ def water_from_irrigation(settings: dict, fallback: dict) -> dict:
     if "opacity" in settings:
         water["geometry_opacity"] = float(settings["opacity"])
     return water
+
+
+def film_look_from_irrigation(settings: dict, fallback: dict) -> dict:
+    """Sheet shader. Starts as a copy of the stream, then stays on its own sliders."""
+    look = dict(fallback)
+    saved = settings.get("film_look")
+    if isinstance(saved, dict):
+        look.update(saved)
+        return look
+    look.update(water_from_irrigation(settings, fallback))
+    return look
 
 
 def visual_scroll_mm_s(cc_per_s: float) -> float:
@@ -392,15 +430,38 @@ def _index_occupied(frame: VolumeFrame, occupied, points):
     return hit
 
 
+def _make_film(gpu: bool):
+    """GPU film for the live windows when CUDA is up; the NumPy film otherwise."""
+    if gpu:
+        try:
+            from fluid.film_gpu import GpuFilm, cuda_ready
+
+            if cuda_ready():
+                return GpuFilm(pipelined=True)
+            print("No CUDA device; the irrigation film runs on the CPU", flush=True)
+        except Exception:
+            import traceback
+
+            print("GPU film failed to start; the irrigation film runs on the CPU", flush=True)
+            traceback.print_exc()
+    return ImpactFilm()
+
+
+def _rendering(viewer) -> bool:
+    """After the first frame the renderer copies mesh points through host memory."""
+    return getattr(viewer, "_phase", None) == getattr(viewer, "_PHASE_RENDER", False)
+
+
 class IrrigationBench:
     """Packed jet plus a short downhill film. No OpenMaelstrom in this window."""
 
-    def __init__(self, occupied, volume_frame: VolumeFrame, down=None):
+    def __init__(self, occupied, volume_frame: VolumeFrame, down=None, gpu_film: bool = False):
         self.occupied = np.ascontiguousarray(occupied, dtype=bool)
         self.frame = volume_frame
         self.down = np.asarray(down if down is not None else screen_down(), dtype=np.float64)
         self.down = self.down / float(np.linalg.norm(self.down))
         self.settings = dict(DEFAULTS)
+        self.film = _make_film(gpu_film)
         self.film_pos = np.zeros((MAX_FILM, 3), dtype=np.float64)
         self.film_vel = np.zeros((MAX_FILM, 3), dtype=np.float64)
         self.film_age = np.full(MAX_FILM, -1.0, dtype=np.float64)
@@ -412,6 +473,16 @@ class IrrigationBench:
         self.live_film = 0
         self.live_spheres = 0
         self.draw_ms = 0.0
+        self.raycast_ms = 0.0
+        self.fluid_ms = 0.0
+        self.geometry_ms = 0.0
+        self.raycast_queries = 0
+        self._hit_key = None
+        self._hit_cached = None
+        self._sheet_bound = False
+        self._sheet_visible = False
+        self._sheet_topology = None
+        self._gpu = {}
         self._water_tube_bound = False
         self._water_point_names = set()
         self._tube_visible = False
@@ -423,10 +494,31 @@ class IrrigationBench:
     def apply(self, settings: dict) -> None:
         self.settings.update(settings)
 
-    def step(self, dt: float, tip, quat, size_mm: int | None = None) -> dict:
+    def step(
+        self,
+        dt: float,
+        tip,
+        quat,
+        size_mm: int | None = None,
+        occ_gen: int = 0,
+        emit: bool = True,
+        suction_tip=None,
+        suction_radius_mm: float = 0.0,
+    ) -> dict:
         dt = float(max(dt, 0.0))
         self.time += dt
-        jet_mm = float(self.settings["jet_mm"])
+        self.raycast_ms = 0.0
+        self._suction_tip = suction_tip
+        self._suction_radius_mm = float(suction_radius_mm)
+        if not emit or tip is None or quat is None:
+            started = time.perf_counter()
+            self._step_sheet(dt, None, None, occ_gen)
+            self.fluid_ms = (time.perf_counter() - started) * 1e3
+            self.last_hit = None
+            self.hit_mm = 0.0
+            self.film_age[:] = -1.0
+            self.live_film = 0
+            return self.last_frame
         if size_mm is None:
             # Tuner preview: a jet aimed at the bone, not a drill nozzle.
             offset_mm = float(self.settings["offset_mm"])
@@ -435,27 +527,88 @@ class IrrigationBench:
         else:
             frame = cannula_frame(tip, quat, int(size_mm))
         self.last_frame = frame
-        hit = first_hit(frame["outlet"], frame["emit"], self.frame, self.occupied)
+        hit = self._cached_hit(frame["outlet"], frame["emit"], occ_gen)
         film_ms = float(self.settings.get("film_ms") or 0.0)
-        if hit is None:
-            if film_ms <= 0.0:
-                self.last_hit = None
-                self.hit_mm = 0.0
-                self.film_age[:] = -1.0
-                self.live_film = 0
-                return frame
-            hit = frame["outlet"] + frame["emit"] * (MISS_MM * MM_TO_SIM)
+        # Beads may keep a stand-in when the ray misses. The sheet starts only on bone.
         self.last_hit = hit
-        self.hit_mm = float(np.linalg.norm(hit - frame["outlet"]) / MM_TO_SIM)
+        if hit is None and film_ms > 0.0:
+            self.last_hit = frame["outlet"] + frame["emit"] * (MISS_MM * MM_TO_SIM)
+        shown = self.last_hit
+        self.hit_mm = 0.0 if shown is None else float(np.linalg.norm(shown - frame["outlet"]) / MM_TO_SIM)
+        started = time.perf_counter()
+        self._step_sheet(dt, hit, frame["emit"], occ_gen)
         if film_ms <= 0.0:
             self.film_age[:] = -1.0
             self.live_film = 0
-            return frame
-        film_s = max(0.01, film_ms * 1e-3)
-        self._age_film(dt, film_s)
-        if dt > 0.0:
-            self._birth_film(hit, dt, film_s)
+        else:
+            film_s = max(0.01, film_ms * 1e-3)
+            self._age_film(dt, film_s)
+            if dt > 0.0 and shown is not None:
+                self._birth_film(shown, dt, film_s)
+        self.fluid_ms = (time.perf_counter() - started) * 1e3
         return frame
+
+    def _cached_hit(self, origin, direction, occ_gen: int):
+        """March only when the nozzle or the bone occupancy actually changes."""
+        origin = np.asarray(origin, dtype=np.float64).reshape(3)
+        direction = np.asarray(direction, dtype=np.float64).reshape(3)
+        key = (
+            int(occ_gen),
+            round(float(origin[0]), 4),
+            round(float(origin[1]), 4),
+            round(float(origin[2]), 4),
+            round(float(direction[0]), 3),
+            round(float(direction[1]), 3),
+            round(float(direction[2]), 3),
+        )
+        if key == self._hit_key:
+            self.raycast_ms = 0.0
+            return None if self._hit_cached is None else self._hit_cached.copy()
+        started = time.perf_counter()
+        hit = first_hit(origin, direction, self.frame, self.occupied)
+        self.raycast_ms = (time.perf_counter() - started) * 1e3
+        self.raycast_queries += 1
+        self._hit_key = key
+        self._hit_cached = None if hit is None else np.asarray(hit, dtype=np.float64).copy()
+        return hit
+
+    def _film_failed(self) -> None:
+        """A GPU film error must not stop the window. Carry on with the CPU film."""
+        import traceback
+
+        print("GPU film failed; the irrigation film switches to the CPU", flush=True)
+        traceback.print_exc()
+        self.film = ImpactFilm()
+
+    def _step_sheet(self, dt: float, hit, incoming, occ_gen: int) -> None:
+        try:
+            self._film_step(dt, hit, incoming, occ_gen)
+        except Exception:
+            if type(self.film) is ImpactFilm:
+                raise
+            self._film_failed()
+            self._film_step(dt, hit, incoming, occ_gen)
+
+    def _film_step(self, dt: float, hit, incoming, occ_gen: int) -> None:
+        self.film.step(
+            dt,
+            hit,
+            float(self.settings.get("jet_mm", JET_MM)),
+            float(self.settings.get("film_spread_mm", SPREAD_MM)),
+            float(self.settings.get("film_depth_mm", DEPTH_MM)),
+            float(self.settings.get("cc_per_s", CC_PER_S)),
+            self.frame,
+            self.occupied,
+            int(occ_gen),
+            incoming=incoming,
+            suction_tip=getattr(self, "_suction_tip", None),
+            suction_radius_mm=float(getattr(self, "_suction_radius_mm", 0.0)),
+            down=film_gravity(self.settings),
+            life_s=float(self.settings.get("film_life_s", 8.0)),
+            smooth=float(self.settings.get("film_smooth", 0.65)),
+            ripple=float(self.settings.get("film_ripple", 0.5)),
+            rivulets=float(self.settings.get("film_rivulets", 0.5)),
+        )
 
     def _age_film(self, dt: float, film_s: float) -> None:
         live = self.film_age >= 0.0
@@ -486,8 +639,21 @@ class IrrigationBench:
 
     def draw(self, viewer, splash: bool = True) -> None:
         started = time.perf_counter()
-        if not self.settings.get("enabled", True) or self.last_frame is None or self.last_hit is None:
+        built = time.perf_counter()
+        self.sheet_mesh_ms = 0.0
+        if not self.settings.get("enabled", True):
             self.hide(viewer)
+            self.geometry_ms = 0.0
+            self.draw_ms = (time.perf_counter() - started) * 1e3
+            return
+        if self.last_frame is None or self.last_hit is None:
+            self._hide_spheres(viewer)
+            self._hide_tube(viewer)
+            self._hide_splash(viewer)
+            self._hide_film(viewer)
+            self.live_spheres = 0
+            self._draw_sheet(viewer)
+            self.geometry_ms = (time.perf_counter() - built) * 1e3
             self.draw_ms = (time.perf_counter() - started) * 1e3
             return
         frame = self.last_frame
@@ -534,6 +700,8 @@ class IrrigationBench:
             self._draw_film(viewer, film)
         else:
             self._hide_film(viewer)
+        self._draw_sheet(viewer)
+        self.geometry_ms = (time.perf_counter() - built) * 1e3
         self.draw_ms = (time.perf_counter() - started) * 1e3
 
     def hide(self, viewer) -> None:
@@ -541,6 +709,7 @@ class IrrigationBench:
         self._hide_tube(viewer)
         self._hide_splash(viewer)
         self._hide_film(viewer)
+        self._hide_sheet(viewer)
         self.live_spheres = 0
 
     def prime(self, viewer) -> None:
@@ -558,6 +727,7 @@ class IrrigationBench:
         self._draw_spheres(viewer, seed, radius)
         self._draw_film(viewer, seed)
         self._draw_splash(viewer, splash_mesh(start, np.array((0.0, 0.0, -1.0))))
+        self._draw_sheet(viewer, seeded=self.film.placeholder())
         self.hide(viewer)
 
     def _wp(self):
@@ -565,28 +735,40 @@ class IrrigationBench:
 
         return wp
 
-    def _water_look(self):
-        water = self.settings.get("water") if isinstance(self.settings.get("water"), dict) else {}
-        color = water.get("diffuse_reflection_color", (0.62, 0.82, 0.94))
-        opacity = self.settings.get("opacity", water.get("geometry_opacity", 0.22))
-        return tuple(float(channel) for channel in color), float(opacity)
+    def _block_look(self, key: str):
+        block = self.settings.get(key) if isinstance(self.settings.get(key), dict) else {}
+        color = block.get("diffuse_reflection_color", (1.0, 1.0, 1.0))
+        opacity = float(block.get("geometry_opacity", 1.0))
+        return tuple(float(channel) for channel in color), opacity
 
-    def _bind_water_prim(self, viewer, prim) -> None:
+    def _water_look(self):
+        color, opacity = self._block_look("water")
+        if "opacity" in self.settings:
+            opacity = float(self.settings["opacity"])
+        return color, opacity
+
+    def _film_look(self):
+        if isinstance(self.settings.get("film_look"), dict):
+            return self._block_look("film_look")
+        return self._water_look()
+
+    def _bind_fluid_prim(self, viewer, prim, segment: str) -> None:
         if prim is None or not prim.IsValid():
             return
         import rtx_materials
 
-        rtx_materials.bind_water(viewer, prim)
+        params = self.settings.get("film_look") if segment == "film" else self.settings.get("water")
+        rtx_materials.bind_fluid(viewer, prim, segment, params if isinstance(params, dict) else None)
 
-    def _bind_points(self, viewer, name: str) -> None:
-        if name in self._water_point_names:
+    def _bind_points(self, viewer, name: str, force: bool = False) -> None:
+        if name in self._water_point_names and not force:
             return
         qualified = viewer._qualify(name)
         instancer = viewer._ensure_point_batch_primitive(qualified)
         if instancer is None:
             return
         sphere = instancer.GetPrim().GetChild("sphere")
-        self._bind_water_prim(viewer, sphere)
+        self._bind_fluid_prim(viewer, sphere, "water")
         self._water_point_names.add(name)
 
     def _draw_spheres(self, viewer, points, radius) -> None:
@@ -602,21 +784,43 @@ class IrrigationBench:
             colors=color,
         )
         self._spheres_logged = True
-        self._bind_points(viewer, "fluid/spheres")
+        self._bind_points(viewer, "fluid/spheres", force=True)
 
     def _hide_spheres(self, viewer) -> None:
         if self._spheres_logged:
             viewer.log_points("fluid/spheres", None, hidden=True)
 
+    def _gpu_mesh(self, key: str, mesh: dict):
+        """Keep the warp buffers when the vertex and index counts stay put."""
+        wp = self._wp()
+        verts = np.ascontiguousarray(mesh["verts"], dtype=np.float32)
+        tris = _padded_indices(mesh["tris"])
+        normals = np.ascontiguousarray(mesh["normals"], dtype=np.float32)
+        slot = self._gpu.setdefault(key, {})
+        if slot.get("vlen") != len(verts) or slot.get("tlen") != len(tris):
+            slot["points"] = wp.array(verts, dtype=wp.vec3)
+            slot["indices"] = wp.array(tris, dtype=wp.int32)
+            slot["normals"] = wp.array(normals, dtype=wp.vec3)
+            slot["vlen"] = len(verts)
+            slot["tlen"] = len(tris)
+        else:
+            slot["points"].assign(wp.array(verts, dtype=wp.vec3))
+            slot["indices"].assign(wp.array(tris, dtype=wp.int32))
+            slot["normals"].assign(wp.array(normals, dtype=wp.vec3))
+        return slot["points"], slot["indices"], slot["normals"]
+
     def _draw_tube(self, viewer, mesh) -> None:
         if mesh is None:
             self._hide_tube(viewer)
             return
-        wp = self._wp()
-        color, opacity = self._water_look()
-        points = wp.array(np.ascontiguousarray(mesh["verts"]), dtype=wp.vec3)
-        indices = wp.array(np.ascontiguousarray(mesh["tris"].reshape(-1)), dtype=wp.int32)
-        normals = wp.array(np.ascontiguousarray(mesh["normals"]), dtype=wp.vec3)
+        if self._water_tube_bound and _rendering(viewer):
+            points = np.ascontiguousarray(mesh["verts"], dtype=np.float32)
+            normals = np.ascontiguousarray(mesh["normals"], dtype=np.float32)
+            indices = _padded_indices(mesh["tris"])
+        else:
+            points, indices, normals = self._gpu_mesh("tube", mesh)
+        # Color stays on the water shader. Passing it here binds a preview
+        # surface, and that is the color the live window keeps.
         viewer.log_mesh(
             "fluid/tube",
             points,
@@ -625,36 +829,35 @@ class IrrigationBench:
             hidden=False,
             backface_culling=True,
             dynamic=True,
-            color=color,
-            opacity=opacity,
         )
-        if not self._water_tube_bound:
-            prim = viewer.stage.GetPrimAtPath(viewer._get_path(viewer._qualify("fluid/tube")))
-            self._bind_water_prim(viewer, prim)
-            self._water_tube_bound = True
+        prim = viewer.stage.GetPrimAtPath(viewer._get_path(viewer._qualify("fluid/tube")))
+        self._bind_fluid_prim(viewer, prim, "water")
+        self._water_tube_bound = True
         self._tube_visible = True
+        self._tube_mesh = mesh
 
     def _hide_tube(self, viewer) -> None:
-        if not self._tube_visible:
+        if not self._tube_visible and getattr(self, "_tube_mesh", None) is not None:
             return
-        wp = self._wp()
-        empty = {
-            "verts": np.zeros((3, 3), dtype=np.float32),
-            "tris": np.array([[0, 1, 2]], dtype=np.int32),
-            "normals": np.array([[0.0, 0.0, 1.0]] * 3, dtype=np.float32),
-        }
-        points = wp.array(empty["verts"], dtype=wp.vec3)
-        indices = wp.array(empty["tris"].reshape(-1), dtype=wp.int32)
-        normals = wp.array(empty["normals"], dtype=wp.vec3)
+        mesh = getattr(self, "_tube_mesh", None)
+        if mesh is None:
+            start = np.zeros(3, dtype=np.float64)
+            end = np.array((0.0, 0.0, 0.02), dtype=np.float64)
+            mesh = cylinder_mesh(start, end, 0.5 * float(self.settings.get("jet_mm", JET_MM)) * MM_TO_SIM)
+            self._tube_mesh = mesh
+        points, indices, normals = self._gpu_mesh("tube", mesh)
         viewer.log_mesh(
             "fluid/tube",
             points,
             indices,
             normals=normals,
             hidden=True,
-            backface_culling=False,
+            backface_culling=True,
             dynamic=True,
         )
+        prim = viewer.stage.GetPrimAtPath(viewer._get_path(viewer._qualify("fluid/tube")))
+        self._bind_fluid_prim(viewer, prim, "water")
+        self._water_tube_bound = True
         self._tube_visible = False
 
     def _draw_splash(self, viewer, mesh) -> None:
@@ -663,9 +866,13 @@ class IrrigationBench:
             return
         wp = self._wp()
         color, opacity = self._water_look()
-        points = wp.array(np.ascontiguousarray(mesh["verts"]), dtype=wp.vec3)
-        indices = wp.array(np.ascontiguousarray(mesh["tris"].reshape(-1)), dtype=wp.int32)
-        normals = wp.array(np.ascontiguousarray(mesh["normals"]), dtype=wp.vec3)
+        points = np.ascontiguousarray(mesh["verts"], dtype=np.float32)
+        indices = np.ascontiguousarray(mesh["tris"].reshape(-1), dtype=np.int32)
+        normals = np.ascontiguousarray(mesh["normals"], dtype=np.float32)
+        if not (self._splash_bound and _rendering(viewer)):
+            points = wp.array(points, dtype=wp.vec3)
+            indices = wp.array(indices, dtype=wp.int32)
+            normals = wp.array(normals, dtype=wp.vec3)
         viewer.log_mesh(
             "fluid/splash",
             points,
@@ -679,7 +886,7 @@ class IrrigationBench:
         )
         if not self._splash_bound:
             prim = viewer.stage.GetPrimAtPath(viewer._get_path(viewer._qualify("fluid/splash")))
-            self._bind_water_prim(viewer, prim)
+            self._bind_fluid_prim(viewer, prim, "water")
             self._splash_bound = True
         self._splash_visible = True
 
@@ -702,6 +909,91 @@ class IrrigationBench:
             dynamic=True,
         )
         self._splash_visible = False
+
+    def _probe_mode(self) -> str:
+        """Render-cost probe: normal, frozen, points, or hidden. Read twice a second."""
+        now = time.perf_counter()
+        if now - getattr(self, "_probe_read", -1.0) > 0.5:
+            self._probe_read = now
+            try:
+                self._probe = PROBE_PATH.read_text().strip() or "normal"
+            except OSError:
+                self._probe = "normal"
+        return getattr(self, "_probe", "normal")
+
+    def _draw_sheet(self, viewer, seeded=None) -> None:
+        probe = self._probe_mode() if seeded is None else "normal"
+        if probe == "frozen" and self._sheet_visible:
+            self.sheet_mesh_ms = 0.0
+            return
+        if probe == "hidden":
+            self.sheet_mesh_ms = 0.0
+            self._hide_sheet(viewer)
+            return
+        started = time.perf_counter()
+        if seeded is not None:
+            mesh = seeded
+        else:
+            try:
+                mesh = self.film.mesh()
+            except Exception:
+                if type(self.film) is ImpactFilm:
+                    raise
+                self._film_failed()
+                mesh = None
+        self.sheet_mesh_ms = (time.perf_counter() - started) * 1e3
+        if mesh is None or int(mesh["tris"].shape[0]) == 0:
+            self._hide_sheet(viewer)
+            return
+        if self._sheet_bound and _rendering(viewer):
+            # Once authored, the renderer copies points through host memory, so
+            # NumPy goes straight in instead of a round trip through the GPU.
+            points = np.ascontiguousarray(mesh["verts"], dtype=np.float32)
+            normals = np.ascontiguousarray(mesh["normals"], dtype=np.float32)
+            indices = _padded_indices(mesh["tris"])
+        else:
+            points, indices, normals = self._gpu_mesh("sheet", mesh)
+        topology = mesh.get("topology")
+        # Same triangles as last frame: only the points move, so the renderer
+        # refits the sheet instead of rebuilding it.
+        same = topology is not None and self._sheet_visible and topology == self._sheet_topology
+        viewer.log_mesh(
+            "fluid/sheet",
+            points,
+            indices,
+            normals=normals,
+            hidden=False,
+            backface_culling=True,
+            dynamic=not (same or (probe == "points" and self._sheet_visible)),
+        )
+        self._sheet_topology = topology
+        prim = viewer.stage.GetPrimAtPath(viewer._get_path(viewer._qualify("fluid/sheet")))
+        self._bind_fluid_prim(viewer, prim, "film")
+        self._sheet_bound = True
+        self._sheet_visible = True
+        self._sheet_mesh = mesh
+
+    def _hide_sheet(self, viewer) -> None:
+        if not self._sheet_visible and self._sheet_bound:
+            return
+        mesh = getattr(self, "_sheet_mesh", None)
+        if mesh is None:
+            mesh = self.film.placeholder()
+        points, indices, normals = self._gpu_mesh("sheet", mesh)
+        viewer.log_mesh(
+            "fluid/sheet",
+            points,
+            indices,
+            normals=normals,
+            hidden=True,
+            backface_culling=True,
+            dynamic=True,
+        )
+        prim = viewer.stage.GetPrimAtPath(viewer._get_path(viewer._qualify("fluid/sheet")))
+        self._bind_fluid_prim(viewer, prim, "film")
+        self._sheet_bound = True
+        self._sheet_visible = False
+        self._sheet_topology = None
 
     def _draw_film(self, viewer, points) -> None:
         if len(points) == 0:

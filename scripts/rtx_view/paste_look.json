@@ -1,12 +1,84 @@
 {
-  "diffuse_reflection_color": [0.98, 0.93, 0.88],
   "diffuse_reflection_weight": 0.7,
+  "diffuse_reflection_roughness": 0.0,
+  "metalness": 0.0,
   "specular_reflection_weight": 1.0,
-  "specular_reflection_color": [1.0, 0.98, 0.96],
-  "specular_reflection_roughness": 0.08,
+  "specular_reflection_color": [
+    1.0,
+    0.98,
+    0.96
+  ],
+  "specular_reflection_roughness": 0.15000000596046448,
   "specular_reflection_ior": 1.4,
-  "coat_weight": 0.7,
-  "coat_color": [1.0, 0.97, 0.94],
+  "specular_reflection_anisotropy": 0.0,
+  "specular_reflection_anisotropy_rotation": 0.0,
+  "coat_weight": 0.47999998927116394,
+  "coat_color": [
+    1.0,
+    0.97,
+    0.94
+  ],
   "coat_roughness": 0.03,
-  "coat_ior": 1.35
+  "coat_ior": 1.35,
+  "coat_anisotropy": 0.0,
+  "coat_anisotropy_rotation": 0.0,
+  "coat_affect_color": 0.0,
+  "coat_affect_roughness": 0.0,
+  "enable_diffuse_transmission": false,
+  "subsurface_weight": 0.0,
+  "subsurface_transmission_color": [
+    1.0,
+    1.0,
+    1.0
+  ],
+  "subsurface_scattering_color": [
+    1.0,
+    1.0,
+    1.0
+  ],
+  "subsurface_scale": 1.0,
+  "subsurface_anisotropy": 0.0,
+  "enable_specular_transmission": false,
+  "specular_transmission_weight": 0.0,
+  "specular_transmission_color": [
+    1.0,
+    1.0,
+    1.0
+  ],
+  "specular_transmission_scattering_depth": 0.0,
+  "specular_transmission_scattering_color": [
+    1.0,
+    1.0,
+    1.0
+  ],
+  "specular_transmission_scatter_anisotropy": 0.0,
+  "specular_transmission_dispersion_abbe": 0.0,
+  "thin_walled": false,
+  "specular_retro_reflection_weight": 0.0,
+  "specular_retro_reflection_color": [
+    1.0,
+    1.0,
+    1.0
+  ],
+  "specular_retro_reflection_roughness": 0.3,
+  "enable_opacity": false,
+  "geometry_opacity": 1.0,
+  "geometry_opacity_threshold": 0.0,
+  "emission_weight": 0.0,
+  "emission_intensity": 1.0,
+  "emission_color": [
+    1.0,
+    1.0,
+    1.0
+  ],
+  "emission_use_temperature": false,
+  "emission_temperature": 6500.0,
+  "enable_thin_film": false,
+  "thin_film_thickness": 400.0,
+  "thin_film_ior": 1.52,
+  "diffuse_reflection_color": [
+    0.98,
+    0.93,
+    0.88
+  ]
 }

@@ -507,9 +507,10 @@ def _author_input(shader, name: str, value):
     return attr_name
 
 
-def _runtime_input(viewer, shader, name: str, value):
+def _runtime_input(viewer, shader, name: str, value) -> bool:
+    """Write one shader input. False means the renderer rejected it and it must be retried."""
     if getattr(viewer, "_rtx", None) is None:
-        return
+        return False
     attr_name = f"inputs:{name}"
     try:
         viewer._write_runtime_attribute([str(shader.GetPrim().GetPath())], attr_name, _payload(value))
@@ -521,6 +522,40 @@ def _runtime_input(viewer, shader, name: str, value):
         if name not in warned:
             print(f"material input {name} is stored but did not update live ({exc})", flush=True)
             warned.add(name)
+        return False
+    return True
+
+
+def bounce_settings(bounces: int) -> dict:
+    """Render settings for the bounce limit. RealTimePathTracing reads the rtpt
+    keys; light caught inside refracting water turns black when it runs out."""
+    count = ("int", int(bounces))
+    return {
+        "omni:rtx:pt:maxBounces": count,
+        "omni:rtx:rtpt:maxBounces": count,
+        "omni:rtx:rtpt:maxSpecularAndTransmissionBounces": count,
+    }
+
+
+# Not an OmniSurface input. Multiplies the specular color, which has no upper
+# bound, so a mostly see-through film can keep full-strength glints. Cutout
+# opacity scales reflections by the opacity, so the boost is divided by it:
+# the value is the glint strength of an opaque film at any opacity.
+GLINT_KEY = "glint_boost"
+GLINT_MIN_OPACITY = 0.05
+
+
+def _shader_inputs(params: dict) -> dict:
+    inputs = {key: value for key, value in params.items() if key != GLINT_KEY}
+    if GLINT_KEY not in params:
+        return inputs
+    boost = float(params[GLINT_KEY])
+    if params.get("enable_opacity"):
+        boost /= max(float(params.get("geometry_opacity", 1.0)), GLINT_MIN_OPACITY)
+    if boost != 1.0:
+        color = inputs.get("specular_reflection_color", [1.0, 1.0, 1.0])
+        inputs["specular_reflection_color"] = [float(channel) * boost for channel in color]
+    return inputs
 
 
 def apply_params(viewer, segment: str, params: dict):
@@ -528,10 +563,12 @@ def apply_params(viewer, segment: str, params: dict):
     _material, shader = ensure_material(viewer, segment)
     stored = {}
     for _group, key, _label, _kind, _low, _high in FIELDS:
-        if key not in params:
-            continue
-        stored[key] = params[key]
-        _author_input(shader, key, params[key])
+        if key in params:
+            stored[key] = params[key]
+    if GLINT_KEY in params:
+        stored[GLINT_KEY] = float(params[GLINT_KEY])
+    for key, value in _shader_inputs(stored).items():
+        _author_input(shader, key, value)
     params_by_segment = getattr(viewer, "_material_params", None)
     if params_by_segment is None:
         params_by_segment = {}
@@ -541,14 +578,22 @@ def apply_params(viewer, segment: str, params: dict):
 
 
 def flush_materials(viewer):
-    """Push dirty shader inputs. Call this from the camera update."""
+    """Push dirty shader inputs. Call this from the camera update.
+
+    A write before the renderer opens its frame is rejected. Leave the
+    inputs dirty so the next camera update, which is inside that frame,
+    sends them again.
+    """
     if getattr(viewer, "_materials_dirty", False) and getattr(viewer, "_rtx", None) is not None:
+        failed = False
         for segment, params in list(getattr(viewer, "_material_params", {}).items()):
             _material, shader = ensure_material(viewer, segment)
-            for name, value in params.items():
+            for name, value in _shader_inputs(params).items():
                 _author_input(shader, name, value)
-                _runtime_input(viewer, shader, name, value)
-        viewer._materials_dirty = False
+                if not _runtime_input(viewer, shader, name, value):
+                    failed = True
+        if not failed:
+            viewer._materials_dirty = False
     flush_visibility(viewer)
 
 
@@ -655,8 +700,58 @@ def bind_wet_bone(viewer, prim):
     bind_prim(viewer, prim, "wet_bone", getattr(viewer, "_material_document", None) or {"segments": {}, "names": {}})
 
 
+def _look_signature(params: dict) -> tuple:
+    items = []
+    for _group, key, _label, _kind, _low, _high in FIELDS:
+        if key not in params:
+            continue
+        value = params[key]
+        if isinstance(value, (list, tuple)):
+            items.append((key, tuple(float(channel) for channel in value)))
+        elif isinstance(value, bool):
+            items.append((key, bool(value)))
+        else:
+            items.append((key, float(value)))
+    items.append((GLINT_KEY, float(params.get(GLINT_KEY, 1.0))))
+    return tuple(items)
+
+
+def bind_fluid(viewer, prim, segment: str, params: dict | None = None):
+    """Bind one water shader. The stream and the film each have their own.
+
+    A new look replaces the one already on that segment, so a tuner save
+    reaches a mesh that was bound earlier in the same session.
+    """
+    stored = getattr(viewer, "_material_params", {}).get(segment)
+    if isinstance(params, dict) or stored is None:
+        look = dict(WATER)
+        if isinstance(params, dict):
+            look.update(params)
+        if _look_signature(look) != _look_signature(stored or {}):
+            apply_params(viewer, segment, look)
+    # Binding is a scene edit. Repeating it every frame makes the renderer
+    # re-sync the mesh, so a prim is bound once; look changes go through the shader.
+    if str(prim.GetPath()) in getattr(viewer, "_segment_prims", {}).get(segment, ()):
+        return
+    if segment == "film":
+        _clear_water_shadow(prim)
+    bind_prim(viewer, prim, segment, getattr(viewer, "_material_document", None) or {"segments": {}, "names": {}})
+
+
+def _clear_water_shadow(prim):
+    """A thin clear film barely shades the bone. Cutout opacity would block the
+    scope light on the way in as well as on the way out, which reads as oil.
+    Primvars are read when the prim is first rendered, so bind before that."""
+    from pxr import Sdf, UsdGeom
+
+    primvars = UsdGeom.PrimvarsAPI(prim)
+    primvars.CreatePrimvar("doNotCastShadows", Sdf.ValueTypeNames.Bool).Set(True)
+    # Shadow rays pass refracting water too, so Transmission on is not black.
+    primvars.CreatePrimvar("enableFastRefractionShadow", Sdf.ValueTypeNames.Bool).Set(True)
+
+
 def bind_water(viewer, prim):
-    """One shared OmniSurface for the irrigation water sheet."""
+    """Stream shader. The sheet uses the film segment instead."""
     if "water" not in getattr(viewer, "_material_params", {}):
         params = dict(WATER)
         try:
@@ -666,7 +761,7 @@ def bind_water(viewer, prim):
         except Exception:
             pass
         apply_params(viewer, "water", params)
-    bind_prim(viewer, prim, "water", getattr(viewer, "_material_document", None) or {"segments": {}, "names": {}})
+    bind_fluid(viewer, prim, "water", None)
 
 
 def bind_named_mesh(viewer, mesh_name: str, segment: str, document: dict):

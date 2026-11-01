@@ -9,11 +9,15 @@
   "drag_per_s": 3.0,
   "scatter": 0.25,
   "spread_voxels": 0.45,
-  "radius_mm": 0.22,
-  "clump_mm": 0.5,
+  "radius_mm": 0.05000000074505806,
+  "clump_mm": 0.05000000074505806,
   "shaft_bias": 0.0,
   "flute_bias": 0.0,
   "gravity_mm_s2": 80.0,
   "settle_s": 0.18,
-  "color": [0.98, 0.93, 0.88]
+  "color": [
+    0.98,
+    0.93,
+    0.88
+  ]
 }

@@ -1,0 +1,9 @@
+{
+  "Light": false,
+  "Irrigation": true,
+  "Paste": false,
+  "Camera": false,
+  "Structures": false,
+  "Cortex masks": false,
+  "Shaders": false
+}

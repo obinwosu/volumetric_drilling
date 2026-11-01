@@ -166,6 +166,7 @@ def test_save_irrigation_round_trips(tmp_path=None):
         "opacity": 0.057999998331069946,
         "enabled": True,
         "water": {"geometry_opacity": 0.057999998331069946},
+        "film_look": {"geometry_opacity": 0.4, "thin_walled": False},
     }
     with tempfile.TemporaryDirectory() as tmp:
         path = pathlib.Path(tmp) / "tuner_irrigation.json"
@@ -175,6 +176,8 @@ def test_save_irrigation_round_trips(tmp_path=None):
         assert loaded["jet_mm"] == 0.61
         assert loaded["cc_per_s"] == 58.0
         assert loaded["opacity"] == 0.058
+        assert loaded["film_look"]["geometry_opacity"] == 0.4
+        assert loaded["film_look"]["thin_walled"] is False
 
 
 def test_jet_aims_at_the_bone():

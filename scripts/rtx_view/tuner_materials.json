@@ -695,7 +695,7 @@
       "specular_reflection_ior": 1.5,
       "specular_reflection_anisotropy": 0.0,
       "specular_reflection_anisotropy_rotation": 0.0,
-      "coat_weight": 1.0,
+      "coat_weight": 0.1809999942779541,
       "coat_color": [
         1.0,
         1.0,

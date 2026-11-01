@@ -1,11 +1,11 @@
 {
   "version": 1,
   "lights": {
-    "cone_angle_deg": 12.800000190734863,
+    "cone_angle_deg": 11.0,
     "cone_softness": 0.550000011920929,
     "intensity_nits": 20000000.0,
     "fill": 80.0,
-    "disk_radius": 0.25600001215934753,
+    "disk_radius": 0.3140000104904175,
     "disk_standoff": 0.3,
     "disk_color": [
       1.0,
@@ -17,6 +17,21 @@
       0.58,
       0.82
     ],
+    "room": 1.0,
+    "room_nits": 0.0,
+    "drape_color": [
+      0.16,
+      0.42,
+      0.52
+    ],
+    "or_lights": 0.0,
+    "or_light_color": [
+      1.0,
+      0.97,
+      0.92
+    ],
+    "bloom": 0.25999999046325684,
+    "bloom_cutoff": 2.0,
     "beam": 0.0
   }
 }

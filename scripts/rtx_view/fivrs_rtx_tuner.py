@@ -28,6 +28,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import camera_views
 import cortex_masks
 import markings
+import or_room
 import rtx_materials
 from bone_debris import CONFIG_PATH as DEBRIS_PATH, load_config as load_debris
 from fluid.irrigation_bench import (
@@ -36,6 +37,7 @@ from fluid.irrigation_bench import (
     IRRIGATION_PATH,
     STANDOFF_MM,
     IrrigationBench,
+    film_look_from_irrigation,
     load_irrigation,
     quat_aiming_at_bone,
     save_irrigation,
@@ -61,6 +63,7 @@ DEFAULT_LIGHTS = {
     "disk_standoff": 0.3,
     "disk_color": [1.0, 0.94, 0.86],
     "fill_color": [0.85, 0.78, 0.70],
+    **or_room.DEFAULTS,
 }
 
 
@@ -338,13 +341,19 @@ def _quiet_stock_panels():
     ViewerGui._render_stats_overlay = lambda self: None
 
 
+# Close enough that the jet is obvious, far enough that it is not buried in the bone.
+PREVIEW_STANDOFF_MM = 15.0
+# Same burr the tuner shaft is built for. The live window emits from this cannula.
+PREVIEW_SIZE_MM = 6
+
+
 def _burr_pose(groups, camera):
-    """Park the burr in the lower-right of the scope, 25 mm above the bone."""
+    """Park the burr in the middle of the scope, just off the bone toward the camera."""
     position, right, up, forward = camera
     parts = [np.concatenate(points) for points, _normals, _tris in groups.values() if points]
     if not parts:
         center = position + forward * 1.6
-        return center, right, up, forward
+        return center, right, up, forward, center + forward * (PREVIEW_STANDOFF_MM * MM_TO_SIM)
     cloud = np.concatenate(parts)
     rel = cloud - position
     along = rel @ forward
@@ -358,8 +367,8 @@ def _burr_pose(groups, camera):
     xs_v = xs[visible]
     ys_v = ys[visible]
     half = math.tan(0.5 * VERTICAL_FOV_RAD)
-    target_ax = 0.32 * half
-    target_ay = -0.32 * half
+    target_ax = 0.0
+    target_ay = 0.05 * half
     ang = (xs_v / np.maximum(along_v, 1e-6) - target_ax) ** 2 + (
         ys_v / np.maximum(along_v, 1e-6) - target_ay
     ) ** 2
@@ -368,8 +377,8 @@ def _burr_pose(groups, camera):
     if not np.any(front):
         front = np.ones(len(pts), dtype=bool)
     bone_pt = pts[front][int(np.argmin(ang[front]))]
-    center = bone_pt - forward * (STANDOFF_MM * MM_TO_SIM)
-    return center, right, up, forward
+    center = bone_pt - forward * (PREVIEW_STANDOFF_MM * MM_TO_SIM)
+    return center, right, up, forward, bone_pt
 
 
 def _author_burr(viewer, groups, camera):
@@ -377,7 +386,7 @@ def _author_burr(viewer, groups, camera):
     from surface import vertex_normals
 
     scale = 6.0 * MM_TO_SIM * 0.5
-    center, right, up, forward = _burr_pose(groups, camera)
+    center, right, up, forward, bone_pt = _burr_pose(groups, camera)
     flute_path = MESH_DIR / "fluted_burr.obj"
     try:
         points, tris, normals = _load_obj(flute_path)
@@ -386,8 +395,8 @@ def _author_burr(viewer, groups, camera):
         points, tris = _sphere(1.0)
         normals = vertex_normals(points.astype(np.float64), tris).astype(np.float32)
         print(f"Fluted burr unavailable ({exc}); using the diamond sphere", flush=True)
-    # Mesh -X is the cutting end. Face that toward the camera so the flutes show.
-    axes = np.column_stack((forward, right, up))
+    # Mesh -X is the cutting end. Point it at the bone, so the handpiece is toward the camera.
+    axes = np.column_stack((-forward, right, up))
     world = np.ascontiguousarray(points @ axes.T * scale + center, np.float32)
     world_normals = np.ascontiguousarray(normals @ axes.T, np.float32)
     color = tuple(rtx_materials.resolve(viewer._material_document, "burr")["diffuse_reflection_color"])
@@ -406,7 +415,7 @@ def _author_burr(viewer, groups, camera):
         return None
     rtx_materials.bind_prim(viewer, prim, "burr", viewer._material_document)
     print(
-        f"Tuner burr at {center.round(3).tolist()}  {STANDOFF_MM:g} mm above the bone",
+        f"Tuner burr at {center.round(3).tolist()}  {PREVIEW_STANDOFF_MM:g} mm off the bone",
         flush=True,
     )
     return {
@@ -416,6 +425,7 @@ def _author_burr(viewer, groups, camera):
         "right": right,
         "up": up,
         "forward": forward,
+        "bone": bone_pt,
     }
 
 
@@ -426,7 +436,7 @@ def _author_shaft(viewer, burr):
     center = np.asarray(burr["center"], dtype=np.float64)
     axes = np.column_stack(
         (
-            np.asarray(burr["forward"], dtype=np.float64),
+            -np.asarray(burr["forward"], dtype=np.float64),
             np.asarray(burr["right"], dtype=np.float64),
             np.asarray(burr["up"], dtype=np.float64),
         )
@@ -479,7 +489,7 @@ def _author_diamond(viewer, burr):
     center = center + right * (8.0 * MM_TO_SIM)
     axes = np.column_stack(
         (
-            np.asarray(burr["forward"], dtype=np.float64),
+            -np.asarray(burr["forward"], dtype=np.float64),
             right,
             np.asarray(burr["up"], dtype=np.float64),
         )
@@ -503,6 +513,46 @@ def _author_diamond(viewer, burr):
     rtx_materials.bind_prim(viewer, prim, "burr_diamond", viewer._material_document)
     print(f"Tuner diamond burr {len(tris)} tris", flush=True)
     return {"id": "burr_diamond", "prim": prim}
+
+
+def _author_cannula(viewer, burr):
+    """6 mm irrigation tube on the same pose as the handpiece. The jet leaves its opening."""
+    from fluid.cannula import load_obj as load_cannula_obj, mesh_path
+    from surface import vertex_normals
+
+    try:
+        points, tris = load_cannula_obj(mesh_path(PREVIEW_SIZE_MM))
+    except (OSError, ValueError) as exc:
+        print(f"Tuner cannula unavailable ({exc})", flush=True)
+        return None
+    normals = vertex_normals(points, tris).astype(np.float32)
+    center = np.asarray(burr["center"], dtype=np.float64)
+    axes = np.column_stack(
+        (
+            -np.asarray(burr["forward"], dtype=np.float64),
+            np.asarray(burr["right"], dtype=np.float64),
+            np.asarray(burr["up"], dtype=np.float64),
+        )
+    )
+    world = np.ascontiguousarray(points @ axes.T + center, np.float32)
+    world_normals = np.ascontiguousarray(normals @ axes.T, np.float32)
+    params = rtx_materials.resolve(viewer._material_document, "cannula")
+    viewer.log_mesh(
+        "cannula",
+        wp.array(world, dtype=wp.vec3),
+        wp.array(np.ascontiguousarray(tris.reshape(-1), np.int32), dtype=wp.int32),
+        normals=wp.array(world_normals, dtype=wp.vec3),
+        color=tuple(float(channel) for channel in params["diffuse_reflection_color"]),
+        roughness=float(params["specular_reflection_roughness"]),
+        metallic=float(params["metalness"]),
+    )
+    prim = viewer.stage.GetPrimAtPath(viewer._get_path(viewer._qualify("cannula")))
+    if not prim or not prim.IsValid():
+        print("No mesh prim for cannula", flush=True)
+        return None
+    rtx_materials.bind_prim(viewer, prim, "cannula", viewer._material_document)
+    print(f"Tuner cannula {PREVIEW_SIZE_MM:g} mm {len(tris)} tris", flush=True)
+    return {"id": "cannula", "prim": prim}
 
 
 def _author_scene(viewer, lights, camera):
@@ -578,6 +628,9 @@ def _author_scene(viewer, lights, camera):
         if diamond:
             segments.append(diamond)
         segments.extend(_author_shaft(viewer, burr))
+        cannula = _author_cannula(viewer, burr)
+        if cannula:
+            segments.append(cannula)
     disk_color = Gf.Vec3f(*lights["disk_color"])
     disk = UsdLux.DiskLight.Define(viewer.stage, "/root/_ScopeLight")
     disk.CreateIntensityAttr(float(lights["intensity_nits"]))
@@ -590,6 +643,7 @@ def _author_scene(viewer, lights, camera):
     dome = UsdLux.DomeLight.Define(viewer.stage, "/root/_ScopeFill")
     dome.CreateIntensityAttr(float(lights["fill"]))
     dome.CreateColorAttr(Gf.Vec3f(*lights["fill_color"]))
+    or_room.author_room(viewer.stage, "/root/_ScopeFill", lights)
     return segments, cache, frame, rotation, translation, occupied, burr
 
 
@@ -634,8 +688,10 @@ def _bind_light(viewer, lights):
                     "inputs:shaping:cone:softness": float(lights["cone_softness"]),
                     "inputs:shaping:focus": 1.0,
                 },
-                "/root/_ScopeFill": {"inputs:intensity": float(lights["fill"])},
+                "/root/_ScopeFill": or_room.dome_inputs(lights),
             }
+            for path in or_room.OR_LIGHT_PATHS:
+                values[path] = or_room.or_light_inputs(lights)
             for path, attrs in values.items():
                 for name, value in attrs.items():
                     viewer._write_runtime_attribute([path], name, np.array([value], dtype=np.float32))
@@ -813,39 +869,111 @@ def _slider(imgui, label, value, low, high, fmt, flags=0):
     return bool(changed), float(new_value)
 
 
+PANELS_PATH = HERE / "tuner_panels.json"
+PANELS_SHOWN = ("Light", "Irrigation")
+
+
+def _load_panels(names) -> dict:
+    try:
+        saved = json.loads(PANELS_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        saved = {}
+    if not isinstance(saved, dict):
+        saved = {}
+    return {name: bool(saved.get(name, name in PANELS_SHOWN)) for name in names}
+
+
+def _draw_panel_bar(imgui, shown: dict) -> None:
+    """One row of toggles. Each tuner window only draws while its box is ticked."""
+    display = imgui.get_io().display_size
+    imgui.set_next_window_pos(imgui.ImVec2(display[0] * 0.5, 4.0), imgui.Cond_.always, imgui.ImVec2(0.5, 0.0))
+    flags = (
+        imgui.WindowFlags_.no_title_bar
+        | imgui.WindowFlags_.always_auto_resize
+        | imgui.WindowFlags_.no_move
+        | imgui.WindowFlags_.no_saved_settings
+    )
+    imgui.begin("Panels", None, flags)
+    changed = False
+    for index, name in enumerate(shown):
+        if index:
+            imgui.same_line()
+        touched, shown[name] = imgui.checkbox(name, shown[name])
+        changed |= touched
+    imgui.end()
+    if changed:
+        PANELS_PATH.write_text(json.dumps(shown, indent=2) + "\n")
+
+
+def _register_panels(viewer, panels) -> None:
+    shown = _load_panels([name for name, _draw in panels])
+    viewer.register_ui_callback(lambda imgui: _draw_panel_bar(imgui, shown), position="free")
+    for name, draw in panels:
+        viewer.register_ui_callback(
+            lambda imgui, name=name, draw=draw: draw(imgui) if shown[name] else None, position="free"
+        )
+
+
+def _section(imgui, label: str, open_first: bool) -> bool:
+    """Collapsible block. open_first is its state when the tuner starts."""
+    imgui.set_next_item_open(open_first, imgui.Cond_.once)
+    return bool(imgui.collapsing_header(label))
+
+
 def _draw_panel(imgui, document, status):
     lights = document["lights"]
     log_flag = imgui.SliderFlags_.logarithmic.value
     imgui.set_next_window_pos(imgui.ImVec2(16, 16), imgui.Cond_.first_use_ever)
     imgui.set_next_window_size(imgui.ImVec2(360, 520), imgui.Cond_.first_use_ever)
-    imgui.begin("FIVRS RTX Tuner")
-    imgui.text("Scope light")
-    imgui.text_disabled("Angle and softness, then intensity, then fill.")
-    imgui.separator()
+    imgui.begin("Light")
     changed = False
-    touched, lights["cone_angle_deg"] = _slider(
-        imgui, "Cone angle", lights["cone_angle_deg"], 6.0, 24.0, "%.1f deg"
-    )
-    changed |= touched
-    touched, lights["cone_softness"] = _slider(
-        imgui, "Softness", lights["cone_softness"], 0.05, 1.0, "%.2f"
-    )
-    changed |= touched
-    imgui.separator()
-    touched, lights["intensity_nits"] = _slider(
-        imgui, "Intensity", lights["intensity_nits"], 1.0e5, 2.0e7, "%.3g nits", log_flag
-    )
-    changed |= touched
-    imgui.separator()
-    touched, lights["fill"] = _slider(imgui, "Fill", lights["fill"], 0.0, 40.0, "%.1f")
-    changed |= touched
-    imgui.separator()
-    imgui.text("Source size")
-    imgui.text_disabled("Highlight width. Leave this while shaping the pool.")
-    touched, lights["disk_radius"] = _slider(
-        imgui, "Disk radius", lights["disk_radius"], 0.05, 0.50, "%.3f"
-    )
-    changed |= touched
+    if _section(imgui, "Scope light", True):
+        imgui.text_disabled("Angle and softness, then intensity, then fill.")
+        touched, lights["cone_angle_deg"] = _slider(
+            imgui, "Cone angle", lights["cone_angle_deg"], 6.0, 24.0, "%.1f deg"
+        )
+        changed |= touched
+        touched, lights["cone_softness"] = _slider(
+            imgui, "Softness", lights["cone_softness"], 0.05, 1.0, "%.2f"
+        )
+        changed |= touched
+        touched, lights["intensity_nits"] = _slider(
+            imgui, "Intensity", lights["intensity_nits"], 1.0e5, 2.0e7, "%.3g nits", log_flag
+        )
+        changed |= touched
+        touched, lights["fill"] = _slider(imgui, "Fill", lights["fill"], 0.0, 200.0, "%.1f")
+        changed |= touched
+        imgui.text_disabled("Fill is the light the room puts on the bone.")
+        touched, lights["disk_radius"] = _slider(
+            imgui, "Disk radius", lights["disk_radius"], 0.05, 0.50, "%.3f"
+        )
+        changed |= touched
+        imgui.text_disabled("Disk radius is the highlight width.")
+    if _section(imgui, "Operating room", True):
+        imgui.text_disabled("Seen in the wet bone only. It does not light the bone.")
+        touched, lights["room_nits"] = _slider(
+            imgui, "Room in reflections", lights["room_nits"], 0.0, 1.0e5, "%.3g nits", log_flag
+        )
+        changed |= touched
+        touched, lights["or_lights"] = _slider(
+            imgui, "Overhead lights", lights["or_lights"], 0.0, 1.0e6, "%.3g nits", log_flag
+        )
+        changed |= touched
+        touched, lights["room"] = _slider(imgui, "Room", lights["room"], 0.0, 1.0, "%.2f")
+        changed |= touched
+        touched, color = imgui.color_edit3("Drapes", [float(c) for c in lights["drape_color"]])
+        if touched:
+            lights["drape_color"] = [float(c) for c in color]
+            changed = True
+        imgui.text_disabled("Room 0 is the old flat fill in Fill color. Room and drapes apply on restart.")
+    if _section(imgui, "Camera", False):
+        touched, lights["bloom"] = _slider(imgui, "Bloom", lights["bloom"], 0.0, 2.0, "%.2f")
+        changed |= touched
+        touched, lights["bloom_cutoff"] = _slider(
+            imgui, "Bloom cutoff", lights["bloom_cutoff"], 0.5, 10.0, "%.2f", log_flag
+        )
+        changed |= touched
+        imgui.text_disabled("Bloom applies when both windows restart.")
     imgui.separator()
     if imgui.button("Save light") or changed:
         save_document(document)
@@ -856,6 +984,64 @@ def _draw_panel(imgui, document, status):
 
 
 WATER_GROUPS = ("Base", "Specular", "Transmission", "Opacity")
+# Ray bounces the renderer was created with. It cannot change while running.
+_START_BOUNCES = 4
+
+# The scope light is a small disk. The path tracer cannot light bone through a
+# refracting or transmissive surface from it, so water drawn that way is black
+# from every angle. Fractional opacity lets the light and the bone through;
+# what is opaque is a water-like reflection with no body color.
+# Specular roughness is left alone so the highlights you tuned stay.
+# Glint boost is the strength an opaque film would have; opacity does not dim it.
+WATER_PRESETS = {
+    "Clear water": {
+        "glint_boost": 4.0,
+        "diffuse_reflection_weight": 0.0,
+        "diffuse_reflection_color": [1.0, 1.0, 1.0],
+        "metalness": 0.0,
+        "specular_reflection_weight": 1.0,
+        "specular_reflection_color": [1.0, 1.0, 1.0],
+        "specular_reflection_ior": 1.33,
+        "enable_specular_transmission": False,
+        "specular_transmission_weight": 0.0,
+        "specular_transmission_scattering_depth": 0.0,
+        "thin_walled": True,
+        "enable_opacity": True,
+        "geometry_opacity": 0.2,
+    },
+    "Wet bone": {
+        "glint_boost": 1.0,
+        "diffuse_reflection_weight": 0.06,
+        "diffuse_reflection_color": [0.7, 0.88, 1.0],
+        "metalness": 0.0,
+        "specular_reflection_weight": 1.0,
+        "specular_reflection_color": [1.0, 1.0, 1.0],
+        "specular_reflection_ior": 1.33,
+        "enable_specular_transmission": False,
+        "specular_transmission_weight": 0.0,
+        "specular_transmission_scattering_depth": 0.0,
+        "thin_walled": True,
+        "enable_opacity": True,
+        # Light passes the film twice, in and back out, so bone under it reads
+        # at about (1 - opacity) squared.
+        "geometry_opacity": 0.25,
+    },
+    "Pooled water": {
+        "glint_boost": 1.0,
+        "diffuse_reflection_weight": 0.1,
+        "diffuse_reflection_color": [0.75, 0.9, 1.0],
+        "metalness": 0.0,
+        "specular_reflection_weight": 1.0,
+        "specular_reflection_color": [1.0, 1.0, 1.0],
+        "specular_reflection_ior": 1.33,
+        "enable_specular_transmission": False,
+        "specular_transmission_weight": 0.0,
+        "specular_transmission_scattering_depth": 0.0,
+        "thin_walled": True,
+        "enable_opacity": True,
+        "geometry_opacity": 0.35,
+    },
+}
 
 
 def _ensure_water(irrigation: dict) -> dict:
@@ -864,39 +1050,14 @@ def _ensure_water(irrigation: dict) -> dict:
     return water
 
 
-def _draw_irrigation_panel(imgui, viewer, irrigation, status):
-    imgui.set_next_window_pos(imgui.ImVec2(840, 16), imgui.Cond_.first_use_ever)
-    imgui.set_next_window_size(imgui.ImVec2(380, 640), imgui.Cond_.first_use_ever)
-    imgui.begin("Irrigation")
-    imgui.text("Irrigation")
-    imgui.text_disabled("Drag a control. Save writes the live SPH jet and RTX water look.")
-    imgui.separator()
+def _ensure_film(irrigation: dict) -> dict:
+    film = film_look_from_irrigation(irrigation, rtx_materials.WATER)
+    irrigation["film_look"] = film
+    return film
+
+
+def _draw_look_fields(imgui, look, prefix) -> bool:
     changed = False
-    if imgui.button("1 mm tube"):
-        irrigation["draw"] = DRAW_TUBE
-        irrigation["jet_mm"] = 1.0
-        changed = True
-    imgui.same_line()
-    if imgui.button("0.2 mm spheres"):
-        irrigation["draw"] = DRAW_SPHERES
-        irrigation["particle_mm"] = 0.2
-        irrigation["jet_mm"] = 1.0
-        changed = True
-    imgui.text_disabled(f"Draw: {irrigation['draw']}")
-    imgui.separator()
-    touched, irrigation["jet_mm"] = _slider(imgui, "Jet", irrigation["jet_mm"], 0.4, 2.0, "%.2f mm")
-    changed |= touched
-    touched, irrigation["particle_mm"] = _slider(
-        imgui, "Spheres", irrigation["particle_mm"], 0.10, 0.60, "%.2f mm"
-    )
-    changed |= touched
-    touched, irrigation["cc_per_s"] = _slider(imgui, "Flow", irrigation["cc_per_s"], 5.0, 120.0, "%.0f cc/s")
-    changed |= touched
-    touched, irrigation["film_ms"] = _slider(imgui, "Film", irrigation["film_ms"], 20.0, 80.0, "%.0f ms")
-    changed |= touched
-    water = _ensure_water(irrigation)
-    imgui.separator()
-    imgui.text("Water material")
     current = None
     opened = True
     for group, key, label, kind, low, high in rtx_materials.FIELDS:
@@ -904,33 +1065,140 @@ def _draw_irrigation_panel(imgui, viewer, irrigation, status):
             continue
         if group != current:
             current = group
-            imgui.set_next_item_open(True, imgui.Cond_.once)
-            opened = imgui.collapsing_header(group)
+            opened = _section(imgui, f"{prefix} {group}", False)
         if not opened:
             continue
-        imgui.push_id(f"water_{key}")
+        imgui.push_id(f"{prefix}_{key}")
         if kind == "bool":
-            touched, value = imgui.checkbox(label, bool(water.get(key, False)))
+            touched, value = imgui.checkbox(label, bool(look.get(key, False)))
             if touched:
-                water[key] = bool(value)
+                look[key] = bool(value)
                 changed = True
         elif kind == "color":
-            color = [float(channel) for channel in water.get(key, [1.0, 1.0, 1.0])]
+            color = [float(channel) for channel in look.get(key, [1.0, 1.0, 1.0])]
             touched, value = imgui.color_edit3(label, color)
             if touched:
-                water[key] = [float(channel) for channel in value]
+                look[key] = [float(channel) for channel in value]
                 changed = True
         else:
+            # Scene units are about 99 mm, so useful water depths sit near 0.01-0.1.
+            flags = imgui.SliderFlags_.logarithmic.value if key == "specular_transmission_scattering_depth" else 0
             touched, value = imgui.slider_float(
-                label, float(water.get(key, 0.0)), float(low), float(high), "%.3f"
+                label, float(look.get(key, 0.0)), float(low), float(high), "%.3f", flags
             )
             if touched:
-                water[key] = float(value)
+                look[key] = float(value)
                 changed = True
         imgui.pop_id()
+    return changed
+
+
+def _draw_irrigation_panel(imgui, viewer, irrigation, status):
+    imgui.set_next_window_pos(imgui.ImVec2(840, 16), imgui.Cond_.first_use_ever)
+    imgui.set_next_window_size(imgui.ImVec2(400, 860), imgui.Cond_.first_use_ever)
+    imgui.begin("Irrigation")
+    changed = False
+    running = bool(irrigation.get("enabled", True))
+    if imgui.button("Turn irrigation off" if running else "Turn irrigation on"):
+        irrigation["enabled"] = not running
+        changed = True
+    imgui.same_line()
+    imgui.text("on" if running else "off")
+    if _section(imgui, "Jet", False):
+        imgui.text_disabled("The column leaving the cannula.")
+        if imgui.button("1 mm tube"):
+            irrigation["draw"] = DRAW_TUBE
+            irrigation["jet_mm"] = 1.0
+            changed = True
+        imgui.same_line()
+        if imgui.button("0.2 mm spheres"):
+            irrigation["draw"] = DRAW_SPHERES
+            irrigation["particle_mm"] = 0.2
+            irrigation["jet_mm"] = 1.0
+            changed = True
+        imgui.text_disabled(f"Draw: {irrigation['draw']}")
+        touched, irrigation["jet_mm"] = _slider(imgui, "Jet", irrigation["jet_mm"], 0.4, 2.0, "%.2f mm")
+        changed |= touched
+        touched, irrigation["particle_mm"] = _slider(
+            imgui, "Spheres", irrigation["particle_mm"], 0.10, 0.60, "%.2f mm"
+        )
+        changed |= touched
+        touched, irrigation["cc_per_s"] = _slider(imgui, "Flow", irrigation["cc_per_s"], 5.0, 120.0, "%.0f cc/s")
+        changed |= touched
+    if _section(imgui, "Film flow", True):
+        touched, irrigation["film_spread_mm"] = _slider(
+            imgui, "Film width", float(irrigation.get("film_spread_mm", 20.0)), 2.0, 30.0, "%.1f mm"
+        )
+        changed |= touched
+        touched, irrigation["film_depth_mm"] = _slider(
+            imgui, "Film depth", float(irrigation.get("film_depth_mm", 3.0)), 0.2, 6.0, "%.2f mm"
+        )
+        changed |= touched
+        touched, irrigation["film_life_s"] = _slider(
+            imgui, "Life", float(irrigation.get("film_life_s", 8.0)), 0.2, 20.0, "%.1f s"
+        )
+        changed |= touched
+        imgui.text_disabled("How long water stays. Longer fills the cavity and runs down the bone.")
+        touched, irrigation["film_smooth"] = _slider(
+            imgui, "Smooth", float(irrigation.get("film_smooth", 0.65)), 0.0, 1.0, "%.2f"
+        )
+        changed |= touched
+        imgui.text_disabled("Blends the 0.5 mm cells. The facets are that grid, not particles.")
+        touched, irrigation["film_ripple"] = _slider(
+            imgui, "Ripple", float(irrigation.get("film_ripple", 0.5)), 0.0, 1.0, "%.2f"
+        )
+        changed |= touched
+        imgui.text_disabled("Small waves in the highlights that run downhill.")
+        touched, irrigation["film_rivulets"] = _slider(
+            imgui, "Rivulets", float(irrigation.get("film_rivulets", 0.5)), 0.0, 1.0, "%.2f"
+        )
+        changed |= touched
+        imgui.text_disabled("0 spreads as an even sheet. 1 breaks the front into streams.")
+    gravity = [float(channel) for channel in (irrigation.get("gravity") or [0.0, 0.0, -1.0])]
+    while len(gravity) < 3:
+        gravity.append(0.0)
+    gravity = gravity[:3]
+    if _section(imgui, "Gravity", False):
+        imgui.text_disabled("Downhill direction in the scene. World down is (0, 0, −1).")
+        for index, label in enumerate(("Down X", "Down Y", "Down Z")):
+            touched, gravity[index] = _slider(imgui, label, gravity[index], -1.0, 1.0, "%.2f")
+            changed |= touched
+        if imgui.button("World down"):
+            gravity = [0.0, 0.0, -1.0]
+            changed = True
+    irrigation["gravity"] = gravity
+    water = _ensure_water(irrigation)
+    film = _ensure_film(irrigation)
+    if _section(imgui, "Film shader", True):
+        imgui.text_disabled("Opacity sets how much bone shows through. Transmission or Thin walled off go black.")
+        for index, (name, preset) in enumerate(WATER_PRESETS.items()):
+            if index:
+                imgui.same_line()
+            if imgui.button(name):
+                film.update({key: (list(value) if isinstance(value, list) else value) for key, value in preset.items()})
+                changed = True
+        touched, film[rtx_materials.GLINT_KEY] = _slider(
+            imgui, "Glint boost", float(film.get(rtx_materials.GLINT_KEY, 1.0)), 1.0, 10.0, "%.1fx"
+        )
+        changed |= touched
+        imgui.text_disabled("Glints keep this strength at any opacity. Opacity only sets how much bone shows.")
+        changed |= _draw_look_fields(imgui, film, "Film")
+    if _section(imgui, "Stream shader", False):
+        changed |= _draw_look_fields(imgui, water, "Stream")
     irrigation["opacity"] = float(water.get("geometry_opacity", irrigation["opacity"]))
     irrigation["water"] = water
+    if _section(imgui, "Render", False):
+        bounces = int(irrigation.get("max_bounces", 4))
+        touched, bounces = imgui.slider_int("Max bounces", bounces, 2, 12)
+        if touched:
+            irrigation["max_bounces"] = int(bounces)
+            changed = True
+        imgui.text_disabled(
+            f"Refracting water needs 6-8; black specks mean too few. Restart both windows to apply (now {_START_BOUNCES})."
+        )
+    irrigation["film_look"] = film
     rtx_materials.apply_params(viewer, "water", dict(water))
+    rtx_materials.apply_params(viewer, "film", dict(film))
     imgui.separator()
     if imgui.button("Save irrigation") or changed:
         save_irrigation(IRRIGATION_PATH, irrigation)
@@ -1057,6 +1325,8 @@ def main():
     document = load_document()
     lights = document["lights"]
     irrigation = load_irrigation(IRRIGATION_PATH)
+    global _START_BOUNCES
+    _START_BOUNCES = int(irrigation.get("max_bounces", 4))
     camera = _right_ear_camera()
     position, right, up, forward = camera
     viewer = newton.viewer.ViewerRTX(
@@ -1070,8 +1340,11 @@ def main():
         render_settings={
             "omni:rtx:pt:samplesPerPixel": ("uint", 1),
             "omni:rtx:pt:denoising:enabled": ("bool", True),
-            "omni:rtx:pt:maxBounces": ("int", 4),
+            # Same upscaling as the live window, so the two look alike.
+            "omni:rtx:post:dlss:execMode": ("token", "performance"),
+            **rtx_materials.bounce_settings(_START_BOUNCES),
             "omni:rtx:rt:fractionalOpacity": ("bool", True),
+            **or_room.render_settings(lights),
         },
     )
     viewer.set_model(newton.ModelBuilder().finalize())
@@ -1105,10 +1378,26 @@ def main():
         np.asarray(frame.dimensions, dtype=np.float64),
         np.asarray(occupied.shape, dtype=np.float64),
     )
-    bench = IrrigationBench(occupied, volume_frame, down=screen_down())
+    or_room.author_or_lights(
+        viewer.stage, volume_frame.index_to_world(np.asarray(occupied.shape, dtype=np.float64) * 0.5), lights
+    )
+    bench = IrrigationBench(occupied, volume_frame, down=screen_down(), gpu_film=True)
     bench.apply(irrigation)
     rtx_materials.apply_params(viewer, "water", _ensure_water(irrigation))
+    rtx_materials.apply_params(viewer, "film", _ensure_film(irrigation))
     bench.prime(viewer)
+    # The renderer copies the sheet on the first frame and then only moves
+    # those vertices. Fill it first, while that mesh can still be replaced.
+    if pose is not None:
+        quat = quat_aiming_at_bone(pose["forward"], pose["right"])
+        for _ in range(45):
+            bench.step(1.0 / 60.0, pose["center"], quat, size_mm=PREVIEW_SIZE_MM)
+        bench.draw(viewer, splash=False)
+        print(
+            f"Tuner sheet {bench.film.n_tris} tris  {bench.film.volume_mm3:.2f} mm3  "
+            f"hit {bench.hit_mm:.1f} mm",
+            flush=True,
+        )
     status = {"text": "Moves save as you drag."}
     camera_state = {
         "views": camera_views.load_views(),
@@ -1125,21 +1414,15 @@ def main():
         translation,
         str(ADF.relative_to(REPO)),
     )
-    if cortex.pivot is not None:
+    if pose is not None and pose.get("bone") is not None:
+        bone = np.asarray(pose["bone"], dtype=np.float64)
+        viewer._scope_cam["pivot"] = bone.copy()
+        viewer.camera.set_pivot(tuple(float(value) for value in bone))
+    elif cortex.pivot is not None:
         viewer._scope_cam["pivot"] = np.asarray(cortex.pivot, dtype=np.float64).copy()
         viewer.camera.set_pivot(tuple(float(value) for value in cortex.pivot))
     shaders = markings.ShaderPanel(viewer, cortex)
     cortex.on_masks_changed = shaders.apply_pattern
-    viewer.register_ui_callback(lambda imgui: _draw_panel(imgui, document, status), position="free")
-    viewer.register_ui_callback(
-        lambda imgui: _draw_camera_panel(imgui, viewer, camera_state), position="free"
-    )
-    viewer.register_ui_callback(materials.draw, position="free")
-    viewer.register_ui_callback(cortex.draw, position="free")
-    viewer.register_ui_callback(shaders.draw, position="free")
-    viewer.register_ui_callback(
-        lambda imgui: _draw_irrigation_panel(imgui, viewer, irrigation, status), position="free"
-    )
     debris = load_debris()
     slurry = rtx_materials.slurry_params()
     paste = {
@@ -1154,7 +1437,18 @@ def main():
         "look": slurry,
         "status": "Drag a slider. Save picture writes a png you can drop in chat.",
     }
-    viewer.register_ui_callback(lambda imgui: _draw_paste_panel(imgui, viewer, paste), position="free")
+    _register_panels(
+        viewer,
+        (
+            ("Light", lambda imgui: _draw_panel(imgui, document, status)),
+            ("Irrigation", lambda imgui: _draw_irrigation_panel(imgui, viewer, irrigation, status)),
+            ("Paste", lambda imgui: _draw_paste_panel(imgui, viewer, paste)),
+            ("Camera", lambda imgui: _draw_camera_panel(imgui, viewer, camera_state)),
+            ("Structures", materials.draw),
+            ("Cortex masks", cortex.draw),
+            ("Shaders", shaders.draw),
+        ),
+    )
     print(
         f"Tuner ready. Views {camera_views.VIEWS_PATH.name}  light {SAVE_PATH.name}  "
         f"materials {rtx_materials.MATERIALS_PATH.name}  "
@@ -1185,16 +1479,24 @@ def main():
         if pose is not None:
             bench.apply(irrigation)
             rtx_materials.apply_params(viewer, "water", _ensure_water(irrigation))
-            bench.step(dt, pose["center"], quat_aiming_at_bone(pose["forward"], pose["right"]))
-            bench.draw(viewer)
+            rtx_materials.apply_params(viewer, "film", _ensure_film(irrigation))
+            quat = quat_aiming_at_bone(pose["forward"], pose["right"])
+            if irrigation.get("enabled", True):
+                bench.step(dt, pose["center"], quat, size_mm=PREVIEW_SIZE_MM)
+                bench.draw(viewer, splash=False)
+            else:
+                bench.hide(viewer)
         _draw_paste(viewer, pose, paste)
-        rtx_materials.flush_materials(viewer)
         viewer.end_frame()
         if viewer._window is not None:
             fps = (1.0 / dt) if dt > 1e-4 else 0.0
+            state = "on" if irrigation.get("enabled", True) else "off"
             viewer._window.set_caption(
-                f"FIVRS RTX Tuner  {fps:.0f} fps  {irrigation['draw']}  "
-                f"hit {bench.hit_mm:.1f} mm  film {bench.live_film}"
+                f"FIVRS RTX Tuner  {fps:.0f} fps  irrigation {state}  "
+                f"jet {float(irrigation['jet_mm']):.2f} mm  "
+                f"film {float(irrigation.get('film_spread_mm', 20)):.1f} x "
+                f"{float(irrigation.get('film_depth_mm', 3)):.2f} mm  "
+                f"hit {bench.hit_mm:.1f} mm  sheet {bench.film.n_tris} tris"
             )
     viewer.close()
 

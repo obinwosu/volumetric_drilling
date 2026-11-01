@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import queue
 import struct
@@ -34,19 +35,19 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import bone_debris
 import cortex_masks
 import markings
+import or_room
 import pause_menu
 import rtx_materials
 from fluid.cannula import SIZES as CANNULA_SIZES, load_obj as load_cannula_obj, mesh_path as cannula_mesh_path
 from fluid.irrigation_bench import (
     DRAW_SPHERES,
-    DRAW_TUBE,
     IRRIGATION_PATH,
     IrrigationBench,
+    film_look_from_irrigation,
     load_irrigation,
     water_from_irrigation,
 )
 from fluid.occupancy import VolumeFrame
-from fluid.surface_film import SurfaceFilm
 from fluid.surface_sph import SurfaceSph, film_surface
 from fluid.rtx_stream import PrescribedStream
 from fluid.sph_dump import DEFAULT_PATH as SPH_DUMP, dump_is_fresh, read_positions
@@ -68,6 +69,8 @@ MESH_DIR = pathlib.Path(__file__).resolve().parents[2] / "ADF" / "meshes" / "hig
 # main_camera field view angle, radians, full vertical angle.
 VERTICAL_FOV_RAD = 0.17951634837990105
 RUNTIME = pathlib.Path("/tmp/fivrs-rtx")
+# Bone dust costs frame time while drilling. FIVRS_BONE_DUST=1 turns it back on.
+BONE_DUST = os.environ.get("FIVRS_BONE_DUST", "0") == "1"
 BONE_ROUGHNESS = 0.55
 # The specimen is one surface a few units in front of the camera. A distant
 # beam lights that whole surface evenly, so it stays off unless toggled.
@@ -83,6 +86,7 @@ LIGHT_BASE = {
     "/root/_ScopeBeam": 200.0,
     "/root/_ScopeFill": 8.0,
     "/root/_ScopeLight": 4.95e6,
+    **{path: or_room.DEFAULTS["or_lights"] for path in or_room.OR_LIGHT_PATHS},
 }
 CONE_RADIUS = 0.2
 CONE_STANDOFF = 0.3
@@ -381,6 +385,7 @@ def _tuner_lights_from_file():
         "disk_standoff": CONE_STANDOFF,
         "disk_color": [1.0, 0.94, 0.86],
         "fill_color": [0.85, 0.78, 0.70],
+        **or_room.DEFAULTS,
     }
     try:
         saved = json.loads(TUNER_LIGHT_PATH.read_text())
@@ -396,14 +401,22 @@ def _tuner_lights_from_file():
 
 def _apply_tuner_lights(viewer, lights):
     """Copy the saved scope light onto the viewer. The distant beam is separate."""
-    LIGHT_BASE["/root/_ScopeFill"] = float(lights["fill"])
+    dome = or_room.dome_inputs(lights)
+    LIGHT_BASE["/root/_ScopeFill"] = dome["inputs:intensity"]
     LIGHT_BASE["/root/_ScopeLight"] = float(lights["intensity_nits"])
+    overhead = or_room.or_light_inputs(lights)
+    for path in or_room.OR_LIGHT_PATHS:
+        LIGHT_BASE[path] = overhead["inputs:intensity"]
+    # Light each puts on the bone, as a fraction of what it shows in reflections.
+    viewer._light_diffuse = {"/root/_ScopeFill": dome["inputs:diffuse"]}
+    viewer._light_diffuse.update({path: overhead["inputs:diffuse"] for path in or_room.OR_LIGHT_PATHS})
+    viewer._lights = dict(lights)
     viewer._cone_angle = float(lights["cone_angle_deg"])
     viewer._cone_softness = float(lights["cone_softness"])
     viewer._cone_radius = float(lights["disk_radius"])
     viewer._cone_standoff = float(lights["disk_standoff"])
     viewer._disk_color = tuple(float(v) for v in lights["disk_color"])
-    viewer._fill_color = tuple(float(v) for v in lights["fill_color"])
+    viewer._fill_color = or_room.dome_color(lights)
 
 
 def _reload_tuner_lights(viewer):
@@ -460,6 +473,7 @@ def _author_lights(viewer):
     dome = UsdLux.DomeLight.Define(viewer.stage, "/root/_ScopeFill")
     dome.CreateIntensityAttr(LIGHT_BASE["/root/_ScopeFill"])
     dome.CreateColorAttr(Gf.Vec3f(*viewer._fill_color))
+    or_room.author_room(viewer.stage, "/root/_ScopeFill", lights)
     disk = UsdLux.DiskLight.Define(viewer.stage, "/root/_ScopeLight")
     disk.CreateIntensityAttr(LIGHT_BASE["/root/_ScopeLight"])
     disk.CreateRadiusAttr(viewer._cone_radius)
@@ -494,6 +508,19 @@ def _aim_lights(viewer, position, forward):
     mat[2, :3] = -forward
     mat[3, :3] = position
     viewer._fivrs_light_matrix = mat
+
+
+RENDER_STARTUP_PATH = RUNTIME / "render_startup.json"
+
+
+def _startup_render_overrides() -> dict:
+    """Render-cost probe: {"omni:rtx:...": [type, value]} applied when the renderer is created."""
+    try:
+        wanted = json.loads(RENDER_STARTUP_PATH.read_text())
+    except (OSError, ValueError):
+        return {}
+    print(f"render startup overrides {wanted}", flush=True)
+    return {name: (kind, value) for name, (kind, value) in wanted.items()}
 
 
 def _bind_lights(viewer):
@@ -826,8 +853,11 @@ def _push_exposure(viewer):
         attr = prim.GetAttribute("inputs:intensity") if prim else None
         if attr:
             attr.Set(value)
+        diffuse = getattr(viewer, "_light_diffuse", {}).get(path)
         try:
             viewer._write_runtime_attribute([path], "inputs:intensity", np.array([value], dtype=np.float32))
+            if diffuse is not None:
+                viewer._write_runtime_attribute([path], "inputs:diffuse", np.array([diffuse], dtype=np.float32))
         except Exception as exc:
             if not getattr(viewer, "_exposure_warned", False):
                 print(f"exposure write failed: {exc}", flush=True)
@@ -1048,7 +1078,7 @@ def _sync_markings(viewer):
 
 
 def _sync_irrigation(viewer):
-    """Pick up tuner_irrigation.json for the live jet look and SPH draw mode."""
+    """Pick up tuner_irrigation.json: jet, film, gravity, and both shaders."""
     try:
         mtime = IRRIGATION_PATH.stat().st_mtime
     except OSError:
@@ -1059,15 +1089,28 @@ def _sync_irrigation(viewer):
     settings = load_irrigation(IRRIGATION_PATH)
     viewer._irrigation = settings
     water = water_from_irrigation(settings, rtx_materials.WATER)
+    film = film_look_from_irrigation(settings, rtx_materials.WATER)
     rtx_materials.apply_params(viewer, "water", water)
-    if not getattr(viewer, "_irrigation_logged", False):
-        print(
-            f"Irrigation {IRRIGATION_PATH.name}: {settings['draw']}  "
-            f"{settings['jet_mm']:g} mm  {settings['cc_per_s']:g} cc/s  "
-            f"opacity {settings['opacity']:g}",
-            flush=True,
-        )
-        viewer._irrigation_logged = True
+    rtx_materials.apply_params(viewer, "film", film)
+    bench = getattr(viewer, "_irrigation_bench", None)
+    if bench is not None:
+        bench.apply(settings)
+    gravity = settings.get("gravity") or [0.0, 0.0, -1.0]
+    color = film.get("diffuse_reflection_color") or [1.0, 1.0, 1.0]
+    print(
+        f"Irrigation {IRRIGATION_PATH.name}: {settings['draw']}  "
+        f"jet {float(settings['jet_mm']):g} mm  "
+        f"film {float(settings['film_spread_mm']):g} x {float(settings['film_depth_mm']):g} mm  "
+        f"life {float(settings['film_life_s']):g} s  "
+        f"smooth {float(settings['film_smooth']):g}  "
+        f"ripple {float(settings['film_ripple']):g}  rivulets {float(settings['film_rivulets']):g}  "
+        f"thin walled {bool(film.get('thin_walled', True))}  "
+        f"gravity ({float(gravity[0]):.2f}, {float(gravity[1]):.2f}, {float(gravity[2]):.2f})  "
+        f"opacity {float(settings['opacity']):g}  "
+        f"film ({float(color[0]):.2f}, {float(color[1]):.2f}, {float(color[2]):.2f})  "
+        f"{'on' if settings.get('enabled', True) else 'off'}",
+        flush=True,
+    )
 
 
 def _send_chunk(viewer, key, points, tris, normals, color, channels=None, index_pts=None):
@@ -1286,6 +1329,7 @@ class SurfaceWorker:
         self._outbox = queue.Queue()
         self.busy = False
         self._replay = []
+        self.occ_gen = 0
         self._thread = threading.Thread(target=self._run, name="fivrs-rtx-surface", daemon=True)
         self._thread.start()
 
@@ -1450,6 +1494,8 @@ class SurfaceWorker:
             dirty.update(blocks_touched_by(xs, ys, zs, shape))
         if not dirty and resync is None:
             return
+        if xs or resync is not None:
+            self.occ_gen += 1
         if self._volume is not None:
             volume = self._volume
             self._blocks.pose = (
@@ -1934,14 +1980,14 @@ def _debris_zones(viewer) -> dict:
             spheres.append((tip, radius))
         except (TypeError, ValueError):
             pass
-    sph = getattr(viewer, "_surface_sph", None)
-    return {"spheres": spheres, "segment": segment, "film": sph}
+    film = getattr(bench, "film", None) if bench is not None else None
+    return {"spheres": spheres, "segment": segment, "film": film}
 
 
 def _step_bone_debris(viewer, dt) -> None:
     """Dust from this frame's removals. Irrigation and suction can clear it."""
     debris = getattr(viewer, "_bone_debris", None)
-    if debris is None:
+    if debris is None or not BONE_DUST:
         return
     state = _read_drill_state()
     if state and state.get("paused"):
@@ -1963,7 +2009,12 @@ def _emit_requested(state) -> bool:
 
 
 def _draw_live_irrigation(viewer, worker, dt) -> bool:
-    """Same tube as the tuner: a fixed-width jet to the first bone hit, then gone."""
+    """Narrow cannula jet, then a separate sheet on the bone it hits.
+
+    ``film_ms`` is the old bead film. The tuner leaves it above zero. This
+    window keeps those points off. Width, depth, life, smoothness, gravity,
+    and the stream and film shaders come from the saved tuner file.
+    """
     settings = getattr(viewer, "_irrigation", None) or load_irrigation(IRRIGATION_PATH)
     bench = getattr(viewer, "_irrigation_bench", None)
     if bench is None:
@@ -1972,28 +2023,52 @@ def _draw_live_irrigation(viewer, worker, dt) -> bool:
     if occupied is not None:
         bench.occupied = occupied
     live = dict(settings)
-    live["draw"] = DRAW_TUBE
     live["film_ms"] = 0.0
     bench.apply(live)
     _hide_sph_points(viewer)
     _hide_water(viewer)
-    state = _read_drill_state()
-    pose = _visual_pose(state) if state else None
-    if pose is None or not _emit_requested(state):
+    if not live.get("enabled", True):
         bench.hide(viewer)
         return False
+    state = _read_drill_state()
+    pose = _visual_pose(state) if state else None
+    occ_gen = int(getattr(worker, "occ_gen", 0))
+    tip, radius = _suction_tip()
+    emitting = pose is not None and _emit_requested(state)
+    if not emitting:
+        if bench.film.volume_mm3 <= 1e-3:
+            bench.hide(viewer)
+            return False
+        bench.step(
+            dt, None, None, occ_gen=occ_gen, emit=False,
+            suction_tip=tip, suction_radius_mm=radius,
+        )
+        bench.draw(viewer, splash=False)
+        _note_irrigation_time(viewer, bench)
+        return True
     try:
         size_mm = int(state.get("size_mm") or 6)
     except (AttributeError, TypeError, ValueError):
         size_mm = 6
-    bench.step(dt, pose["position"], pose["quat"], size_mm=size_mm)
-    if bench.last_hit is None:
+    bench.step(
+        dt, pose["position"], pose["quat"], size_mm=size_mm, occ_gen=occ_gen,
+        suction_tip=tip, suction_radius_mm=radius,
+    )
+    if bench.last_hit is None and bench.film.volume_mm3 <= 1e-3:
         bench.hide(viewer)
         return False
     bench.draw(viewer, splash=False)
-    viewer._sph_draw_ms = bench.draw_ms
-    viewer._water_tris = 0
+    _note_irrigation_time(viewer, bench)
     return True
+
+
+def _note_irrigation_time(viewer, bench) -> None:
+    viewer._irrig_raycast_ms = float(bench.raycast_ms)
+    viewer._irrig_fluid_ms = float(bench.fluid_ms)
+    viewer._irrig_geometry_ms = float(bench.geometry_ms)
+    viewer._sph_draw_ms = float(bench.draw_ms)
+    viewer._water_tris = int(bench.film.n_tris)
+    viewer._water_mesh_ms = float(bench.geometry_ms)
 
 
 def _suction_tip():
@@ -2252,8 +2327,8 @@ def main():
 
     from pxr import Gf
 
-    # Solid field behind the bone. The path tracer was sampling a dark dome,
-    # so the clear water sheet read as black. Lighting stays on the scope rig.
+    # Same background and reflection denoising as the tuner, so the water
+    # looks the same in both: the fill dome is behind the bone and in reflections.
     viewer = newton.viewer.ViewerRTX(
         width=args.width,
         height=args.height,
@@ -2265,14 +2340,17 @@ def main():
         render_settings={
             "omni:rtx:pt:samplesPerPixel": ("uint", 1),
             "omni:rtx:pt:denoising:enabled": ("bool", True),
-            "omni:rtx:reflections:denoiser:enabled": ("bool", True),
             "omni:rtx:indirectDiffuse:denoiser:enabled": ("bool", False),
             "omni:rtx:dlss:frameGeneration": ("bool", False),
-            "omni:rtx:pt:maxBounces": ("int", 4),
+            # Path traces about a quarter of the pixels and upscales; about 15 ms
+            # a frame with water and drilling, against 22 ms at "auto".
+            "omni:rtx:post:dlss:execMode": ("token", "performance"),
+            # Set in the tuner's irrigation panel. Water refraction needs about 6-8.
+            **rtx_materials.bounce_settings(int(load_irrigation(IRRIGATION_PATH).get("max_bounces", 4))),
             # Opacity on the water sheet. Authored before the render product exists.
             "omni:rtx:rt:fractionalOpacity": ("bool", True),
-            "omni:rtx:background:source:type": ("token", "color"),
-            "omni:rtx:background:source:color": ("color3f", Gf.Vec3f(0.62, 0.78, 0.90)),
+            **or_room.render_settings(_tuner_lights_from_file()[0]),
+            **_startup_render_overrides(),
         },
     )
     model = newton.ModelBuilder().finalize()
@@ -2452,19 +2530,22 @@ def main():
         viewer._markings_mtime = None
     markings.push_look(viewer, viewer._markings_params_live)
     _sync_irrigation(viewer)
-    viewer._irrigation_bench = IrrigationBench(
-        occupied,
-        VolumeFrame(
-            np.asarray(bridge.volume["translation"], dtype=np.float64),
-            np.asarray(bridge.volume["rotation"], dtype=np.float64),
-            np.asarray(bridge.volume["dimensions"], dtype=np.float64),
-            np.asarray(occupied.shape, dtype=np.float64),
-        ),
+    volume_frame = VolumeFrame(
+        np.asarray(bridge.volume["translation"], dtype=np.float64),
+        np.asarray(bridge.volume["rotation"], dtype=np.float64),
+        np.asarray(bridge.volume["dimensions"], dtype=np.float64),
+        np.asarray(occupied.shape, dtype=np.float64),
     )
+    or_room.author_or_lights(
+        viewer.stage,
+        volume_frame.index_to_world(np.asarray(occupied.shape, dtype=np.float64) * 0.5),
+        getattr(viewer, "_lights", None) or _tuner_lights_from_file()[0],
+    )
+    viewer._irrigation_bench = IrrigationBench(occupied, volume_frame, gpu_film=True)
     viewer._irrigation_bench.apply(getattr(viewer, "_irrigation", None) or load_irrigation(IRRIGATION_PATH))
+    # Only the bench may author fluid/sheet. Another log there before the first
+    # frame binds a preview color and the stream material over the film look.
     viewer._irrigation_bench.prime(viewer)
-    viewer._surface_film = SurfaceFilm()
-    viewer._surface_film.prime(viewer)
     viewer._surface_sph = SurfaceSph()
     viewer._bone_debris = bone_debris.BoneDebris(viewer._irrigation_bench.frame)
     uploads = [
@@ -2476,12 +2557,17 @@ def main():
         )
     ]
     worker = SurfaceWorker(blocks, occupied, colors, bridge.volume, appearance)
+    if hasattr(viewer._irrigation_bench.film, "occupancy_source"):
+        # The bone mesher keeps the occupancy on the GPU; the film reads bone there.
+        viewer._irrigation_bench.film.occupancy_source = lambda: getattr(worker._blocks, "_warp", None)
     _install_frame_probes(viewer)
     print("RTX brightness: [ darker    ] brighter    \\ reset    L distant beam", flush=True)
     waiting_dump_since = None
     waiting_catchup = None
     catchup_after = 0
     frame_ms = []
+    stage_ms = {}
+    last_stage_print = 0
     removal_delay_ms = []
     last_extract_ms = extract_s * 1e3
     last_upload_ms = 0.0
@@ -2594,7 +2680,7 @@ def main():
                 )
             worker.submit_cuts(handed)
             debris = getattr(viewer, "_bone_debris", None)
-            if debris is not None:
+            if debris is not None and BONE_DUST:
                 debris.note_removals(handed)
 
         while True:
@@ -2616,9 +2702,11 @@ def main():
             if detail is not None:
                 _append_timing({"kind": "surface", **detail})
 
+        t_begin = time.perf_counter()
         viewer.begin_frame(frame * (1.0 / 60.0))
         if bridge.camera is not None:
             _apply_camera(viewer, bridge.camera)
+        t_bone = time.perf_counter()
         if uploads:
             t0 = time.perf_counter()
             finished = _drain_upload(viewer, uploads[0], UPLOAD_BUDGET_S)
@@ -2653,27 +2741,44 @@ def main():
                     )
                     print(f"Bone upload finished, {len(getattr(viewer, '_chunk_names', {}))} meshes", flush=True)
             last_upload_ms = (time.perf_counter() - t0) * 1e3
+        t_tools = time.perf_counter()
         pause_menu.sync(viewer, _read_drill_state())
         if bridge.drill is not None:
             _log_instrument(viewer, bridge)
         _log_suction(viewer)
         dt = min(frame_ms[-1] * 1e-3, 0.05) if frame_ms else 0.0
-        settings = getattr(viewer, "_irrigation", None) or load_irrigation(IRRIGATION_PATH)
-        if settings.get("draw") == DRAW_SPHERES:
-            if getattr(viewer, "_irrigation_bench", None) is not None:
-                viewer._irrigation_bench.hide(viewer)
-            _draw_sph(viewer)
-        else:
-            _draw_live_irrigation(viewer, worker, dt)
-            _step_surface_sph(viewer, worker, dt)
+        t_water = time.perf_counter()
+        watered = _draw_live_irrigation(viewer, worker, dt)
+        bench = getattr(viewer, "_irrigation_bench", None)
+        if watered and bench is not None:
+            stage_ms.setdefault("water_flow", []).append(float(bench.fluid_ms))
+            mesh_ms = float(getattr(bench, "sheet_mesh_ms", 0.0))
+            stage_ms.setdefault("water_mesh", []).append(mesh_ms)
+            stage_ms.setdefault("water_upload", []).append(max(0.0, float(bench.draw_ms) - mesh_ms))
+            stage_ms.setdefault("water_tris", []).append(float(bench.film.n_tris))
+            stage_ms.setdefault("bed_reads", []).append(float(bench.film._bed_samples))
         if stream is not None:
             stream.hide(viewer)
+        t_dust = time.perf_counter()
         _step_bone_debris(viewer, dt)
+        t_render = time.perf_counter()
         viewer.end_frame()
+        t_end = time.perf_counter()
         _bind_window_input(viewer, bridge)
         frame += 1
         stamp = time.perf_counter()
         if previous > 0.0:
+            for name, ms in (
+                ("loop", (t_begin - previous) * 1e3),
+                ("camera", (t_bone - t_begin) * 1e3),
+                ("bone", (t_tools - t_bone) * 1e3),
+                ("tools", (t_water - t_tools) * 1e3),
+                ("water", (t_dust - t_water) * 1e3),
+                ("dust", (t_render - t_dust) * 1e3),
+                ("render", (t_end - t_render) * 1e3),
+                ("input", (stamp - t_end) * 1e3),
+            ):
+                stage_ms.setdefault(name, []).append(ms)
             elapsed_ms = (stamp - previous) * 1e3
             frame_ms.append(elapsed_ms)
             viewer._frame_samples.append((time.time(), elapsed_ms))
@@ -2712,11 +2817,29 @@ def main():
                 "removal_to_surface_ms_note": "Receipt until chunk logging finishes. Not the displayed frame.",
                 "triangles": blocks.triangle_count,
                 "vertices": blocks.vertex_count,
+                "irrigation_raycast_ms": float(getattr(viewer, "_irrig_raycast_ms", 0.0)),
+                "irrigation_fluid_ms": float(getattr(viewer, "_irrig_fluid_ms", 0.0)),
+                "irrigation_geometry_ms": float(getattr(viewer, "_irrig_geometry_ms", 0.0)),
                 "stream": None if stream is None else stream.snapshot(),
                 "sph": _sph_snapshot(viewer),
                 "debris": viewer._bone_debris.snapshot(),
+                "stages_ms": {name: float(np.mean(values)) for name, values in stage_ms.items() if values},
+                "stages_note": (
+                    "Mean ms per frame over the last second. render is end_frame, where the "
+                    "GPU path tracing shows up. water_* only count frames with water."
+                ),
             }
+            stages = summary["stages_ms"]
+            stage_ms.clear()
             (RUNTIME / "summary.json").write_text(json.dumps(summary, indent=2))
+            if frame - last_stage_print >= 300:
+                last_stage_print = frame
+                print(
+                    "Frame ms  "
+                    + "  ".join(f"{name} {value:.1f}" for name, value in stages.items() if name not in ("water_tris", "bed_reads"))
+                    + f"  | film tris {stages.get('water_tris', 0):.0f}  bone reads {stages.get('bed_reads', 0):.0f}",
+                    flush=True,
+                )
             sph = summary.get("sph") or {}
             sph_note = (
                 f"   SPH {sph.get('count') or 0}"
@@ -2730,6 +2853,7 @@ def main():
                 f"   exposure {getattr(viewer, '_exposure', 1.0):.2f}"
                 f"   Gfx {graphics_hz} Hz   Phx {physics_hz} Hz"
                 f"   extract {last_extract_ms:.0f} ms"
+                f"   render {stages.get('render', 0.0):.0f} ms   water {stages.get('water', 0.0):.0f} ms"
                 f"{sph_note}"
             )
             window = getattr(viewer, "_window", None)
