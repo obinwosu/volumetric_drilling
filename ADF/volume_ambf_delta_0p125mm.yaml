@@ -1,0 +1,27 @@
+# AMBF Version: (0.1)
+bodies: []
+joints: []
+volumes: [VOLUME mastoidectomy_volume_high]
+high resolution path: ./meshes/high_res/
+low resolution path: ./meshes/low_res/
+ignore inter-collision: true
+namespace: /ambf/env/
+
+VOLUME mastoidectomy_volume_high:
+  name: mastoidectomy_volume_high
+  laterality: right
+  location:
+    position: {x: -6.040592783505154, y: 0.0, z: 0.0}  # placed 745mm away from camera given 1AU = 0.049664m
+    orientation: {r: 1.57079, p: 1.4, y: 0}
+  scale: 1.0
+  # Physical size in AU (1 AU = 49.664 mm): x = image columns, y = image rows, z = slices.
+  dimensions: {x: 1.444912, y: 1.470128, z: 1.210397}
+  images:
+    path: ../resources/volumes/ambf_delta_0p125mm
+    prefix: plane00
+    format: png
+    count: 480
+  shaders:
+    path: ./shaders/dvr/
+    vertex: shader.vs
+    fragment: shader.fs

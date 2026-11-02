@@ -377,6 +377,105 @@ HALO = 3
 SMOOTH_ITERS = 3
 
 
+def packed_rgb(rgb) -> int:
+    red, green, blue = (int(channel) for channel in rgb[:3])
+    return red | (green << 8) | (blue << 16)
+
+
+def segment_colors(occupied: np.ndarray, colors: np.ndarray) -> np.ndarray:
+    """Unique RGB labels that occupy at least one voxel."""
+    if colors is None or not np.any(occupied):
+        return np.zeros((0, 3), dtype=np.uint8)
+    return np.unique(np.asarray(colors)[np.asarray(occupied)].reshape(-1, 3), axis=0)
+
+
+def occupancy_for_rgb(occupied: np.ndarray, colors: np.ndarray, rgb) -> np.ndarray:
+    """Closed occupancy for one segmentation, including voxels buried in bone."""
+    rgb = np.asarray(rgb, dtype=np.uint8).reshape(3)
+    return np.asarray(occupied, dtype=bool) & np.all(np.asarray(colors) == rgb, axis=-1)
+
+
+def rgb_hex(rgb) -> str:
+    return "".join(f"{int(channel):02x}" for channel in rgb[:3])
+
+
+def labels_matching(occupied, colors, hex_ids):
+    """RGB triples in this volume whose hex is in ``hex_ids``."""
+    wanted = {str(item).strip().lower() for item in hex_ids}
+    found = []
+    for rgb in segment_colors(occupied, colors):
+        hex_id = rgb_hex(rgb)
+        if hex_id in wanted:
+            found.append((hex_id, tuple(int(channel) for channel in rgb)))
+    return found
+
+
+def closed_label_mask(occupied, colors, rgbs):
+    """True on voxels that belong to any of the given labels."""
+    mask = np.zeros(np.asarray(occupied).shape, dtype=bool)
+    for rgb in rgbs:
+        mask |= occupancy_for_rgb(occupied, colors, rgb)
+    return mask
+
+
+def join_meshes(meshes):
+    """Concatenate block meshes. Empty input is ``None``."""
+    verts, tris, colors, normals = [], [], [], []
+    base = 0
+    for mesh in meshes:
+        if mesh is None or len(mesh.tris) == 0:
+            continue
+        verts.append(mesh.verts)
+        colors.append(mesh.colors)
+        tris.append(np.asarray(mesh.tris, dtype=np.int32) + base)
+        if getattr(mesh, "index_normals", None) is not None:
+            normals.append(mesh.index_normals)
+        else:
+            normals.append(vertex_normals(mesh.verts, mesh.tris))
+        base += len(mesh.verts)
+    if not verts:
+        return None
+    return (
+        np.concatenate(verts),
+        np.concatenate(tris),
+        np.concatenate(colors),
+        np.concatenate(normals),
+    )
+
+
+def closed_label_meshes(occupied, colors, skip_rgb=(), keep_rgb=None, n=BLOCK, min_tris=40):
+    """One closed surface per non-skipped label, meshed on that label's occupancy.
+
+    ``skip_rgb`` is typically bone (live remesh) and EAC (left as an open canal).
+    ``keep_rgb`` limits the pass to facial nerve, ossicles, and similar.
+    """
+    skip = {packed_rgb(rgb) for rgb in skip_rgb}
+    keep = None if keep_rgb is None else {packed_rgb(rgb) for rgb in keep_rgb}
+    groups = []
+    for rgb in segment_colors(occupied, colors):
+        key = packed_rgb(rgb)
+        if key in skip:
+            continue
+        if keep is not None and key not in keep:
+            continue
+        mask = occupancy_for_rgb(occupied, colors, rgb)
+        parts = []
+        for block in blocks_for_mask(mask, n):
+            mesh, _ = extract_block(mask, colors, block, n)
+            if len(mesh.tris):
+                parts.append(mesh)
+        joined = join_meshes(parts)
+        if joined is None or len(joined[1]) < int(min_tris):
+            continue
+        groups.append((tuple(int(channel) for channel in rgb), joined))
+    return groups
+
+
+def blocks_for_mask(mask: np.ndarray, n=BLOCK):
+    xs, ys, zs = np.nonzero(mask)
+    return blocks_touched_by(xs, ys, zs, mask.shape, n)
+
+
 def block_count(count, n=BLOCK):
     """How many blocks span this axis, including the crop-face cell."""
     count = int(count)
@@ -632,7 +731,6 @@ class BlockVolume:
             from warp_mesh import STAGE
 
             before_up = warp.upload_bytes
-            before_down = warp.download_bytes
             before_transfer = warp.transfer_ms
             if replace or warp.occ is None:
                 warp.upload_volume(occupied, colors)

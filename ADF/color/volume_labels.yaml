@@ -8,3 +8,16 @@ labels:
   f4d631: nerve                # 244,214,49   Slicer nerve
   d8644f: artery               # 216,100,79   Slicer artery/blood 216,101,79
   6eb8d1: connective_tissue    # 110,184,209  Slicer connective_tissue/cartilage 111,184,210
+  # ambf_delta.seg.nrrd
+  4184ff: scala_tympani            # 65,132,255  Scala Tympani
+  ffdebe: scala_vestibuli          # 255,222,190  Scala_Vestibuli
+  fff5c5: malleus                  # 255,245,197  Malleus
+  e1ffd8: incus                    # 225,255,216  Incus
+  d0e4ff: stapes                   # 208,228,255  Stapes
+  ff8aab: cochleovestibular_nerve  # 255,138,171  Cochleovestibular Nerve
+  ff0004: facial_nerve             # 255,0,4  Facial Nerve
+  ff0104: chorda_tympani           # 255,1,4  Chorda Tympani
+  ffe4c4: tympanic_membrane        # 255,228,196  Tympanic Membrane
+  ffe1d6: eac                      # 255,225,214  Outer ear Canal
+  bdffa9: carotis_interna          # 189,255,169  Carotis Interna
+  ffea87: sinus_dura               # 255,234,135  Sinus_Dura

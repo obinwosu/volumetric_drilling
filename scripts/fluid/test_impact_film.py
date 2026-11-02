@@ -424,12 +424,47 @@ def test_gpu_film_follows_the_numpy_film():
     drawn = _grid(gpu, mesh)
     shown = np.concatenate([cpu._mask.reshape(-1), cpu._mask.reshape(-1)])
     shown &= np.concatenate([gpu._mask.reshape(-1), gpu._mask.reshape(-1)])
-    assert not np.isnan(drawn[shown]).any()
+    # Wet vertices only on quads that bridge a drop are left out of the sheet.
+    missing = np.isnan(drawn[:, 0]) & shown
+    assert missing.sum() <= 0.01 * shown.sum(), (int(missing.sum()), int(shown.sum()))
+    shown &= ~missing
     full = gpu._verts_d.numpy()
     assert np.abs(drawn[shown] - full[shown]).max() < 1e-9
     # The two water edges round a few vertices differently; the rest agree.
     gap = np.linalg.norm(drawn[shown] - reference["verts"][shown], axis=1)
     assert np.percentile(gap, 99) < 0.25 * MM_TO_SIM
+
+
+def _assert_no_bridges(film, mesh):
+    """The floor follows the bone; none of its edges climbs more than a steep slope over one cell."""
+    count = film.n_top_tris
+    verts, floor = mesh["verts"], mesh["tris"][count : 2 * count]
+    for a, b in ((0, 1), (1, 2), (2, 0)):
+        edge = np.linalg.norm(verts[floor[:, a]] - verts[floor[:, b]], axis=1) / MM_TO_SIM
+        assert float(edge.max()) < 2.0, float(edge.max())
+
+
+def test_gpu_sheet_does_not_bridge_drilled_walls():
+    from fluid.film_gpu import GpuFilm
+
+    occupied, frame, top = _field()
+    film = GpuFilm(pipelined=True)
+    gen = 0
+    for step in range(240):
+        x = 40 + (step // 2) % 90
+        if step % 40 == 0:
+            # Deep holes with vertical walls, which a dry quad would otherwise span.
+            occupied[x - 2 : x + 2, 78:82, top[x, 80] - 12 : top[x, 80] + 1] = False
+            gen += 1
+        column = np.flatnonzero(occupied[x, 80])
+        hit = frame.index_to_world(np.array((x + 0.5, 80.5, column.max() + 0.5)))
+        film.step(
+            1.0 / 60.0, hit, 1.0, 4.5, 4.0, 100.0, frame, occupied, gen,
+            incoming=(0.0, 0.0, -1.0), life_s=15.0, smooth=1.0, ripple=1.0,
+        )
+        mesh = film.mesh()
+        if mesh is not None:
+            _assert_no_bridges(film, mesh)
 
 
 def test_gpu_sheet_keeps_its_triangles_while_water_flows():
@@ -450,6 +485,7 @@ def test_gpu_sheet_keeps_its_triangles_while_water_flows():
     # The water keeps spreading, but the triangles change only when it reaches new blocks.
     assert len(versions) > 60
     assert len(set(versions[-45:])) <= 8
+    _assert_no_bridges(film, mesh)
     # Dry vertices sit on the floor, so nothing shows outside the water.
     mm = film.m * film.m
     drawn = _grid(film, mesh)
@@ -491,4 +527,5 @@ if __name__ == "__main__":
         test()
     test_gpu_film_follows_the_numpy_film()
     test_gpu_sheet_keeps_its_triangles_while_water_flows()
+    test_gpu_sheet_does_not_bridge_drilled_walls()
     print("gpu film ok")

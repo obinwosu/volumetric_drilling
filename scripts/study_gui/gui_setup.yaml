@@ -124,6 +124,16 @@ volume30:
   name: volume_EMMJ5MW1_114334_smoothed
   description: 'volume_EMMJ5MW1_114334_smoothed: DG tumor temporal bone CT volume
     (right ear, no dura, smoothed DVR).'
+volume31:
+  adf_path: ../../ADF/volume_ambf_delta_0p250mm.yaml
+  icon_path: ./assets/ambf_delta.png
+  name: AMBF Delta
+  description: 'AMBF Delta: right-ear segmented temporal bone from ambf_delta.seg.nrrd (0.25 mm).'
+volume32:
+  adf_path: ../../ADF/volume_ambf_delta_0p125mm.yaml
+  icon_path: ./assets/ambf_delta.png
+  name: AMBF Delta HR
+  description: 'AMBF Delta HR: same right-ear segmentation at 0.125 mm for structure inspection.'
 volume3:
   adf_path: ../../ADF/volume_256_RT147.yaml
   icon_path: ./assets/RT147.png
@@ -187,3 +197,5 @@ volumes:
 - volume28
 - volume29
 - volume30
+- volume31
+- volume32

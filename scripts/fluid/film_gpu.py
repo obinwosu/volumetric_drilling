@@ -21,7 +21,7 @@ import numpy as np
 import warp as wp
 
 from fluid import impact_film as F
-from fluid.film_mesh_gpu import _display_pass, _edges, _in, _outline_pass, _quads
+from fluid.film_mesh_gpu import _display_pass, _edges, _in, _quads
 from fluid.outlet import MM_TO_SIM
 
 # Frames in flight. The one drawn, the one finishing, and the one being written.
@@ -34,10 +34,14 @@ BLOCK = 16
 BLOCK_HOLD_S = 1.5
 # Topologies kept for frames still in flight.
 KEEP_TOPOLOGIES = 6
+# A quad whose corners differ in height by more than this bridges a drop, such
+# as a drilled wall, and stays out of the sheet.
+CLIFF_MM = 1.0
 
 CELL = wp.constant(float(F.CELL_MM))
 MM = wp.constant(float(MM_TO_SIM))
 MIN_DEPTH = wp.constant(float(F.MIN_DEPTH_MM))
+CLIFF = wp.constant(CLIFF_MM)
 NOISE_CELL = wp.constant(float(F.RIVULET_CELL_MM))
 
 # Per-frame inputs, one float each.
@@ -73,7 +77,8 @@ P_SKIN = wp.constant(41)
 P_FLOOR = wp.constant(42)
 P_RIPPLE_FULL = wp.constant(43)
 P_GATHER = wp.constant(44)
-P_COUNT = 45
+P_ANCHOR = wp.constant(45)
+P_COUNT = 48
 
 # ring[0:8] is the room in each inlet ring, ring[8:17] the volume left before each.
 RING_VOL = wp.constant(8)
@@ -342,6 +347,7 @@ def _refine_keep(
     bed_f: wp.array2d(dtype=wp.vec3),
     depth_f: wp.array2d(dtype=float),
     mask_f: wp.array2d(dtype=wp.int32),
+    valid_f: wp.array2d(dtype=wp.int32),
 ):
     I, J = wp.tid()
     ci = I // 2
@@ -367,6 +373,9 @@ def _refine_keep(
     if count > 0.0:
         bed_f[I, J] = acc * inv
     depth_f[I, J] = depth * inv
+    valid_f[I, J] = 0
+    if count >= need:
+        valid_f[I, J] = 1
     if count >= need and wet / need >= 0.5 and depth * inv >= min_depth:
         mask_f[I, J] = 1
     else:
@@ -393,6 +402,70 @@ def _lift(
     else:
         pos[I, J] = floor
     verts[m * m + I * m + J] = floor
+
+
+@wp.kernel
+def _outline_on_shelf(
+    P: wp.array(dtype=float),
+    src: wp.array2d(dtype=wp.vec3),
+    edge: wp.array2d(dtype=wp.int32),
+    dst: wp.array2d(dtype=wp.vec3),
+):
+    I, J = wp.tid()
+    m = src.shape[0]
+    here = src[I, J]
+    dst[I, J] = here
+    if edge[I, J] == 0:
+        return
+    normal = _v(P, P_NORMAL)
+    acc = wp.vec3(0.0, 0.0, 0.0)
+    count = float(0.0)
+    for di in range(-1, 2):
+        for dj in range(-1, 2):
+            if di == 0 and dj == 0:
+                continue
+            if _in(I + di, J + dj, m):
+                if edge[I + di, J + dj] != 0:
+                    there = src[I + di, J + dj]
+                    # Rounding stays on one shelf; an edge across a drop is not a neighbour.
+                    if wp.abs(wp.dot(there - here, normal)) <= CLIFF * MM:
+                        acc += there
+                        count += 1.0
+    if count >= 2.0:
+        dst[I, J] = 0.5 * here + 0.5 * (acc / count)
+
+
+@wp.kernel
+def _snap_boneless(
+    P: wp.array(dtype=float),
+    valid: wp.array2d(dtype=wp.int32),
+    verts: wp.array(dtype=wp.vec3),
+    normals: wp.array(dtype=wp.vec3),
+):
+    I, J = wp.tid()
+    if valid[I, J] != 0:
+        return
+    m = valid.shape[0]
+    top = m * m
+    v = I * m + J
+    # Until the sheet's triangles catch up with a move or a new bone read, a
+    # vertex with no bone under it takes a neighbour's place, so its triangles
+    # collapse instead of stretching to where the bone used to be.
+    for di in range(-1, 2):
+        for dj in range(-1, 2):
+            if _in(I + di, J + dj, m):
+                if valid[I + di, J + dj] != 0:
+                    u = (I + di) * m + (J + dj)
+                    verts[v] = verts[u]
+                    verts[top + v] = verts[top + u]
+                    normals[v] = normals[u]
+                    normals[top + v] = normals[top + u]
+                    return
+    anchor = _v(P, P_ANCHOR)
+    verts[v] = anchor
+    verts[top + v] = anchor
+    normals[v] = _v(P, P_NORMAL)
+    normals[top + v] = -_v(P, P_NORMAL)
 
 
 @wp.kernel
@@ -668,18 +741,29 @@ def _shift_blocks(seen: np.ndarray, si: float, sj: float) -> np.ndarray:
     return out
 
 
-def _sheet_topology(on_bone: np.ndarray, active: np.ndarray, m: int):
+def _fine(coarse: np.ndarray, combine) -> np.ndarray:
+    """Coarse cells to drawn vertices: corners, edge midpoints, and quad centres."""
+    n = coarse.shape[0]
+    fine = np.empty((2 * n - 1, 2 * n - 1), dtype=coarse.dtype)
+    fine[0::2, 0::2] = coarse
+    fine[1::2, 0::2] = combine(coarse[:-1], coarse[1:])
+    fine[0::2, 1::2] = combine(coarse[:, :-1], coarse[:, 1:])
+    fine[1::2, 1::2] = combine(combine(coarse[:-1, :-1], coarse[1:, :-1]), combine(coarse[:-1, 1:], coarse[1:, 1:]))
+    return fine
+
+
+def _sheet_topology(on_bone: np.ndarray, active: np.ndarray, m: int, height_mm=None):
     """Triangles over the active blocks: top, reversed floor, walls on open edges.
 
     Returns (tris, vertex ids, top triangle count). Vertices are numbered by
     their place in ``ids``; floor vertices follow the top ones.
     """
-    whole = np.zeros((m, m), dtype=bool)
-    whole[0::2, 0::2] = on_bone
-    whole[1::2, 0::2] = on_bone[:-1] & on_bone[1:]
-    whole[0::2, 1::2] = on_bone[:, :-1] & on_bone[:, 1:]
-    whole[1::2, 1::2] = on_bone[:-1, :-1] & on_bone[1:, :-1] & on_bone[:-1, 1:] & on_bone[1:, 1:]
+    whole = _fine(on_bone, np.logical_and)
     quad = whole[:-1, :-1] & whole[1:, :-1] & whole[:-1, 1:] & whole[1:, 1:]
+    if height_mm is not None:
+        h = _fine(np.where(on_bone, height_mm, 0.0), lambda a, b: 0.5 * (a + b))
+        corners = np.stack([h[:-1, :-1], h[1:, :-1], h[:-1, 1:], h[1:, 1:]])
+        quad &= corners.max(axis=0) - corners.min(axis=0) <= CLIFF_MM
     rows = np.minimum(np.arange(m - 1) // BLOCK, active.shape[0] - 1)
     quad &= active[rows[:, None], rows[None, :]]
     qi, qj = np.nonzero(quad)
@@ -762,6 +846,7 @@ class GpuFilm(F.ImpactFilm):
         self.n_blocks = -(-(m - 1) // BLOCK)
         nb = self.n_blocks
         self._blocks_d = wp.zeros((nb, nb), dtype=wp.int32, device=d)
+        self._valid_f = wp.zeros((m, m), dtype=wp.int32, device=d)
         self._ids_d = wp.zeros(m * m, dtype=wp.int32, device=d)
         self._cverts_d = wp.zeros(2 * m * m, dtype=wp.vec3, device=d)
         self._cnormals_d = wp.zeros(2 * m * m, dtype=wp.vec3, device=d)
@@ -976,6 +1061,7 @@ class GpuFilm(F.ImpactFilm):
         p[P_SKIN] = F.SKIN_MM
         p[P_FLOOR] = F.FLOOR_MM
         p[P_RIPPLE_FULL] = F.RIPPLE_FULL_MM
+        p[P_ANCHOR : P_ANCHOR + 3] = self._origin - normal * (F.FLOOR_MM * MM_TO_SIM)
         return p
 
     def _record(self) -> list:
@@ -1013,11 +1099,11 @@ class GpuFilm(F.ImpactFilm):
         for _ in range(self._height_passes):
             add(_display_pass, (n, n), [src, self._on_bone, F.MIN_DEPTH_MM, dst])
             src, dst = dst, (self._spare if dst is self._shown else self._shown)
-        add(_refine_keep, (m, m), [src, self._on_bone, self._bed, F.MIN_DEPTH_MM, self._bed_f, self._depth_f, self._mask_d])
+        add(_refine_keep, (m, m), [src, self._on_bone, self._bed, F.MIN_DEPTH_MM, self._bed_f, self._depth_f, self._mask_d, self._valid_f])
         add(_edges, (m, m), [self._mask_d, self._edge])
         src, dst = self._bed_f, self._round
         for _ in range(F.OUTLINE_PASSES):
-            add(_outline_pass, (m, m), [src, self._edge, dst])
+            add(_outline_on_shelf, (m, m), [P, src, self._edge, dst])
             src, dst = dst, src
         self._rounded = src
         add(_lift, (m, m), [P, src, self._depth_f, self._mask_d, self._pos, self._verts_d])
@@ -1028,6 +1114,7 @@ class GpuFilm(F.ImpactFilm):
         add(_place, (m, m), [src, self._verts_d])
         add(_quads, (m, m), [self._mask_d, self._quad])
         add(_shade, (m, m), [P, src, self._quad, self._mask_d, self._depth_f, self._waves, self._normals_d])
+        add(_snap_boneless, (m, m), [P, self._valid_f, self._verts_d, self._normals_d])
         add(_block_wet, (m, m), [self._mask_d, BLOCK, self._blocks_d])
         add(_gather, m * m, [P, self._verts_d, self._normals_d, self._ids_d, self._cverts_d, self._cnormals_d])
         self._commands[key] = cmds
@@ -1107,15 +1194,16 @@ class GpuFilm(F.ImpactFilm):
             nb = self.n_blocks
             self._block_seen[max(bi - 1, 0) : min(bi + 2, nb), max(bj - 1, 0) : min(bj + 2, nb)] = self._clock
         active = self._clock - self._block_seen <= BLOCK_HOLD_S
-        if not (self._bed_cache is not None or self._bed_ready()):
-            # The bone read is still on the GPU; keep the current triangles.
-            return
         key = (active.tobytes(), self._bed_samples)
         if key == self._topology_key:
             return
         self._topology_key = key
+        # A new bone read waits here, so no frame draws the new bone with the old
+        # triangles; those would bridge the walls of a fresh cut.
         self._bed_synced()
-        tris, ids, top = _sheet_topology(self._bed_cache[1], active, self.m)
+        bed, bone = self._bed_cache
+        height = np.nan_to_num((bed - self._origin) @ self._normal) / MM_TO_SIM
+        tris, ids, top = _sheet_topology(bone, active, self.m, height)
         version = self._topology + 1
         self._topologies[version] = (tris, ids, top)
         for old in [v for v in self._topologies if 0 < v <= version - KEEP_TOPOLOGIES]:

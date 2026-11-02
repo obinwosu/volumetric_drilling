@@ -11,7 +11,7 @@
    </rect>
   </property>
   <property name="windowTitle">
-   <string>FIVRS Simulator</string>
+   <string>FIVRS</string>
   </property>
   <layout class="QVBoxLayout" name="rootLayout">
    <item>
@@ -373,6 +373,9 @@
            <weight>75</weight>
            <bold>true</bold>
           </font>
+         </property>
+         <property name="toolTip">
+          <string>Start AMBF with the selected anatomy. Optional RTX bone view stays a checkbox.</string>
          </property>
          <property name="text">
           <string>Start Simulation</string>

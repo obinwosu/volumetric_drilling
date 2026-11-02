@@ -639,6 +639,16 @@ class WarpMesher:
         self.upload_bytes += int(occ.nbytes + packed.nbytes)
         self.transfer_ms += (time.perf_counter() - started) * 1e3
 
+    def set_occupancy(self, occupied):
+        """Replace only the occupancy. Colors stay the uploaded labels."""
+        started = time.perf_counter()
+        occ = np.ascontiguousarray(occupied, dtype=np.uint8).reshape(-1)
+        self.occ = wp.array(occ, dtype=wp.uint8, device=self.device)
+        self.shape = tuple(int(v) for v in occupied.shape)
+        wp.synchronize()
+        self.upload_bytes += int(occ.nbytes)
+        self.transfer_ms += (time.perf_counter() - started) * 1e3
+
     def clear(self, xs, ys, zs):
         count = len(xs)
         if count == 0 or self.occ is None:

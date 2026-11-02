@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
 """FIVRS RTX Tuner.
 
-The view opens on the right transtemporal pose and can orbit. The camera
-panel reads and writes ADF/world/canonical_views.yaml, the same slots the
-simulator pause menu uses. The light panel writes tuner_light.json. The
-structure panel writes tuner_materials.json, keyed by segmentation hex and
-by a regular name such as bone. The lateral cortex panel writes
-tuner_cortex_mask.json. The shaders panel writes tuner_markings.json. The
-irrigation panel writes tuner_irrigation.json. The paste panel writes
-paste_look.json and the grain size in debris.json. Visibility stays in this window.
+Without --anatomy-adf the app opens a volume-and-view menu first, then
+loads that anatomy. The camera panel reads and writes
+ADF/world/canonical_views.yaml, the same slots the simulator pause menu
+uses. The light panel writes tuner_light.json. The structure panel writes
+tuner_materials.json, keyed by segmentation hex and by a regular name
+such as bone. The lateral cortex panel writes tuner_cortex_mask.json. The
+shaders panel writes tuner_markings.json. The irrigation panel writes
+tuner_irrigation.json. The paste panel writes paste_look.json and the
+grain size in debris.json. Visibility stays in this window.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import pathlib
 import sys
 import time
+
+import yaml
 
 import numpy as np
 import warp as wp
@@ -30,6 +34,7 @@ import cortex_masks
 import markings
 import or_room
 import rtx_materials
+import tuner_launch_dialog
 from bone_debris import CONFIG_PATH as DEBRIS_PATH, load_config as load_debris
 from fluid.irrigation_bench import (
     DRAW_SPHERES,
@@ -49,7 +54,8 @@ from fluid.outlet import MM_TO_SIM
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parents[1]
-ADF = REPO / "ADF" / "volume_256_RT143.yaml"
+DEFAULT_ADF = REPO / "ADF" / "volume_256_RT143.yaml"
+ADF = DEFAULT_ADF
 SAVE_PATH = HERE / "tuner_light.json"
 
 # Starting point from the bone comparison: a pool wider than 8° and
@@ -107,23 +113,39 @@ def _rpy(roll: float, pitch: float, yaw: float) -> np.ndarray:
     )
 
 
-def _right_ear_camera():
-    """Home camera times the saved right transtemporal view.
+def _adf_laterality(path: pathlib.Path) -> str:
+    try:
+        data = yaml.safe_load(path.read_text())
+    except Exception:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    for value in data.values():
+        if isinstance(value, dict) and "laterality" in value:
+            lat = str(value["laterality"]).strip().lower()
+            if lat in ("left", "right"):
+                return lat
+    return ""
 
-    Home looks down -X with up +Z, so its rotation is identity and the
-    view translation is added to (1.5, 0, 0).
-    """
-    from fivrs_rtx_view import _quat_matrix
 
-    rotation = _quat_matrix(-0.380217, 0.0698274, 0.131694, 0.912807)
-    position = np.array([1.5, 0.0, 0.0]) + np.array([-2.77177, 0.934857, -1.13597])
-    forward = -rotation[:, 0]
-    forward = forward / np.linalg.norm(forward)
-    up = rotation[:, 2]
-    right = np.cross(forward, up)
-    right = right / np.linalg.norm(right)
-    up = np.cross(right, forward)
-    return position, right, up, forward
+def _startup_camera(view_id: str, laterality: str):
+    """Named view from canonical_views.yaml, or the laterality default."""
+    if view_id == "home":
+        return camera_views.home_pose()
+    views = camera_views.load_views()
+    if view_id and view_id != "default":
+        for view in views:
+            if view["id"] == view_id and view.get("valid"):
+                return camera_views.pose_from_view(view)
+    side = (laterality or "").strip().lower()
+    if side in ("left", "right"):
+        for view in views:
+            if view["id"] == side and view.get("valid"):
+                return camera_views.pose_from_view(view)
+    for view in views:
+        if view["id"] == "right" and view.get("valid"):
+            return camera_views.pose_from_view(view)
+    return camera_views.home_pose()
 
 
 VERTICAL_FOV_RAD = 0.17951634837990105
@@ -239,71 +261,123 @@ def _install_scope_mouse(viewer):
     return True
 
 
-def _bone_groups(occupied, colors, bone_rgb):
-    from surface import BLOCK
+def _face_packed(rgb_v, tris):
+    packed = (
+        rgb_v[:, 0].astype(np.int32)
+        | (rgb_v[:, 1].astype(np.int32) << 8)
+        | (rgb_v[:, 2].astype(np.int32) << 16)
+    )
+    first, second, third = packed[tris[:, 0]], packed[tris[:, 1]], packed[tris[:, 2]]
+    agree = (first == second) | (first == third)
+    return np.where(agree, first, np.where(second == third, second, first))
+
+
+def _bone_groups(occupied, colors, bone_rgb, document=None, close_all=False):
+    from surface import (
+        BLOCK,
+        blocks_for_mask,
+        closed_label_mask,
+        occupancy_for_rgb,
+        packed_rgb,
+        rgb_hex,
+        segment_colors,
+    )
     from warp_mesh import WarpMesher
 
     print(f"Volume {occupied.shape}, {int(occupied.sum())} occupied voxels", flush=True)
     rotation = _rpy(1.57079, 1.4, 0.0)
     translation = np.array([-6.040592783505154, 0.0, 0.0], dtype=np.float64)
+    pose = (np.ones(3), np.array(occupied.shape, dtype=np.float64), rotation, translation)
     mesher = WarpMesher()
     mesher.upload_volume(occupied, colors)
-    shape = occupied.shape
-    blocks = [
-        (ix, iy, iz)
-        for ix in range(math.ceil(shape[0] / BLOCK))
-        for iy in range(math.ceil(shape[1] / BLOCK))
-        for iz in range(math.ceil(shape[2] / BLOCK))
-    ]
-    outputs, _phases = mesher.mesh_blocks(
-        blocks,
-        smooth=True,
-        prepare_pose=(np.ones(3), np.array(shape, dtype=np.float64), rotation, translation),
-    )
     groups: dict[int, list] = {}
-    bone_key = int(bone_rgb[0]) | (int(bone_rgb[1]) << 8) | (int(bone_rgb[2]) << 16)
+    bone_key = packed_rgb(bone_rgb)
+    wanted = rtx_materials.closed_structure_hexes(document)
     bone_parts = {"index": [], "world": [], "normals": [], "rgb": [], "tris": []}
-    bone_base = 0
-    for _block, mesh in outputs:
-        _verts, tris, rgb, world, normals = mesh
-        if world is None or len(tris) == 0:
-            continue
-        face_rgb = rgb[tris]
-        packed = (
-            face_rgb[:, :, 0].astype(np.int32)
-            | (face_rgb[:, :, 1].astype(np.int32) << 8)
-            | (face_rgb[:, :, 2].astype(np.int32) << 16)
-        )
-        label = np.where(
-            (packed[:, 0] == packed[:, 1]) | (packed[:, 0] == packed[:, 2]),
-            packed[:, 0],
-            np.where(packed[:, 1] == packed[:, 2], packed[:, 1], packed[:, 0]),
-        )
-        order = np.argsort(label, kind="mergesort")
-        ordered = label[order]
-        breaks = np.flatnonzero(np.diff(ordered)) + 1
-        starts = np.concatenate(([0], breaks))
-        ends = np.concatenate((breaks, [len(order)]))
-        for start, end in zip(starts, ends):
-            key = int(ordered[start])
-            group = tris[order[start:end]]
-            used, inverse = np.unique(group, return_inverse=True)
-            bucket = groups.setdefault(key, [[], [], []])
-            base = sum(len(part) for part in bucket[0])
-            bucket[0].append(world[used])
-            bucket[1].append(normals[used])
-            bucket[2].append(inverse.reshape(-1, 3).astype(np.int32) + base)
-        bone_faces = label == bone_key
-        if np.any(bone_faces):
-            group = tris[bone_faces]
-            used, inverse = np.unique(group, return_inverse=True)
-            bone_parts["index"].append(_verts[used])
+    bone_base = [0]
+    labels = segment_colors(occupied, colors)
+    if close_all:
+        closed_rgbs = list(labels)
+        wanted = {
+            rgb_hex(rgb): rtx_materials.name_of(document or {}, rgb_hex(rgb)) or rgb_hex(rgb)
+            for rgb in labels
+        }
+    else:
+        closed_rgbs = [rgb for rgb in labels if rgb_hex(rgb) in wanted]
+    remesh = np.asarray(occupied, dtype=bool).copy()
+    if closed_rgbs and not close_all:
+        remesh[closed_label_mask(occupied, colors, closed_rgbs)] = False
+
+    def _append(key, verts, tris, rgb_v, world, normals):
+        if len(tris) == 0:
+            return 0
+        used, inverse = np.unique(tris, return_inverse=True)
+        bucket = groups.setdefault(int(key), [[], [], []])
+        base = sum(len(part) for part in bucket[0])
+        bucket[0].append(world[used])
+        bucket[1].append(normals[used])
+        bucket[2].append(inverse.reshape(-1, 3).astype(np.int32) + base)
+        if int(key) == bone_key:
+            bone_parts["index"].append(verts[used])
             bone_parts["world"].append(world[used])
             bone_parts["normals"].append(normals[used])
-            bone_parts["rgb"].append(rgb[used])
-            bone_parts["tris"].append(inverse.reshape(-1, 3).astype(np.int32) + bone_base)
-            bone_base += int(len(used))
-    print(f"Bone mesh in {len(groups)} colors", flush=True)
+            bone_parts["rgb"].append(rgb_v[used])
+            bone_parts["tris"].append(inverse.reshape(-1, 3).astype(np.int32) + bone_base[0])
+            bone_base[0] += int(len(used))
+        return int(len(tris))
+
+    if close_all:
+        print(
+            f"Meshing every label as its own solid ({len(closed_rgbs)} structures)",
+            flush=True,
+        )
+    else:
+        print(
+            f"Meshing union occupancy for bone, EAC, sinus/dura, and other open labels "
+            f"({len(closed_rgbs)} closed structures separate)",
+            flush=True,
+        )
+    union_blocks = [] if close_all else blocks_for_mask(remesh, BLOCK)
+    mesher.set_occupancy(remesh)
+    union_tris: dict[int, int] = {}
+    if union_blocks:
+        outputs, _phases = mesher.mesh_blocks(union_blocks, smooth=True, prepare_pose=pose)
+        for _block, mesh in outputs:
+            verts, tris, rgb_v, world, normals = mesh
+            if world is None or len(tris) == 0:
+                continue
+            face = _face_packed(rgb_v, tris)
+            for key in np.unique(face):
+                union_tris[int(key)] = union_tris.get(int(key), 0) + _append(
+                    key, verts, tris[face == key], rgb_v, world, normals
+                )
+    for key, tris_n in sorted(union_tris.items(), key=lambda item: -item[1]):
+        hex_id = rtx_materials.segment_id(key)
+        alias = rtx_materials.name_of(document or {}, hex_id) or hex_id
+        print(f"  union {alias} #{hex_id}  {tris_n} tris", flush=True)
+
+    for rgb in closed_rgbs:
+        mask = occupancy_for_rgb(occupied, colors, rgb)
+        blocks = blocks_for_mask(mask, BLOCK)
+        if not blocks:
+            continue
+        key = packed_rgb(rgb)
+        hex_id = rgb_hex(rgb)
+        alias = wanted.get(hex_id) or hex_id
+        mesher.set_occupancy(mask)
+        outputs, _phases = mesher.mesh_blocks(blocks, smooth=True, prepare_pose=pose)
+        tris_n = 0
+        for _block, mesh in outputs:
+            verts, tris, rgb_v, world, normals = mesh
+            if world is None or len(tris) == 0:
+                continue
+            tris_n += _append(key, verts, tris, rgb_v, world, normals)
+        print(
+            f"  closed {alias} #{hex_id}  {int(mask.sum())} voxels  {len(blocks)} blocks  {tris_n} tris",
+            flush=True,
+        )
+    mesher.set_occupancy(occupied)
+    print(f"Surfaces for {len(groups)} structures", flush=True)
 
     def _cat(parts, dtype):
         if not parts:
@@ -555,7 +629,7 @@ def _author_cannula(viewer, burr):
     return {"id": "cannula", "prim": prim}
 
 
-def _author_scene(viewer, lights, camera):
+def _author_scene(viewer, lights, camera, close_all=False):
     from pxr import Gf, UsdLux
 
     print("Loading intact volume", flush=True)
@@ -568,7 +642,9 @@ def _author_scene(viewer, lights, camera):
         occupied, colors, eac_rgb, bone_rgb, dimensions, laterality
     )
     frame.dimensions = dimensions
-    groups, bone_mesh, rotation, translation = _bone_groups(occupied, colors, bone_rgb)
+    groups, bone_mesh, rotation, translation = _bone_groups(
+        occupied, colors, bone_rgb, document, close_all=close_all
+    )
     print("Classifying lateral cortex masks", flush=True)
     cache = cortex_masks.build_surface_cache(
         bone_mesh["index"],
@@ -592,8 +668,12 @@ def _author_scene(viewer, lights, camera):
             0.0,
             with_normals=True,
         )
+    closed_hexes = set(rtx_materials.closed_structure_hexes(viewer._material_document))
+    if close_all:
+        closed_hexes = {rtx_materials.segment_id(key) for key in groups}
+        closed_hexes.discard(frame.bone_hex)
     for key, (points, normals, tris) in groups.items():
-        if sum(len(part) for part in tris) < 40:
+        if sum(len(part) for part in tris) < (4 if close_all else 40):
             continue
         segment = rtx_materials.segment_id(key)
         name = rtx_materials.name_of(viewer._material_document, segment) or f"bone_{key:06x}"
@@ -604,6 +684,9 @@ def _author_scene(viewer, lights, camera):
             point_src = np.concatenate(points)
             tri_src = np.concatenate(tris)
             normal_src = np.concatenate(normals)
+            if segment in closed_hexes and len(point_src):
+                # Sit just off the bone canal wall so the closed tube does not z-fight.
+                point_src = point_src + normal_src * np.float32(0.0004)
         viewer.log_mesh(
             name,
             wp.array(np.ascontiguousarray(point_src, np.float32), dtype=wp.vec3),
@@ -870,17 +953,11 @@ def _slider(imgui, label, value, low, high, fmt, flags=0):
 
 
 PANELS_PATH = HERE / "tuner_panels.json"
-PANELS_SHOWN = ("Light", "Irrigation")
 
 
 def _load_panels(names) -> dict:
-    try:
-        saved = json.loads(PANELS_PATH.read_text())
-    except (OSError, json.JSONDecodeError):
-        saved = {}
-    if not isinstance(saved, dict):
-        saved = {}
-    return {name: bool(saved.get(name, name in PANELS_SHOWN)) for name in names}
+    """Cards start closed. Only the top toggle bar is visible."""
+    return {name: False for name in names}
 
 
 def _draw_panel_bar(imgui, shown: dict) -> None:
@@ -1317,7 +1394,62 @@ def _draw_paste(viewer, pose, state) -> None:
             state["bound"] = True
 
 
+def _parse_args():
+    parser = argparse.ArgumentParser(description="FIVRS RTX Tuner")
+    parser.add_argument(
+        "--anatomy-adf",
+        type=lambda p: pathlib.Path(p).expanduser(),
+        default=None,
+        help="Volume ADF to inspect. Omit to pick a volume and view first.",
+    )
+    parser.add_argument(
+        "--view",
+        default="default",
+        help="canonical_views.yaml id, or default/home.",
+    )
+    parser.add_argument(
+        "--close-all",
+        action="store_true",
+        help="Mesh every label as its own solid so unnamed colors can be identified.",
+    )
+    return parser.parse_args()
+
+
+def _anatomy_label(path: pathlib.Path) -> str:
+    resolved = path.expanduser().resolve()
+    try:
+        return str(resolved.relative_to(REPO))
+    except ValueError:
+        return str(resolved)
+
+
 def main():
+    global ADF
+    args = _parse_args()
+    view_id = args.view
+    volume_name = ""
+    close_all = bool(args.close_all)
+    if args.anatomy_adf is None:
+        choice = tuner_launch_dialog.pick_launch()
+        if choice is None:
+            return
+        ADF = pathlib.Path(choice["adf"]).expanduser().resolve()
+        view_id = choice.get("view") or "default"
+        volume_name = choice.get("name") or ""
+        close_all = close_all or bool(choice.get("close_all"))
+    else:
+        ADF = pathlib.Path(args.anatomy_adf).expanduser().resolve()
+    if not ADF.is_file():
+        raise SystemExit(f"Anatomy ADF not found: {ADF}")
+    volume_name = volume_name or tuner_launch_dialog.volume_title(ADF)
+    laterality = _adf_laterality(ADF)
+    print(
+        f"Tuner anatomy {volume_name}  {_anatomy_label(ADF)}  "
+        f"view {view_id}  laterality {laterality or 'unknown'}"
+        f"{'  close every structure' if close_all else ''}",
+        flush=True,
+    )
+    print("Loading Newton", flush=True)
     _patch_open_usd()
     _quiet_stock_panels()
     import newton
@@ -1325,10 +1457,12 @@ def main():
     document = load_document()
     lights = document["lights"]
     irrigation = load_irrigation(IRRIGATION_PATH)
+    irrigation["enabled"] = False
     global _START_BOUNCES
     _START_BOUNCES = int(irrigation.get("max_bounces", 4))
-    camera = _right_ear_camera()
+    camera = _startup_camera(view_id, laterality)
     position, right, up, forward = camera
+    print("Opening RTX window", flush=True)
     viewer = newton.viewer.ViewerRTX(
         width=1280,
         height=720,
@@ -1369,7 +1503,7 @@ def main():
     viewer.picking_enabled = False
     rtx_materials.attach(viewer)
     segments, cache, frame, rotation, translation, occupied, pose = _author_scene(
-        viewer, lights, camera
+        viewer, lights, camera, close_all=close_all
     )
     _bind_light(viewer, lights)
     volume_frame = VolumeFrame(
@@ -1386,9 +1520,10 @@ def main():
     rtx_materials.apply_params(viewer, "water", _ensure_water(irrigation))
     rtx_materials.apply_params(viewer, "film", _ensure_film(irrigation))
     bench.prime(viewer)
+    bench.hide(viewer)
     # The renderer copies the sheet on the first frame and then only moves
     # those vertices. Fill it first, while that mesh can still be replaced.
-    if pose is not None:
+    if pose is not None and irrigation.get("enabled", False):
         quat = quat_aiming_at_bone(pose["forward"], pose["right"])
         for _ in range(45):
             bench.step(1.0 / 60.0, pose["center"], quat, size_mm=PREVIEW_SIZE_MM)
@@ -1401,7 +1536,7 @@ def main():
     status = {"text": "Moves save as you drag."}
     camera_state = {
         "views": camera_views.load_views(),
-        "selected": "right",
+        "selected": view_id if view_id not in ("default", "home") else (laterality or "right"),
         "status": "Frame the shot, then save it into a slot.",
     }
     materials = rtx_materials.MaterialUi(viewer, segments)
@@ -1412,7 +1547,7 @@ def main():
         frame,
         rotation,
         translation,
-        str(ADF.relative_to(REPO)),
+        _anatomy_label(ADF),
     )
     if pose is not None and pose.get("bone") is not None:
         bone = np.asarray(pose["bone"], dtype=np.float64)

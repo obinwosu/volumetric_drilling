@@ -19,7 +19,7 @@
   "offset_mm": 2.0,
   "proximal_mm": 0.0,
   "opacity": 0.485,
-  "enabled": true,
+  "enabled": false,
   "water": {
     "diffuse_reflection_color": [
       1.0,

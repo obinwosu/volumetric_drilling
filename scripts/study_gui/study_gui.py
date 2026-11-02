@@ -245,6 +245,7 @@ class Ui(QtWidgets.QWidget):
     def __init__(self):
         super(Ui, self).__init__()
         uic.loadUi("layout.ui", self)
+        self.setWindowTitle("FIVRS")
         self.setStyleSheet(MIDNIGHT_OCEAN_STYLE)
 
         self.gui_configuration = GUIConfiguration("gui_setup.yaml")
@@ -370,6 +371,8 @@ class Ui(QtWidgets.QWidget):
         self._ambf_process = QProcess()
         self._rtx_process = QProcess()
         self._fluid_process = QProcess()
+        self._rtx_splash = None
+        self._rtx_log_file = None
         self._rtx_process.readyReadStandardOutput.connect(self._rtx_output)
         self._rtx_process.finished.connect(self._rtx_finished)
         self._fluid_process.readyReadStandardOutput.connect(self._fluid_output)
@@ -677,22 +680,51 @@ class Ui(QtWidgets.QWidget):
         if self._rtx_process.state() != QProcess.NotRunning:
             self._rtx_process.terminate()
             self._rtx_process.waitForFinished(2000)
+        log_dir = pathlib.Path("/tmp/fivrs-rtx")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / "view.log"
+        self._rtx_log_file = log_file
         command = (
             "set +u && "
             "source /opt/ros/jazzy/setup.bash && "
             "source \"$HOME/ros_ambf_ws/install/setup.bash\" && "
+            "unset QT_PLUGIN_PATH QT_QPA_PLATFORM_PLUGIN_PATH "
+            "QT_QPA_PLATFORMTHEME QTDIR __NV_PRIME_RENDER_OFFLOAD __VK_LAYER_NV_optimus && "
             "export DISPLAY=\"${DISPLAY:-:1}\" && "
+            "export PYTHONUNBUFFERED=1 && "
             "export __GLX_VENDOR_LIBRARY_NAME=\"${__GLX_VENDOR_LIBRARY_NAME:-nvidia}\" && "
             "export VK_DRIVER_FILES=\"${VK_DRIVER_FILES:-/usr/share/vulkan/icd.d/nvidia_icd.json}\" && "
             f"exec \"{venv_python}\" \"{script}\" --anatomy-adf \"{self.active_volume_adf}\""
         )
+        self._show_rtx_splash()
         self._rtx_process.setWorkingDirectory(str(repo_root))
         self._rtx_process.setProcessChannelMode(QProcess.MergedChannels)
         self._rtx_process.start("bash", ["-lc", command])
         if not self._rtx_process.waitForStarted(5000):
+            self._close_rtx_splash()
             self.print_info(f"ERROR! RTX bone view did not start: {self._rtx_process.errorString()}")
             return
         self.print_info("Starting RTX bone view")
+
+    def _show_rtx_splash(self):
+        rtx_dir = str(pathlib.Path(__file__).resolve().parent.parent / "rtx_view")
+        if rtx_dir not in sys.path:
+            sys.path.insert(0, rtx_dir)
+        import rtx_splash
+
+        self._close_rtx_splash()
+        heading = "Initializing RTX View"
+        if self.active_volume_name:
+            heading = f"Initializing RTX View — {self.active_volume_name}"
+        splash = rtx_splash.Splash(QtWidgets, heading, parent=self, cancelable=False)
+        splash.show()
+        self._rtx_splash = splash
+
+    def _close_rtx_splash(self):
+        splash = self._rtx_splash
+        self._rtx_splash = None
+        if splash is not None:
+            splash.close()
 
     def _start_fluid(self, repo_root):
         """Maelstrom jet for the RTX window. AMBF and the view are already up."""
@@ -753,11 +785,20 @@ class Ui(QtWidgets.QWidget):
         if not msg:
             return
         self.print_debug(msg if msg.endswith("\n") else msg + "\n")
+        log_file = self._rtx_log_file
+        if log_file is not None:
+            with open(log_file, "a", encoding="utf-8") as handle:
+                handle.write(msg if msg.endswith("\n") else msg + "\n")
+        splash = self._rtx_splash
         for line in msg.splitlines():
+            if splash is not None and splash.apply_line(line):
+                self._close_rtx_splash()
+                splash = None
             if any(token in line for token in ("Traceback", "Error", "ERROR", "Exception", "did not publish")):
                 self.print_info(line)
 
     def _rtx_finished(self, code, status):
+        self._close_rtx_splash()
         if code not in (0, None) and self._ambf_process.state() == QProcess.Running:
             self.print_info(f"RTX bone view exited ({code}). See the Debug pane.")
 
@@ -791,6 +832,7 @@ class Ui(QtWidgets.QWidget):
         self._set_sim_running_style(False)
         if self._rtx_process.state() != QProcess.NotRunning:
             self._rtx_process.terminate()
+        self._close_rtx_splash()
         self._stop_fluid()
 
     def _ambf_process_error(self, error):
@@ -980,7 +1022,8 @@ class Ui(QtWidgets.QWidget):
 
 app = QtWidgets.QApplication(sys.argv)
 app.setApplicationName("FIVRS")
-app.setDesktopFileName("fivrs")
+app.setApplicationDisplayName("FIVRS")
+app.setDesktopFileName("volumetric-drilling-study-gui")
 app.setStyleSheet(MIDNIGHT_OCEAN_STYLE)
 _app_font = QFont()
 _app_font.setPointSize(14)

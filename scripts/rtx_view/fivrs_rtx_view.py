@@ -52,7 +52,17 @@ from fluid.surface_sph import SurfaceSph, film_surface
 from fluid.rtx_stream import PrescribedStream
 from fluid.sph_dump import DEFAULT_PATH as SPH_DUMP, dump_is_fresh, read_positions
 from fluid.water_mesh import water_surface
-from surface import BlockVolume, blocks_touched_by, index_to_local, local_to_world, vertex_normals
+from surface import (
+    BlockVolume,
+    blocks_touched_by,
+    closed_label_mask,
+    closed_label_meshes,
+    index_to_local,
+    labels_matching,
+    local_to_world,
+    packed_rgb,
+    vertex_normals,
+)
 
 # Chunk colors for bone faces that take a tuner appearance. They are not
 # segmentation labels, and they never go back into the occupancy grid.
@@ -1013,6 +1023,69 @@ def _bind_window_input(viewer, bridge):
     print("RTX camera: left-drag orbit, right-drag pan, wheel dolly. AMBF keeps main_camera.", flush=True)
 
 
+def _closed_structure_rgbs(occupied, colors, document=None):
+    """Facial nerve, labyrinth, ossicles, and chorda when those labels exist."""
+    wanted = rtx_materials.closed_structure_hexes(document)
+    return labels_matching(occupied, colors, wanted)
+
+
+def _carve_closed_structures(occupied, colors, document=None):
+    """Bone remesh occupancy without the solid-structure labels."""
+    found = _closed_structure_rgbs(occupied, colors, document)
+    if not found:
+        return occupied, []
+    rgbs = [rgb for _hex, rgb in found]
+    mask = closed_label_mask(occupied, colors, rgbs)
+    remesh = np.asarray(occupied, dtype=bool).copy()
+    remesh[mask] = False
+    names = ", ".join(rtx_materials.closed_structure_hexes(document)[hex_id] for hex_id, _rgb in found)
+    print(
+        f"Closed occupancy for {names}: {int(mask.sum())} voxels carved from the bone remesh",
+        flush=True,
+    )
+    return remesh, found
+
+
+def _author_closed_structures(viewer, occupied, colors, volume, document, found):
+    """One static solid per selected label, meshed on that label's occupancy."""
+    if not found:
+        return
+    keep = [rgb for _hex, rgb in found]
+    groups = closed_label_meshes(occupied, colors, keep_rgb=keep, min_tris=40)
+    dims = volume["dimensions"]
+    counts = volume["counts"]
+    rotation = np.asarray(volume["rotation"], dtype=np.float64)
+    translation = volume["translation"]
+    names = rtx_materials.closed_structure_hexes(document)
+    for rgb, (verts, tris, _cols, normals) in groups:
+        if len(tris) == 0:
+            continue
+        hex_id = rtx_materials.segment_id(packed_rgb(rgb))
+        alias = names.get(hex_id) or hex_id
+        local = index_to_local(np.asarray(verts, dtype=np.float64), dims, counts)
+        world = np.ascontiguousarray(local_to_world(local, rotation, translation), np.float32)
+        world_n = np.asarray(normals, dtype=np.float64) @ rotation.T
+        length = np.linalg.norm(world_n, axis=1, keepdims=True)
+        length[length < 1e-8] = 1.0
+        world_n = np.ascontiguousarray(world_n / length, np.float32)
+        world = world + world_n * np.float32(0.0004)
+        mesh_name = f"anatomy/{alias}"
+        color = tuple(rtx_materials.identity_color(hex_id))
+        viewer.log_mesh(
+            mesh_name,
+            wp.array(world, dtype=wp.vec3),
+            wp.array(np.ascontiguousarray(tris.reshape(-1), np.int32), dtype=wp.int32),
+            normals=wp.array(world_n, dtype=wp.vec3),
+            color=color,
+            roughness=0.55,
+            metallic=0.0,
+            dynamic=False,
+            backface_culling=False,
+        )
+        rtx_materials.bind_named_mesh(viewer, mesh_name, hex_id, document)
+        print(f"Closed {alias} #{hex_id}  {len(tris)} tris", flush=True)
+
+
 def _log_chunk(viewer, name, points, tris, normals, color):
     """Update an existing prim from host arrays.
 
@@ -1319,12 +1392,13 @@ def _drain_upload(viewer, upload, budget_s):
 class SurfaceWorker:
     """Rebuilds drilled blocks away from the camera and drill update."""
 
-    def __init__(self, blocks, occupied, colors, volume, appearance=None):
+    def __init__(self, blocks, occupied, colors, volume, appearance=None, closed_rgbs=()):
         self._blocks = blocks
         self._occupied = occupied
         self._colors = colors
         self._volume = volume
         self._appearance = appearance
+        self._closed_rgbs = list(closed_rgbs)
         self._inbox = queue.Queue()
         self._outbox = queue.Queue()
         self.busy = False
@@ -1436,6 +1510,8 @@ class SurfaceWorker:
             path, reason = resync if isinstance(resync, tuple) else (resync, "gap")
             loading = time.perf_counter()
             occupied, colors, _count = _load_dump(pathlib.Path(path))
+            if self._closed_rgbs:
+                occupied[closed_label_mask(occupied, colors, self._closed_rgbs)] = False
             detail["load_ms"] = (time.perf_counter() - loading) * 1e3
             if occupied.shape != shape:
                 print(f"resync shape {occupied.shape} != {shape}", flush=True)
@@ -2277,10 +2353,13 @@ def main():
 
     import newton
 
+    print("Initializing RTX View", flush=True)
     print("Loading anatomy slices", flush=True)
     occupied, colors = _load_occupancy(pathlib.Path(args.anatomy_adf))
     labels = np.unique(colors[occupied].reshape(-1, 3), axis=0)
     print(f"Volume {occupied.shape} with {len(labels)} segment colors", flush=True)
+    document = rtx_materials.load_document()
+    remesh_occupied, closed_found = _carve_closed_structures(occupied, colors, document)
     bridge = Bridge()
     deadline = time.perf_counter() + 180.0
     announced = 0.0
@@ -2298,7 +2377,7 @@ def main():
         print(f"WARNING volume_info count {counts.tolist()} != slices {occupied.shape}", flush=True)
 
     started = time.perf_counter()
-    blocks = BlockVolume(occupied, colors)
+    blocks = BlockVolume(remesh_occupied, colors)
     extract_s = time.perf_counter() - started
     print(
         f"Initial surface {blocks.vertex_count} verts {blocks.triangle_count} tris "
@@ -2327,6 +2406,7 @@ def main():
 
     from pxr import Gf
 
+    print("Opening RTX window", flush=True)
     # Same background and reflection denoising as the tuner, so the water
     # looks the same in both: the fill dome is behind the bone and in reflections.
     viewer = newton.viewer.ViewerRTX(
@@ -2355,6 +2435,7 @@ def main():
     )
     model = newton.ModelBuilder().finalize()
     viewer.set_model(model)
+    viewer._material_document = document
     # set_model replaces the camera, so the field of view has to be set after it.
     viewer.camera.fov = float(np.degrees(VERTICAL_FOV_RAD))
     viewer.camera.near = 0.1
@@ -2510,7 +2591,8 @@ def main():
             flush=True,
         )
     viewer._volume_translation = np.asarray(bridge.volume["translation"], dtype=np.float64)
-    document = rtx_materials.load_document()
+    viewer._material_document = document
+    _author_closed_structures(viewer, occupied, colors, bridge.volume, document, closed_found)
     print("Fitting the lateral cortex onto the live surface", flush=True)
     appearance = cortex_masks.build_appearance_index(
         blocks,
@@ -2541,7 +2623,7 @@ def main():
         volume_frame.index_to_world(np.asarray(occupied.shape, dtype=np.float64) * 0.5),
         getattr(viewer, "_lights", None) or _tuner_lights_from_file()[0],
     )
-    viewer._irrigation_bench = IrrigationBench(occupied, volume_frame, gpu_film=True)
+    viewer._irrigation_bench = IrrigationBench(remesh_occupied, volume_frame, gpu_film=True)
     viewer._irrigation_bench.apply(getattr(viewer, "_irrigation", None) or load_irrigation(IRRIGATION_PATH))
     # Only the bench may author fluid/sheet. Another log there before the first
     # frame binds a preview color and the stream material over the film look.
@@ -2556,11 +2638,19 @@ def main():
             None,
         )
     ]
-    worker = SurfaceWorker(blocks, occupied, colors, bridge.volume, appearance)
+    worker = SurfaceWorker(
+        blocks,
+        remesh_occupied,
+        colors,
+        bridge.volume,
+        appearance,
+        closed_rgbs=[rgb for _hex, rgb in closed_found],
+    )
     if hasattr(viewer._irrigation_bench.film, "occupancy_source"):
         # The bone mesher keeps the occupancy on the GPU; the film reads bone there.
         viewer._irrigation_bench.film.occupancy_source = lambda: getattr(worker._blocks, "_warp", None)
     _install_frame_probes(viewer)
+    print("RTX view ready", flush=True)
     print("RTX brightness: [ darker    ] brighter    \\ reset    L distant beam", flush=True)
     waiting_dump_since = None
     waiting_catchup = None

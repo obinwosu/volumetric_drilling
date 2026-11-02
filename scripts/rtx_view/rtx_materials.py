@@ -23,6 +23,22 @@ KNOWN_NAMES = {
     "fff9db": "bone",
 }
 
+# Buried anatomy meshed on its own occupancy so it is one solid, not islands
+# on the bone air interface. Bone, EAC, and sinus/dura stay on the union remesh.
+CLOSED_STRUCTURE_NAMES = frozenset(
+    {
+        "facial_nerve",
+        "nerve",
+        "chorda_tympani",
+        "malleus",
+        "incus",
+        "stapes",
+        "scala_tympani",
+        "scala_vestibuli",
+        "labyrinth",
+    }
+)
+
 # Clear water. Opacity stays at 1: a partial opacity was the dark scrim.
 # Transmission does the see-through. A little white diffuse keeps a face that
 # misses the highlight from going black. The cool transmission tint is the
@@ -307,9 +323,18 @@ def name_map(document: dict | None = None) -> dict[str, str]:
         for key, value in (document.get("names") or {}).items():
             hex_id = str(key).strip().lower()
             alias = clean_name(str(value))
-            if is_hex_id(hex_id) and alias and not is_hex_id(alias) and hex_id not in names:
+            if is_hex_id(hex_id) and alias and not is_hex_id(alias):
                 names[hex_id] = alias
     return names
+
+
+def closed_structure_hexes(document: dict | None = None) -> dict[str, str]:
+    """Original hex -> name for labels that get a closed occupancy mesh."""
+    return {
+        hex_id: alias
+        for hex_id, alias in name_map(document).items()
+        if alias in CLOSED_STRUCTURE_NAMES
+    }
 
 
 def name_of(document: dict, segment: str) -> str:
@@ -795,10 +820,11 @@ class MaterialUi:
         self.document = viewer._material_document
         self.segments = segments
         self.selected = segments[0]["id"] if segments else ""
-        self.visible = {item["id"]: True for item in segments}
+        self.visible = {item["id"]: item["id"] not in PART_LABELS for item in segments}
         self.status = "Material changes save as you drag."
         self._name_edit_id = ""
         self._name_edit = ""
+        self._show()
 
     def _prims(self, segment: str):
         return [item["prim"] for item in self.segments if item["id"] == segment]
@@ -830,21 +856,29 @@ class MaterialUi:
         apply_params(self.viewer, segment, stored)
         self.status = f"Saved {display_label(self.document, segment)} to {MATERIALS_PATH.name}"
 
-    def _rename(self, segment: str, text: str):
+    def _rename(self, segment: str, text: str) -> bool:
         if not is_hex_id(segment):
-            return
+            return False
         alias = clean_name(text)
         if is_hex_id(alias):
             alias = ""
         names = self.document.setdefault("names", {})
-        previous = names.get(segment, KNOWN_NAMES.get(segment, ""))
+        previous = name_of(self.document, segment)
         if alias == previous:
-            return
+            return True
+        loaded = {item["id"] for item in self.segments}
         if alias:
-            taken = next((hex_id for hex_id, name in name_map(self.document).items() if name == alias and hex_id != segment), "")
+            taken = next(
+                (
+                    hex_id
+                    for hex_id, name in name_map(self.document).items()
+                    if name == alias and hex_id != segment and hex_id in loaded
+                ),
+                "",
+            )
             if taken:
-                self.status = f"{alias} is already #{taken}"
-                return
+                self.status = f"{alias} is already #{taken} in this volume"
+                return False
         slots = self.document.setdefault("segments", {})
         if previous and previous != segment:
             slots.pop(previous, None)
@@ -855,7 +889,8 @@ class MaterialUi:
         else:
             names.pop(segment, None)
         save_document(self.document)
-        self.status = f"{display_label(self.document, segment)} updates by name and hex"
+        self.status = f"Named #{segment} {alias}" if alias else f"Cleared #{segment}"
+        return True
 
     def draw(self, imgui):
         imgui.set_next_window_pos(imgui.ImVec2(400, 16), imgui.Cond_.first_use_ever)
@@ -889,7 +924,8 @@ class MaterialUi:
                     f"{display_name(self.document, segment)}##{segment}",
                     segment == self.selected,
                 )
-                if clicked:
+                if clicked and segment != self.selected:
+                    self._rename(self._name_edit_id, self._name_edit)
                     self.selected = segment
                 hex_id = hex_of(self.document, segment)
                 if hex_id and name_of(self.document, segment):
@@ -907,16 +943,21 @@ class MaterialUi:
             if segment != self._name_edit_id:
                 self._name_edit_id = segment
                 self._name_edit = name_of(self.document, segment)
+            flags = imgui.InputTextFlags_.enter_returns_true.value
             hint = getattr(imgui, "input_text_with_hint", None)
             if hint:
-                _changed, value = hint("Name", "e.g. bone", self._name_edit)
+                entered, value = hint("##structure_name", "name, then Enter", self._name_edit, flags)
             else:
-                _changed, value = imgui.input_text("Name", self._name_edit)
+                entered, value = imgui.input_text("##structure_name", self._name_edit, flags)
             self._name_edit = value
-            if imgui.is_item_deactivated_after_edit():
-                self._rename(segment, value)
-                self._name_edit = name_of(self.document, segment)
-            imgui.text_disabled("Identity is the original hex. Display color can change.")
+            left = bool(imgui.is_item_deactivated_after_edit())
+            imgui.same_line()
+            pressed = bool(imgui.button("Rename"))
+            if entered or left or pressed:
+                if self._rename(segment, value):
+                    self._name_edit = name_of(self.document, segment)
+            imgui.text_disabled(self.status)
+            imgui.text_disabled("Enter or Rename saves it on this hex. The list updates immediately.")
         elif segment in APPEARANCE_LABELS:
             imgui.text_disabled("Bone appearance inside this mask. The bone segmentation is unchanged.")
         else:
