@@ -35,6 +35,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import bone_debris
 import cortex_masks
 import markings
+import nerves
 import or_room
 import pause_menu
 import rtx_materials
@@ -855,6 +856,7 @@ def _push_exposure(viewer):
     _reload_tuner_lights(viewer)
     rtx_materials.reload_if_changed(viewer)
     _sync_markings(viewer)
+    nerves.sync_live(viewer)
     _sync_irrigation(viewer)
     rtx_materials.flush_materials(viewer)
     for path in LIGHT_BASE:
@@ -1084,6 +1086,20 @@ def _author_closed_structures(viewer, occupied, colors, volume, document, found)
         )
         rtx_materials.bind_named_mesh(viewer, mesh_name, hex_id, document)
         print(f"Closed {alias} #{hex_id}  {len(tris)} tris", flush=True)
+        if nerves.is_nerve(alias):
+            prim = viewer.stage.GetPrimAtPath(viewer._get_path(viewer._qualify(mesh_name)))
+            if prim and prim.IsValid():
+                viewer._nerve_scene_per_mm = MM_TO_SIM
+                try:
+                    nerves.attach(
+                        viewer,
+                        prim,
+                        mesh_name,
+                        nerves.world_to_mm(world, rotation, translation, np.full(3, 1.0 / MM_TO_SIM)),
+                        tris,
+                    )
+                except Exception as exc:
+                    print(f"Nerve shader skipped on {alias}: {exc}", flush=True)
 
 
 def _log_chunk(viewer, name, points, tris, normals, color):

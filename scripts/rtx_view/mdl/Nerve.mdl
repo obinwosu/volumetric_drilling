@@ -1,0 +1,290 @@
+mdl 1.7;
+
+import ::anno::*;
+import ::math::*;
+import ::scene::*;
+import ::OmniSurface::OmniSurfaceBase::*;
+
+// Facial nerve and chorda tympani. The mesh primvar "nerve" is
+// (along_mm, across_a_mm, across_b_mm, valid): distance along the nerve
+// centreline and the offset from it in a frame carried along that line.
+// Vessels are drawn per shading point from those coordinates, so they stay
+// sharp below the voxel size. nerves.py mirrors this pattern in numpy.
+
+float mod289(float x)
+{
+    return x - math::floor(x * (1.0 / 289.0)) * 289.0;
+}
+
+float permute(float x)
+{
+    return mod289((34.0 * x + 1.0) * x);
+}
+
+float3 corner_gradient(float3 cell)
+{
+    float h = permute(permute(permute(mod289(cell.x)) + mod289(cell.y)) + mod289(cell.z));
+    float z = math::frac(h * (7.0 / 289.0)) * 2.0 - 1.0;
+    float phi = h * (6.2831853 * 13.0 / 289.0);
+    float r = math::sqrt(math::max(1.0 - z * z, 0.0));
+    return float3(r * math::cos(phi), r * math::sin(phi), z);
+}
+
+float corner_dot(float3 cell, float3 offset, float3 f)
+{
+    return math::dot(corner_gradient(cell + offset), f - offset);
+}
+
+// Gradient noise, roughly -1..1.
+float gnoise(float3 p)
+{
+    float3 i = math::floor(p);
+    float3 f = p - i;
+    float3 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    float n000 = corner_dot(i, float3(0.0, 0.0, 0.0), f);
+    float n100 = corner_dot(i, float3(1.0, 0.0, 0.0), f);
+    float n010 = corner_dot(i, float3(0.0, 1.0, 0.0), f);
+    float n110 = corner_dot(i, float3(1.0, 1.0, 0.0), f);
+    float n001 = corner_dot(i, float3(0.0, 0.0, 1.0), f);
+    float n101 = corner_dot(i, float3(1.0, 0.0, 1.0), f);
+    float n011 = corner_dot(i, float3(0.0, 1.0, 1.0), f);
+    float n111 = corner_dot(i, float3(1.0, 1.0, 1.0), f);
+    float x00 = math::lerp(n000, n100, u.x);
+    float x10 = math::lerp(n010, n110, u.x);
+    float x01 = math::lerp(n001, n101, u.x);
+    float x11 = math::lerp(n011, n111, u.x);
+    float y0 = math::lerp(x00, x10, u.y);
+    float y1 = math::lerp(x01, x11, u.y);
+    return math::lerp(y0, y1, u.z);
+}
+
+// Fibers: stretched lengthwise, sampled straight from the across offsets.
+float3 fiber_space(float4 c, float width_mm, float3 offset)
+{
+    float w = math::max(width_mm, 0.005);
+    return float3(c.x / (w * 18.0), c.y / w, c.z / w) + offset;
+}
+
+// Vessel noise at one point. ``count`` sets how many contour lines run
+// around the nerve, independent of its radius; ``length_mm`` sets how far a
+// vessel runs before it drifts. Waviness turns the angle, so vessels wander
+// sideways and stay lengthwise.
+float vessel_noise(float s, float theta, float count, float length_mm, float waviness, float3 offset)
+{
+    float rc = math::max(count, 0.5) / 6.2831853;
+    float len = math::max(length_mm, 0.02);
+    float3 slow = float3(s / len * 0.5, math::cos(theta) * rc * 0.5, math::sin(theta) * rc * 0.5)
+        + offset + float3(5.0, 23.0, 61.0);
+    float turned = theta + waviness * gnoise(slow) * 6.2831853 / math::max(count, 0.5);
+    return gnoise(float3(s / len, math::cos(turned) * rc, math::sin(turned) * rc) + offset);
+}
+
+// Noise value and distance (mm) to its zero line, from the local slope.
+float2 vessel_distance(float s, float theta, float radius_mm, float count, float length_mm, float waviness, float3 offset)
+{
+    float n0 = vessel_noise(s, theta, count, length_mm, waviness, offset);
+    float ds = 0.05 * math::max(length_mm, 0.02);
+    float dtheta = 0.05 * 6.2831853 / math::max(count, 0.5);
+    float along = (vessel_noise(s + ds, theta, count, length_mm, waviness, offset) - n0) / ds;
+    float around = (vessel_noise(s, theta + dtheta, count, length_mm, waviness, offset) - n0)
+        / (dtheta * math::max(radius_mm, 0.05));
+    float slope = math::sqrt(along * along + around * around);
+    return float2(n0, math::abs(n0) / math::max(slope, 0.0001));
+}
+
+// 1 on a vessel, 0 off it.
+float line_of(float distance_mm, float width_mm)
+{
+    float half_width = 0.5 * math::max(width_mm, 0.001);
+    return 1.0 - math::smoothstep(half_width * 0.55, half_width, distance_mm);
+}
+
+float core_of(float distance_mm, float width_mm)
+{
+    return 1.0 - math::smoothstep(0.0, 0.3 * math::max(width_mm, 0.001), distance_mm);
+}
+
+export material Nerve(
+    uniform color nerve_color = color(1.0, 0.90, 0.92) [[
+        anno::display_name("Nerve color"),
+        anno::in_group("Nerve")
+    ]],
+    uniform float nerve_roughness = 0.38 [[
+        anno::display_name("Nerve roughness"),
+        anno::in_group("Nerve"),
+        anno::hard_range(0.0, 1.0)
+    ]],
+    uniform float fiber_strength = 0.10 [[
+        anno::display_name("Fiber strength"),
+        anno::in_group("Nerve"),
+        anno::hard_range(0.0, 1.0)
+    ]],
+    uniform float fiber_width_mm = 0.06 [[
+        anno::display_name("Fiber width (mm)"),
+        anno::in_group("Nerve"),
+        anno::hard_range(0.005, 1.0)
+    ]],
+    uniform float subsurface_weight = 0.45 [[
+        anno::display_name("Subsurface weight"),
+        anno::in_group("Nerve"),
+        anno::hard_range(0.0, 1.0)
+    ]],
+    uniform color subsurface_color = color(1.0, 0.72, 0.68) [[
+        anno::display_name("Subsurface color"),
+        anno::in_group("Nerve")
+    ]],
+    uniform float subsurface_scale = 0.004 [[
+        anno::display_name("Subsurface scale (scene units)"),
+        anno::in_group("Nerve"),
+        anno::hard_range(0.0, 1.0)
+    ]],
+    uniform float sheath_coat = 0.5 [[
+        anno::display_name("Sheath coat"),
+        anno::in_group("Nerve"),
+        anno::hard_range(0.0, 1.0)
+    ]],
+    uniform float coat_roughness = 0.08 [[
+        anno::display_name("Coat roughness"),
+        anno::in_group("Nerve"),
+        anno::hard_range(0.0, 1.0)
+    ]],
+    uniform float coat_ior = 1.40 [[
+        anno::display_name("Coat IOR"),
+        anno::in_group("Nerve"),
+        anno::hard_range(1.0, 2.2)
+    ]],
+    uniform bool vessels_enabled = true [[
+        anno::display_name("Vessels"),
+        anno::in_group("Vessels")
+    ]],
+    uniform float vessel_strength = 1.0 [[
+        anno::display_name("Vessel strength"),
+        anno::in_group("Vessels"),
+        anno::hard_range(0.0, 1.0)
+    ]],
+    uniform color vessel_color = color(0.62, 0.06, 0.06) [[
+        anno::display_name("Vessel color"),
+        anno::in_group("Vessels")
+    ]],
+    uniform color vessel_core_color = color(0.32, 0.01, 0.02) [[
+        anno::display_name("Vessel core color"),
+        anno::in_group("Vessels")
+    ]],
+    uniform float vessel_roughness = 0.22 [[
+        anno::display_name("Vessel roughness"),
+        anno::in_group("Vessels"),
+        anno::hard_range(0.0, 1.0)
+    ]],
+    uniform float seed = 3.0 [[
+        anno::display_name("Seed"),
+        anno::in_group("Vessels")
+    ]],
+    uniform float main_count = 4.0 [[
+        anno::display_name("Main vessels around"),
+        anno::in_group("Vessels"),
+        anno::hard_range(0.5, 20.0)
+    ]],
+    uniform float main_length_mm = 16.0 [[
+        anno::display_name("Main vessel run (mm)"),
+        anno::in_group("Vessels"),
+        anno::hard_range(0.1, 40.0)
+    ]],
+    uniform float main_width_mm = 0.07 [[
+        anno::display_name("Main vessel width (mm)"),
+        anno::in_group("Vessels"),
+        anno::hard_range(0.002, 1.0)
+    ]],
+    uniform float main_continuity = 0.8 [[
+        anno::display_name("Main vessel continuity"),
+        anno::in_group("Vessels"),
+        anno::hard_range(0.0, 1.0)
+    ]],
+    uniform float waviness = 0.35 [[
+        anno::display_name("Waviness"),
+        anno::in_group("Vessels"),
+        anno::hard_range(0.0, 2.0)
+    ]],
+    uniform float branch_count = 16.0 [[
+        anno::display_name("Branches around"),
+        anno::in_group("Vessels"),
+        anno::hard_range(0.5, 60.0)
+    ]],
+    uniform float branch_length_mm = 3.0 [[
+        anno::display_name("Branch run (mm)"),
+        anno::in_group("Vessels"),
+        anno::hard_range(0.05, 20.0)
+    ]],
+    uniform float branch_width_mm = 0.025 [[
+        anno::display_name("Branch width (mm)"),
+        anno::in_group("Vessels"),
+        anno::hard_range(0.002, 1.0)
+    ]],
+    uniform float branch_density = 0.55 [[
+        anno::display_name("Branch density"),
+        anno::in_group("Vessels"),
+        anno::hard_range(0.0, 1.0)
+    ]],
+    uniform float branch_strength = 0.6 [[
+        anno::display_name("Branch strength"),
+        anno::in_group("Vessels"),
+        anno::hard_range(0.0, 1.0)
+    ]]
+) = let {
+    float4 c = scene::data_lookup_float4("nerve", float4(0.0, 0.0, 0.0, 0.0));
+    float valid = math::clamp(c.w, 0.0, 1.0);
+    float3 seed_offset = float3(seed * 13.17, seed * 7.31, seed * 3.73);
+
+    float radius = math::max(math::sqrt(c.y * c.y + c.z * c.z), 0.05);
+    float theta = math::atan2(c.z, c.y);
+
+    // Fine lengthwise fascicle striations in the sheath.
+    float fiber = 0.5 + 0.5 * gnoise(fiber_space(c, fiber_width_mm, seed_offset + float3(91.0, 17.0, 43.0)));
+
+    // Main vessels: a few lengthwise lines that come and go along the nerve.
+    float2 main_d = vessel_distance(c.x, theta, radius, main_count, main_length_mm, waviness, seed_offset);
+    float gate_threshold = 0.45 - 0.9 * main_continuity;
+    float main_gate = math::smoothstep(
+        gate_threshold - 0.15,
+        gate_threshold + 0.15,
+        vessel_noise(c.x * 0.35, theta, main_count * 0.35, main_length_mm, 0.0, seed_offset + float3(17.0, 3.0, 29.0))
+    );
+    float main_line = line_of(main_d.y, main_width_mm) * main_gate;
+    float main_core = core_of(main_d.y, main_width_mm);
+
+    // Thin branches: shorter, more tortuous, in patches.
+    float3 branch_offset = seed_offset + float3(41.0, 7.0, 13.0);
+    float2 branch_d = vessel_distance(c.x, theta, radius, branch_count, branch_length_mm, waviness * 1.6, branch_offset);
+    float density_threshold = 0.5 - branch_density;
+    float branch_gate = math::smoothstep(
+        density_threshold - 0.12,
+        density_threshold + 0.12,
+        vessel_noise(c.x * 0.4, theta, branch_count * 0.4, branch_length_mm, 0.0, branch_offset + float3(53.0, 29.0, 11.0))
+    );
+    float branch_line = line_of(branch_d.y, branch_width_mm) * branch_gate;
+
+    float on = (vessels_enabled ? 1.0 : 0.0) * vessel_strength * valid;
+    float vm = math::clamp(main_line * on, 0.0, 1.0);
+    float vb = math::clamp(branch_line * branch_strength * on, 0.0, 1.0);
+
+    color sheath = nerve_color * (1.0 - fiber_strength * fiber);
+    color branch_tint = vessel_color * 0.75 + nerve_color * 0.25;
+    color with_branches = sheath * (1.0 - vb) + branch_tint * vb;
+    color main_tint = vessel_color * (1.0 - main_core) + vessel_core_color * main_core;
+    color base = with_branches * (1.0 - vm) + main_tint * vm;
+    float vessel_amount = math::max(vm, vb);
+    float rough = math::lerp(nerve_roughness, vessel_roughness, vessel_amount);
+    float sss = subsurface_weight * (1.0 - 0.6 * vessel_amount);
+} in ::OmniSurface::OmniSurfaceBase::OmniSurfaceBase(
+    diffuse_reflection_weight: 1.0,
+    diffuse_reflection_color: base,
+    specular_reflection_weight: 1.0,
+    specular_reflection_roughness: rough,
+    enable_diffuse_transmission: true,
+    subsurface_weight: sss,
+    subsurface_transmission_color: base,
+    subsurface_scattering_color: subsurface_color,
+    subsurface_scale: subsurface_scale,
+    coat_weight: sheath_coat,
+    coat_roughness: coat_roughness,
+    coat_ior: coat_ior
+);

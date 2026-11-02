@@ -462,11 +462,26 @@ class ShaderPanel:
         imgui.set_next_window_pos(imgui.ImVec2(1264, 16), imgui.Cond_.first_use_ever)
         imgui.set_next_window_size(imgui.ImVec2(400, 720), imgui.Cond_.first_use_ever)
         imgui.begin("Shaders")
+        others = getattr(self, "others", None) or []
+        if others:
+            names = ["Cortical markings"] + [label for label, _draw in others]
+            choice = int(getattr(self, "choice", 0))
+            changed, choice = imgui.combo("Shader", choice, names)
+            if changed:
+                self.choice = int(choice)
+            imgui.separator()
+            if choice > 0:
+                others[choice - 1][1](imgui)
+                imgui.end()
+                return
+        self._draw_markings(imgui)
+        imgui.end()
+
+    def _draw_markings(self, imgui):
         imgui.text("Cortical markings")
         imgui.text_disabled("One shader. It fades out at the perimeter of the cap.")
         if not getattr(self.cortex, "_authored", False):
             imgui.text_wrapped("The markings surface is not ready.")
-            imgui.end()
             return
         if self.coverage:
             imgui.text_wrapped(self.coverage)
@@ -515,7 +530,6 @@ class ShaderPanel:
         imgui.separator()
         imgui.text_disabled(self.status)
         imgui.text_disabled(str(CONFIG_PATH))
-        imgui.end()
 
 
 def _self_check():

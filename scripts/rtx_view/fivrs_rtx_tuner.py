@@ -32,6 +32,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import camera_views
 import cortex_masks
 import markings
+import nerves
 import or_room
 import rtx_materials
 import tuner_launch_dialog
@@ -702,6 +703,20 @@ def _author_scene(viewer, lights, camera, close_all=False):
             print(f"No mesh prim for {name}", flush=True)
             continue
         rtx_materials.bind_prim(viewer, prim, segment, viewer._material_document)
+        if nerves.is_nerve(name):
+            # The tuner meshes the volume in a unit cube; the ADF dimensions give sim mm.
+            mm_per_local = np.asarray(dimensions, np.float64) / nerves.MM_TO_SIM
+            viewer._nerve_scene_per_mm = nerves.MM_TO_SIM / float(np.mean(dimensions))
+            try:
+                nerves.attach(
+                    viewer,
+                    prim,
+                    name,
+                    nerves.world_to_mm(point_src, rotation, translation, mm_per_local),
+                    tri_src,
+                )
+            except Exception as exc:
+                print(f"Nerve shader skipped on {name}: {exc}", flush=True)
         segments.append({"id": segment, "prim": prim})
     segments.sort(key=lambda item: item["id"])
     burr = _author_burr(viewer, groups, camera)
@@ -784,6 +799,7 @@ def _bind_light(viewer, lights):
                 viewer._tune_warned = True
         rtx_materials.flush_materials(viewer)
         markings.flush_runtime(viewer)
+        nerves.flush_runtime(viewer)
 
     viewer._update_ovrtx_camera = update
 
@@ -1558,6 +1574,8 @@ def main():
         viewer.camera.set_pivot(tuple(float(value) for value in cortex.pivot))
     shaders = markings.ShaderPanel(viewer, cortex)
     cortex.on_masks_changed = shaders.apply_pattern
+    nerve_panel = nerves.NervePanel(viewer)
+    shaders.others = [("Nerves", nerve_panel.draw_controls)]
     debris = load_debris()
     slurry = rtx_materials.slurry_params()
     paste = {
@@ -1587,7 +1605,7 @@ def main():
     print(
         f"Tuner ready. Views {camera_views.VIEWS_PATH.name}  light {SAVE_PATH.name}  "
         f"materials {rtx_materials.MATERIALS_PATH.name}  "
-        f"cortex {cortex_masks.CONFIG_PATH.name}  shaders {markings.CONFIG_PATH.name}  "
+        f"cortex {cortex_masks.CONFIG_PATH.name}  shaders {markings.CONFIG_PATH.name} {nerves.CONFIG_PATH.name}  "
         f"irrigation {IRRIGATION_PATH.name}  paste {rtx_materials.PASTE_PATH.name}",
         flush=True,
     )
