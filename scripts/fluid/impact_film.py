@@ -43,6 +43,13 @@ SLIDE_MM_S = 35.0
 # Life is compared with this. It only sets how fast water leaves over the lip;
 # it must not slow the spreading, or a long life makes the sheet crawl.
 REF_LIFE_S = 0.1
+# Suction. Water within the capture radius of the tip goes at once, measured to
+# the water surface, so a tip held in a pool takes it. Out to SUCTION_REACH times
+# that radius it is drawn out each frame, fastest at the tip; the film's flow
+# brings the rest of the pool downhill into the gap, so a pool drains from its
+# lowest point and its triangles disappear as the cells empty.
+SUCTION_REACH = 2.5
+SUCTION_DRAW_PER_S = 12.0
 # Inlet volume per unit of the Flow slider, mm^3/s. 80 covers a 15 mm
 # radius half a millimetre deep in about four seconds.
 FLOW_MM3_PER_UNIT = 1.2
@@ -319,7 +326,7 @@ class ImpactFilm:
             self.depth *= math.exp(-dt / max(float(life_s), 0.05))
             self.depth[self.depth < MIN_DEPTH_MM * 0.25] = 0.0
         self._cap(spread_mm, depth_mm)
-        self._suction(suction_tip, suction_radius_mm)
+        self._suction(suction_tip, suction_radius_mm, dt)
         self.volume_mm3 = float(self.depth.sum() * CELL_MM * CELL_MM)
 
     def _set_smooth(self, smooth) -> None:
@@ -708,13 +715,20 @@ class ImpactFilm:
                 volume -= space * share
             stamp += CELL_MM
 
-    def _suction(self, tip, radius_mm: float) -> None:
+    def _suction(self, tip, radius_mm: float, dt: float = 0.0) -> None:
         if tip is None or radius_mm <= 0.0 or self._origin is None:
             return
         tip = np.asarray(tip, dtype=np.float64).reshape(3)
         delta = np.nan_to_num(self.bed - tip, nan=1.0)
-        dist = np.linalg.norm(delta, axis=2)
-        self.depth[self.on_bone & (dist <= float(radius_mm) * MM_TO_SIM)] = 0.0
+        # Distance from the tip to the water, not to the bone under it.
+        gap = np.maximum(np.linalg.norm(delta, axis=2) - self.depth * MM_TO_SIM, 0.0)
+        capture = float(radius_mm) * MM_TO_SIM
+        reach = capture * SUCTION_REACH
+        self.depth[self.on_bone & (gap <= capture)] = 0.0
+        if dt > 0.0:
+            near = self.on_bone & (gap > capture) & (gap < reach)
+            pull = 1.0 - (gap[near] - capture) / (reach - capture)
+            self.depth[near] *= np.exp(-SUCTION_DRAW_PER_S * float(dt) * pull)
 
     def _flow(self, dt: float, spread_mm: float, depth_mm: float, life_s: float | None = None) -> None:
         if dt <= 0.0:

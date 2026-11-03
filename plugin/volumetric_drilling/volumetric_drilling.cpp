@@ -55,6 +55,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <cstdio>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -1291,24 +1292,27 @@ void afVolmetricDrillingPlugin::updateButtons(){
     m_drillManager.m_suctionClutch = false;
     if (m_drillManager.m_suctionTracked && m_drillManager.m_suctionDevice
         && m_drillManager.m_suctionDevice->isDeviceAvailable()){
-        bool suctionBtn1 = false; // stylus button 1 (switch index 1): double-tap recenters
-        bool suctionBtn2 = false; // stylus button 2 (switch index 0): hold clutches
-        m_drillManager.m_suctionDevice->getUserSwitch(1, suctionBtn1);
+        // Same as the drill: stylus button 2 (switch index 0) double-tap
+        // recenters the suction, and holding it clutches.
+        bool suctionBtn2 = false;
         m_drillManager.m_suctionDevice->getUserSwitch(0, suctionBtn2);
 
         const double doubleClickSec = 0.45;
         double now = glfwGetTime();
-        if (suctionBtn1 && !m_suctionBtn1Prev){
-            if (m_suctionBtn1LastClickTime >= 0.0 && (now - m_suctionBtn1LastClickTime) <= doubleClickSec){
+        bool suctionDoubleTapped = false;
+        if (suctionBtn2 && !m_suctionBtn2Prev){
+            if (m_suctionBtn2LastClickTime >= 0.0 && (now - m_suctionBtn2LastClickTime) <= doubleClickSec){
                 requestSuctionReposition();
-                m_suctionBtn1LastClickTime = -1.0;
+                m_suctionBtn2LastClickTime = -1.0;
+                suctionDoubleTapped = true;
             }
             else{
-                m_suctionBtn1LastClickTime = now;
+                m_suctionBtn2LastClickTime = now;
             }
         }
-        m_suctionBtn1Prev = suctionBtn1;
-        m_drillManager.m_suctionClutch = suctionBtn2;
+        m_suctionBtn2Prev = suctionBtn2;
+        // Skip the double-tap edge so it does not briefly clutch while recentering.
+        m_drillManager.m_suctionClutch = suctionBtn2 && !suctionDoubleTapped;
     }
 
     if (m_footpedal.isAvailable()){
@@ -1337,14 +1341,16 @@ void afVolmetricDrillingPlugin::updateButtons(){
         const bool shiftHeld = isShiftHeld();
 
         if (ctrlHeld){
-            // Ctrl + button 2 = zoom/dolly in; Ctrl + button 1 = zoom/dolly out.
-            // Hold for continuous adjust; do not treat as clutch / double-click.
-            const double zoomStep = 0.08;
+            // Ctrl + button 2 = zoom in; Ctrl + button 1 = zoom out.
+            // Zoom narrows the field of view, as microscope optics do, so the
+            // scope and its light stay where they are. Hold for continuous zoom;
+            // do not treat as clutch / double-click.
+            const double zoomRate = 1.015;
             if (btn2){
-                dollyCamera(zoomStep);
+                zoomCamera(1.0 / zoomRate);
             }
             if (btn1){
-                dollyCamera(-zoomStep);
+                zoomCamera(zoomRate);
             }
             m_btn1Prev = btn1;
             m_btn2Prev = btn2;
@@ -2424,6 +2430,7 @@ string afVolmetricDrillingPlugin::controlHelpText(bool paused) const
             "  Save to slot           Shift + Enter\n"
             "  Resume                 Double-tap Stylus 1  or  Ctrl + P\n"
             "  Recenter drill         Double-tap Stylus 2  or  F9\n"
+            "  Recenter suction       Double-tap Stylus 2 on the suction device\n"
             "\n";
     }
     s += "CONTROLS\n";
@@ -2443,6 +2450,7 @@ string afVolmetricDrillingPlugin::controlHelpText(bool paused) const
             "  Zoom in / out          Ctrl + Stylus 2 / 1\n"
             "  Orbit around burr      Shift + Hold Stylus 2\n"
             "  Recenter drill         Double-tap Stylus 2  or  F9\n"
+            "  Recenter suction       Double-tap Stylus 2 on the suction device\n"
             "  Left / Right view      F3 / F4\n"
             "  Quick roll L / R       F1 / F2\n"
             "  Specular legacy/new    F5\n"
@@ -2749,6 +2757,44 @@ void afVolmetricDrillingPlugin::dollyCamera(double distanceTowardVolume)
     m_customViewActive = true;
 }
 
+void afVolmetricDrillingPlugin::zoomCamera(double factor)
+{
+    if (!m_mainCamera){
+        return;
+    }
+    cCamera* camera = m_mainCamera->getInternalCamera();
+    if (!camera){
+        return;
+    }
+    // About 2 to 34 degrees: a 15x range around the 10.3 degree default.
+    const double minFov = 0.035;
+    const double maxFov = 0.60;
+    const double fov = camera->getFieldViewAngleRad();
+    const double next = std::min(maxFov, std::max(minFov, fov * factor));
+    if (fabs(next - fov) < 1e-9){
+        return;
+    }
+    camera->setFieldViewAngleRad(next);
+    writeRtxFov(next);
+}
+
+void afVolmetricDrillingPlugin::writeRtxFov(double fovRad)
+{
+    // The camera State message has no field of view, so the RTX window reads it here.
+    // Written to a side file and renamed, so the reader never sees half a line.
+    const char* path = "/tmp/fivrs-rtx/camera_fov.txt";
+    const std::string partial = std::string(path) + ".part";
+    {
+        std::ofstream out(partial.c_str(), std::ios::trunc);
+        if (!out){
+            return;
+        }
+        out << ++m_rtxFovSeq << " " << std::setprecision(10) << fovRad << "\n";
+    }
+    std::rename(partial.c_str(), path);
+    m_rtxFovWritten = true;
+}
+
 void afVolmetricDrillingPlugin::panCamera(double rightAmount, double upAmount)
 {
     if (!m_mainCamera){
@@ -2815,6 +2861,9 @@ void afVolmetricDrillingPlugin::serviceRtxCamera()
 {
     if (!m_mainCamera){
         return;
+    }
+    if (!m_rtxFovWritten && m_rtxView){
+        writeRtxFov(m_mainCamera->getFieldViewAngle());
     }
     double yaw = 0.0;
     double pitch = 0.0;

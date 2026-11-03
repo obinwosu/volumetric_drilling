@@ -37,7 +37,10 @@ import cortex_masks
 import markings
 import nerves
 import or_room
+import islands
 import pause_menu
+import rtx_eyes
+import thin_bone
 import rtx_materials
 from fluid.cannula import SIZES as CANNULA_SIZES, load_obj as load_cannula_obj, mesh_path as cannula_mesh_path
 from fluid.irrigation_bench import (
@@ -80,6 +83,9 @@ MESH_DIR = pathlib.Path(__file__).resolve().parents[2] / "ADF" / "meshes" / "hig
 # main_camera field view angle, radians, full vertical angle.
 VERTICAL_FOV_RAD = 0.17951634837990105
 RUNTIME = pathlib.Path("/tmp/fivrs-rtx")
+# main_camera zoom. The camera State message has no field of view, so the plugin writes it here.
+FOV_PATH = RUNTIME / "camera_fov.txt"
+FOV_RANGE_RAD = (0.035, 0.60)
 # Bone dust costs frame time while drilling. FIVRS_BONE_DUST=1 turns it back on.
 BONE_DUST = os.environ.get("FIVRS_BONE_DUST", "0") == "1"
 BONE_ROUGHNESS = 0.55
@@ -534,6 +540,46 @@ def _startup_render_overrides() -> dict:
     return {name: (kind, value) for name, (kind, value) in wanted.items()}
 
 
+def _sync_fov(viewer):
+    """Follow main_camera zoom (Ctrl + stylus buttons). The camera stays put; only the lens narrows."""
+    try:
+        mtime = FOV_PATH.stat().st_mtime
+    except OSError:
+        return
+    if mtime == getattr(viewer, "_fov_mtime", None):
+        return
+    viewer._fov_mtime = mtime
+    try:
+        _seq, value = FOV_PATH.read_text().split()[:2]
+        fov = float(value)
+    except (OSError, ValueError):
+        return
+    if not np.isfinite(fov):
+        return
+    fov = min(FOV_RANGE_RAD[1], max(FOV_RANGE_RAD[0], fov))
+    if abs(fov - float(getattr(viewer, "_fov_rad", VERTICAL_FOV_RAD))) < 1e-7:
+        return
+    viewer._fov_rad = fov
+    viewer.camera.fov = float(np.degrees(fov))
+    # ViewerRTX authors a 20.955 vertical aperture and sets the focal length from the fov.
+    focal = 20.955 / (2.0 * float(np.tan(fov * 0.5)))
+    try:
+        viewer._write_runtime_attribute(
+            [viewer._camera_prim_path], "focalLength", np.array([focal], dtype=np.float32)
+        )
+    except Exception as exc:
+        if not getattr(viewer, "_fov_warned", False):
+            print(f"zoom write failed: {exc}", flush=True)
+            viewer._fov_warned = True
+        return
+    eyes = getattr(viewer, "_eyes", None)
+    if eyes is not None:
+        eyes.write_focal_length(focal)
+    if not getattr(viewer, "_fov_announced", False):
+        print(f"RTX zoom follows main_camera: field of view {np.degrees(fov):.2f} deg", flush=True)
+        viewer._fov_announced = True
+
+
 def _bind_lights(viewer):
     original = viewer._update_ovrtx_camera
 
@@ -541,8 +587,20 @@ def _bind_lights(viewer):
         original()
         if getattr(viewer, "_rtx", None) is None:
             return
+        _sync_fov(viewer)
         packed = getattr(viewer, "_fivrs_cam", None)
-        if packed is not None:
+        eyes = getattr(viewer, "_eyes", None)
+        if eyes is not None:
+            eyes.wrap_renderer()
+        if packed is not None and eyes is not None:
+            # Headset: the window camera is the left eye; the right eye has its own camera.
+            try:
+                eyes.write_cameras(packed, float(getattr(viewer, "_cone_distance", CONE_REFERENCE_DISTANCE)))
+            except Exception as exc:
+                if not getattr(viewer, "_cam_warned", False):
+                    print(f"eye camera write failed: {exc}", flush=True)
+                    viewer._cam_warned = True
+        elif packed is not None:
             position, right, up, forward = packed
             mat = np.eye(4, dtype=np.float64)
             mat[0, :3] = right
@@ -853,10 +911,14 @@ def _remember_cone_angle(angle):
 
 
 def _push_exposure(viewer):
+    tracker = getattr(viewer, "_islands", None)
+    if tracker is not None:
+        tracker.pump()
     _reload_tuner_lights(viewer)
     rtx_materials.reload_if_changed(viewer)
     _sync_markings(viewer)
     nerves.sync_live(viewer)
+    thin_bone.sync_live(viewer)
     _sync_irrigation(viewer)
     rtx_materials.flush_materials(viewer)
     for path in LIGHT_BASE:
@@ -970,7 +1032,8 @@ def _pan_scale(viewer, bridge):
         distance = float(np.linalg.norm(camera["position"] - volume["translation"]))
     distance = max(distance, 0.5)
     height = max(float(getattr(viewer.camera, "height", 720.0)), 1.0)
-    return 2.0 * distance * float(np.tan(VERTICAL_FOV_RAD * 0.5)) / height
+    fov = float(getattr(viewer, "_fov_rad", VERTICAL_FOV_RAD))
+    return 2.0 * distance * float(np.tan(fov * 0.5)) / height
 
 
 def _rtx_mouse_drag(viewer, bridge, x, y, dx, dy, buttons, to_framebuffer_coords, modifiers=0):
@@ -1202,7 +1265,7 @@ def _sync_irrigation(viewer):
     )
 
 
-def _send_chunk(viewer, key, points, tris, normals, color, channels=None, index_pts=None):
+def _send_chunk(viewer, key, points, tris, normals, color, channels=None, index_pts=None, thin_values=None):
     spatial, packed = key
     if packed == CORTEX_CHUNK:
         segment = "lateral_cortex"
@@ -1239,6 +1302,16 @@ def _send_chunk(viewer, key, points, tris, normals, color, channels=None, index_
             if channels is not None:
                 markings.write_channels(viewer, prim, channels, name)
         return
+    thin = getattr(viewer, "_thin_index", None)
+    if thin is not None and packed == thin.bone_packed:
+        # Every send rewrites the values, emptied chunks too, so their length matches.
+        if thin_values is None or len(thin_values) != len(points):
+            thin_values = np.full((len(points), 4), thin_bone.FAR_VALUE, np.float32)
+            thin_values[:, 3] = 0.0
+        prim = viewer.stage.GetPrimAtPath(viewer._get_path(viewer._qualify(name)))
+        if prim and prim.IsValid():
+            thin_bone.attach(viewer, prim, name, thin_values)
+            return
     try:
         rtx_materials.bind_named_mesh(
             viewer, name, segment, viewer._material_document
@@ -1272,7 +1345,7 @@ def _spatial_key(block):
     return int(bx + by * 16 + bz * 256)
 
 
-def _prepare_block_mesh(mesh, volume, spatial, appearance=None):
+def _prepare_block_mesh(mesh, volume, spatial, appearance=None, thin=None):
     """Color-split one block. A missing color is cleared later from this spatial id.
 
     Bone faces still on the original lateral-cortex mask are a separate chunk.
@@ -1313,15 +1386,17 @@ def _prepare_block_mesh(mesh, volume, spatial, appearance=None):
     for start, end in zip(starts, ends):
         group = mesh.tris[order[start:end]]
         sub_used, sub_inverse = np.unique(group, return_inverse=True)
-        chunks.append(
-            (
-                spatial,
-                int(ordered[start]),
-                world[sub_used],
-                sub_inverse.reshape(-1, 3).astype(np.int32),
-                normals[sub_used],
-            )
+        chunk = (
+            spatial,
+            int(ordered[start]),
+            world[sub_used],
+            sub_inverse.reshape(-1, 3).astype(np.int32),
+            normals[sub_used],
         )
+        if thin is not None and int(ordered[start]) == thin.bone_packed:
+            # Bone left over the nerve, dura, and inner ear, per vertex.
+            chunk = chunk + (None, None, thin.sample(mesh.verts[sub_used]))
+        chunks.append(chunk)
     if markings_group is not None and len(markings_group):
         sub_used, sub_inverse = np.unique(markings_group, return_inverse=True)
         lifted = world[sub_used] + normals[sub_used] * np.float32(MARKINGS_LIFT)
@@ -1340,14 +1415,14 @@ def _prepare_block_mesh(mesh, volume, spatial, appearance=None):
     return chunks
 
 
-def _prepare_blocks(blocks, volume, dirty, appearance=None):
+def _prepare_blocks(blocks, volume, dirty, appearance=None, thin=None):
     """Upload payloads for the rebuilt blocks. ``dirty`` None means every block."""
     chosen = blocks.meshes if dirty is None else {key: blocks.meshes[key] for key in dirty if key in blocks.meshes}
     chunks = []
     for block, mesh in chosen.items():
         if dirty is None and len(mesh.tris) == 0:
             continue
-        chunks.extend(_prepare_block_mesh(mesh, volume, _spatial_key(block), appearance))
+        chunks.extend(_prepare_block_mesh(mesh, volume, _spatial_key(block), appearance, thin))
     return chunks
 
 
@@ -1379,6 +1454,7 @@ def _drain_upload(viewer, upload, budget_s):
         spatial, color, points, tris, normals = item[:5]
         channels = item[5] if len(item) > 5 else None
         index_pts = item[6] if len(item) > 6 else None
+        thin_values = item[7] if len(item) > 7 else None
         upload["dirty"].add(spatial)
         if color is None:
             continue
@@ -1390,7 +1466,7 @@ def _drain_upload(viewer, upload, budget_s):
             )
             viewer._bbox_printed = True
         key = (spatial, color)
-        _send_chunk(viewer, key, points, tris, normals, _color_tuple(color), channels, index_pts)
+        _send_chunk(viewer, key, points, tris, normals, _color_tuple(color), channels, index_pts, thin_values)
         upload["sent"].add(key)
     if upload["cursor"] < len(chunks):
         return False
@@ -1408,12 +1484,13 @@ def _drain_upload(viewer, upload, budget_s):
 class SurfaceWorker:
     """Rebuilds drilled blocks away from the camera and drill update."""
 
-    def __init__(self, blocks, occupied, colors, volume, appearance=None, closed_rgbs=()):
+    def __init__(self, blocks, occupied, colors, volume, appearance=None, closed_rgbs=(), thin=None):
         self._blocks = blocks
         self._occupied = occupied
         self._colors = colors
         self._volume = volume
         self._appearance = appearance
+        self._thin = thin
         self._closed_rgbs = list(closed_rgbs)
         self._inbox = queue.Queue()
         self._outbox = queue.Queue()
@@ -1584,6 +1661,13 @@ class SurfaceWorker:
         detail["voxel_clear_ms"] = (time.perf_counter() - clearing) * 1e3
         if xs:
             dirty.update(blocks_touched_by(xs, ys, zs, shape))
+            tracker = getattr(self, "_islands", None)
+            if tracker is not None:
+                # Bone a cut has just freed goes to AMBF to delete.
+                try:
+                    tracker.on_cut(xs, ys, zs)
+                except Exception as exc:
+                    print(f"island check failed: {exc}", flush=True)
         if not dirty and resync is None:
             return
         if xs or resync is not None:
@@ -1614,7 +1698,7 @@ class SurfaceWorker:
             detail["queue_wait_ms"] = (started - receipt) * 1e3
         detail["receipt_wall"] = receipt_wall
         preparing = time.perf_counter()
-        chunks = _prepare_blocks(self._blocks, self._volume, dirty, self._appearance)
+        chunks = _prepare_blocks(self._blocks, self._volume, dirty, self._appearance, self._thin)
         detail["prepare_ms"] = (time.perf_counter() - preparing) * 1e3 + phases.get("prepare_gpu_ms", 0.0)
         detail["mesh_ms"] = (
             phases["extract_ms"]
@@ -2361,13 +2445,35 @@ def _log_instrument(viewer, bridge):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--anatomy-adf", required=True)
-    parser.add_argument("--width", type=int, default=1280)
-    parser.add_argument("--height", type=int, default=720)
+    parser.add_argument("--width", type=int, default=None, help="Default 1280, or 1152 with --headset.")
+    parser.add_argument("--height", type=int, default=None, help="Default 720, or 864 with --headset.")
     parser.add_argument("--stream-cc-s", type=float, default=1.0)
     parser.add_argument("--no-stream", action="store_true")
+    parser.add_argument(
+        "--headset",
+        action="store_true",
+        help="Also render a right eye and send both eyes to the OpenXR eyepiece plugin. The window shows the left eye.",
+    )
+    parser.add_argument("--stereo-base-mm", type=float, default=rtx_eyes.BASE_MM)
+    parser.add_argument(
+        "--stereo-focus-mm", type=float, default=None,
+        help="Where the eyes converge. Default: the distance from the scope to the volume centre.",
+    )
     args = parser.parse_args()
+    # Headset eyes: 4:3, about a megapixel each, between the 1280x720 and 1024x1024 tried.
+    if args.width is None:
+        args.width = 1152 if args.headset else 1280
+    if args.height is None:
+        args.height = 864 if args.headset else 720
 
     import newton
+
+    if os.environ.get("FIVRS_CUDA_VERIFY") == "1":
+        # Debug: Warp checks for a GPU error after every launch, so a fault names its kernel.
+        import warp
+
+        warp.config.verify_cuda = True
+        print("FIVRS_CUDA_VERIFY=1: Warp checks every GPU launch (slower)", flush=True)
 
     print("Initializing RTX View", flush=True)
     print("Loading anatomy slices", flush=True)
@@ -2460,6 +2566,8 @@ def main():
     viewer.camera.height = args.height
     _author_lights(viewer)
     _bind_lights(viewer)
+    if args.headset:
+        viewer._eyes = rtx_eyes.Eyes(viewer, args.stereo_base_mm, args.stereo_focus_mm)
     pause_menu.install(viewer)
     if hasattr(viewer, "show_ground"):
         viewer.show_ground = False
@@ -2620,6 +2728,17 @@ def main():
         cortex_masks.named_rgb(document, "eac", "ffe1d6"),
     )
     viewer._appearance = appearance
+    try:
+        viewer._thin_index = thin_bone.build_index(
+            occupied,
+            colors,
+            document,
+            np.asarray(bridge.volume["dimensions"], np.float64) / np.asarray(occupied.shape, np.float64) / MM_TO_SIM,
+            cortex_masks.named_rgb(document, "bone", "fff9db"),
+        )
+    except Exception as exc:
+        print(f"Thin bone shading off: {exc}", flush=True)
+        viewer._thin_index = None
     viewer._markings_surfaces = {}
     viewer._markings_params_live = markings.load_parameters()
     try:
@@ -2648,7 +2767,7 @@ def main():
     viewer._bone_debris = bone_debris.BoneDebris(viewer._irrigation_bench.frame)
     uploads = [
         _begin_upload(
-            _prepare_blocks(blocks, bridge.volume, None, appearance),
+            _prepare_blocks(blocks, bridge.volume, None, appearance, viewer._thin_index),
             True,
             extract_s * 1e3,
             None,
@@ -2661,7 +2780,13 @@ def main():
         bridge.volume,
         appearance,
         closed_rgbs=[rgb for _hex, rgb in closed_found],
+        thin=viewer._thin_index,
     )
+    # Floating bone islands, at load and cut loose while drilling, are deleted in AMBF.
+    tracker = islands.IslandTracker(occupied, colors, cortex_masks.named_rgb(document, "bone", "fff9db"))
+    worker._islands = tracker
+    viewer._islands = tracker
+    tracker.scan_at_load()
     if hasattr(viewer._irrigation_bench.film, "occupancy_source"):
         # The bone mesher keeps the occupancy on the GPU; the film reads bone there.
         viewer._irrigation_bench.film.occupancy_source = lambda: getattr(worker._blocks, "_warp", None)

@@ -118,3 +118,45 @@ Same as before: edit `ADF/openxr_eyepiece_camera.yaml` — more **negative** `lo
 | Transport | ALVR + SteamVR | WiVRn |
 | Submit | OpenVR scene textures | OpenXR **VIEW-space** projection (head-locked stereo) |
 | Microscope clutch | Partial / fights compositor | Intended model |
+
+## RTX view in the headset
+
+The path-traced RTX view can replace AMBF's own rendering in the headset.
+
+**Turning it on**
+- **Study GUI:** check both **OpenXR eyepiece** and **RTX view**, then Start Simulation. The GUI starts the RTX window with `--headset`.
+- **By hand:** add `--headset` to `scripts/rtx_view/fivrs_rtx_view.py`.
+
+**What happens**
+- **Two eyes like a microscope:** the RTX window renders two eyes, 23 mm apart, both aimed at the field. Its own window shows the left eye.
+- **Hand-off to the plugin:** each frame both images go to `/dev/shm/fivrs_rtx_eyes`.
+- **What the headset shows:** while new frames arrive, the eyepiece plugin (ADF 15) shows them instead of AMBF's rendering. If no RTX frame arrives for 1 s, it switches back to AMBF's rendering, and the AMBF log says which one it is showing.
+- **What still works:** the clutch, recenter (F10/F11/F12) and placement work as before, and zoom (Ctrl + stylus) changes both eyes.
+
+**Cost:** two path-traced eyes cost about twice one view, so expect a lower FPS than the desktop RTX window alone.
+
+**Settings**
+
+| Setting | Where | Default | Effect |
+|---|---|---|---|
+| `--stereo-base-mm` | RTX window | 23 | Distance between the eyes. More = stronger depth. |
+| `--stereo-focus-mm` | RTX window | scope to volume centre | Depth with no disparity, where the eyes converge. |
+| `--width`, `--height` | RTX window | 1152 × 864 with `--headset` | Size of each eye, and the window. |
+| `AMBF_OPENXR_RTX_EYEPIECE_DEG` | AMBF environment | 65 | How wide the eyepiece image looks in the headset (degrees). |
+| `AMBF_OPENXR_RTX_FUSE_M` | AMBF environment | 1.5 | Distance (m) at which the two images fuse. |
+| `AMBF_OPENXR_RTX=0` | AMBF environment | on | Always use AMBF's own rendering. |
+
+**Not shown in RTX mode:** the AMBF HUD and pause menu are drawn by AMBF, so they don't appear while the headset shows the RTX eyes.
+
+**Rebuilding the plugin:** `bash scripts/build_openxr_eyepiece.sh`. A copy of the plugin source from before this change is in `~/plugin_backups/ambf_openxr_eyepiece_2026-11-02`, because that folder has no git.
+
+**Sheared picture with sawtooth lines from the first drill contact (fixed).** CHAI's partial voxel-texture updates leave OpenGL's unpack row length and skips set, and the plugin used to upload the RTX eyes with them. The plugin now uploads with packed rows and restores AMBF's settings.
+
+**Headset brighter than the desktop (fixed in RTX-only mode).** The RTX images are sRGB-encoded; the plugin now asks for an sRGB swapchain so the compositor does not encode them twice. AMBF's log prints the format it got.
+
+**Picture breaks up with blocky corruption.** This is the WiVRn video stream losing data, not the renderer. WiVRn's log shows "IDR frame needed": the Quest has lost part of the stream and asked for a fresh full frame. Drilling changes the picture a lot at once, and over Wi-Fi at about 25 Mbit/s the stream drops parts of it. Fixes, in order:
+1. **Use the USB cable.** If `adb devices` says "no permissions", add a udev rule for the Quest (vendor 2833), then replug the cable and run `start_wivrn_eyepiece_session.sh` again so it can set `adb reverse`.
+2. **Otherwise use a strong 5 or 6 GHz Wi-Fi link, close to the router.**
+3. **Change the encoder** in the WiVRn dashboard settings: H.265 rather than AV1, and a fixed bitrate the link can carry. Set it higher on USB and lower on weak Wi-Fi.
+
+The server log is in `~/.var/app/io.github.wivrn.wivrn/.local/state/wivrn/wivrn-dashboard/`.

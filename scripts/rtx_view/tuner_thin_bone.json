@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "parameters": {
+    "thin_enabled": true,
+    "nerve_color": [
+      0.93,
+      0.52,
+      0.56
+    ],
+    "nerve_depth_mm": 1.0,
+    "nerve_strength": 0.55,
+    "dura_color": [
+      0.55,
+      0.68,
+      0.92
+    ],
+    "dura_depth_mm": 1.0,
+    "dura_strength": 0.55,
+    "otic_color": [
+      0.9888059496879578,
+      0.8628684282302856,
+      0.5165404677391052
+    ],
+    "otic_band_mm": 2.0,
+    "otic_strength": 0.8999999761581421,
+    "plate_gloss": 0.3
+  }
+}

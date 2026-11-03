@@ -1,0 +1,142 @@
+mdl 1.7;
+
+import ::anno::*;
+import ::math::*;
+import ::scene::*;
+import ::OmniSurface::OmniSurfaceBase::*;
+
+// Bone that takes on the colour of what lies under it as it thins.
+// The mesh primvar "thin_bone" is (nerve_mm, dura_mm, otic_mm, valid): bone
+// left between this point and the facial nerve / chorda, sinus_dura, and
+// inner ear (99 = far). The "Bone" inputs are the bone segment's OmniSurface
+// inputs from the Structures panel, passed straight through, so with every
+// strength at 0 this renders exactly like the plain bone material.
+// thin_bone.py mirrors the tint in numpy.
+
+export material ThinBone(
+    color diffuse_reflection_color = color(1, 1, 1) [[ anno::in_group("Bone") ]],
+    float diffuse_reflection_weight = 1.0 [[ anno::in_group("Bone") ]],
+    float diffuse_reflection_roughness = 0.0 [[ anno::in_group("Bone") ]],
+    float metalness = 0.0 [[ anno::in_group("Bone") ]],
+    float specular_reflection_weight = 1.0 [[ anno::in_group("Bone") ]],
+    color specular_reflection_color = color(1, 1, 1) [[ anno::in_group("Bone") ]],
+    float specular_reflection_roughness = 0.55 [[ anno::in_group("Bone") ]],
+    uniform float specular_reflection_ior = 1.5 [[ anno::in_group("Bone") ]],
+    float specular_reflection_anisotropy = 0.0 [[ anno::in_group("Bone") ]],
+    float specular_reflection_anisotropy_rotation = 0.0 [[ anno::in_group("Bone") ]],
+    float coat_weight = 0.0 [[ anno::in_group("Bone") ]],
+    color coat_color = color(1, 1, 1) [[ anno::in_group("Bone") ]],
+    float coat_roughness = 0.1 [[ anno::in_group("Bone") ]],
+    uniform float coat_ior = 1.5 [[ anno::in_group("Bone") ]],
+    float coat_anisotropy = 0.0 [[ anno::in_group("Bone") ]],
+    float coat_anisotropy_rotation = 0.0 [[ anno::in_group("Bone") ]],
+    float coat_affect_color = 0.0 [[ anno::in_group("Bone") ]],
+    float coat_affect_roughness = 0.0 [[ anno::in_group("Bone") ]],
+    uniform bool enable_diffuse_transmission = false [[ anno::in_group("Bone") ]],
+    float subsurface_weight = 0.0 [[ anno::in_group("Bone") ]],
+    color subsurface_transmission_color = color(1, 1, 1) [[ anno::in_group("Bone") ]],
+    color subsurface_scattering_color = color(1, 1, 1) [[ anno::in_group("Bone") ]],
+    float subsurface_scale = 1.0 [[ anno::in_group("Bone") ]],
+    float subsurface_anisotropy = 0.0 [[ anno::in_group("Bone") ]],
+    uniform bool enable_specular_transmission = false [[ anno::in_group("Bone") ]],
+    float specular_transmission_weight = 0.0 [[ anno::in_group("Bone") ]],
+    color specular_transmission_color = color(1, 1, 1) [[ anno::in_group("Bone") ]],
+    float specular_transmission_scattering_depth = 0.0 [[ anno::in_group("Bone") ]],
+    color specular_transmission_scattering_color = color(1, 1, 1) [[ anno::in_group("Bone") ]],
+    float specular_transmission_scatter_anisotropy = 0.0 [[ anno::in_group("Bone") ]],
+    uniform float specular_transmission_dispersion_abbe = 0.0 [[ anno::in_group("Bone") ]],
+    uniform bool thin_walled = false [[ anno::in_group("Bone") ]],
+    float specular_retro_reflection_weight = 0.0 [[ anno::in_group("Bone") ]],
+    color specular_retro_reflection_color = color(1, 1, 1) [[ anno::in_group("Bone") ]],
+    float specular_retro_reflection_roughness = 0.3 [[ anno::in_group("Bone") ]],
+    uniform bool enable_opacity = false [[ anno::in_group("Bone") ]],
+    float geometry_opacity = 1.0 [[ anno::in_group("Bone") ]],
+    uniform float geometry_opacity_threshold = 0.0 [[ anno::in_group("Bone") ]],
+    float emission_weight = 0.0 [[ anno::in_group("Bone") ]],
+    float emission_intensity = 1.0 [[ anno::in_group("Bone") ]],
+    color emission_color = color(1, 1, 1) [[ anno::in_group("Bone") ]],
+    uniform bool emission_use_temperature = false [[ anno::in_group("Bone") ]],
+    float emission_temperature = 6500.0 [[ anno::in_group("Bone") ]],
+    uniform bool enable_thin_film = false [[ anno::in_group("Bone") ]],
+    float thin_film_thickness = 400.0 [[ anno::in_group("Bone") ]],
+    uniform float thin_film_ior = 1.52 [[ anno::in_group("Bone") ]],
+    uniform bool thin_enabled = true [[ anno::in_group("Thin bone") ]],
+    uniform color nerve_color = color(0.93, 0.52, 0.56) [[ anno::in_group("Thin bone") ]],
+    uniform float nerve_depth_mm = 1.0 [[ anno::in_group("Thin bone") ]],
+    uniform float nerve_strength = 0.55 [[ anno::in_group("Thin bone") ]],
+    uniform color dura_color = color(0.55, 0.68, 0.92) [[ anno::in_group("Thin bone") ]],
+    uniform float dura_depth_mm = 1.0 [[ anno::in_group("Thin bone") ]],
+    uniform float dura_strength = 0.55 [[ anno::in_group("Thin bone") ]],
+    uniform color otic_color = color(1.0, 0.92, 0.70) [[ anno::in_group("Thin bone") ]],
+    uniform float otic_band_mm = 2.0 [[ anno::in_group("Thin bone") ]],
+    uniform float otic_strength = 0.6 [[ anno::in_group("Thin bone") ]],
+    uniform float plate_gloss = 0.3 [[ anno::in_group("Thin bone") ]],
+    uniform float preview_thinning_mm = 0.0 [[ anno::in_group("Thin bone") ]]
+) = let {
+    float4 d = scene::data_lookup_float4("thin_bone", float4(99.0, 99.0, 99.0, 0.0));
+    float on = (thin_enabled ? 1.0 : 0.0) * math::clamp(d.w, 0.0, 1.0);
+    float nerve_left = math::max(d.x - preview_thinning_mm, 0.0);
+    float dura_left = math::max(d.y - preview_thinning_mm, 0.0);
+    float otic_left = math::max(d.z - preview_thinning_mm, 0.0);
+    float wn = nerve_strength * (1.0 - math::smoothstep(0.0, math::max(nerve_depth_mm, 0.001), nerve_left)) * on;
+    float wd = dura_strength * (1.0 - math::smoothstep(0.0, math::max(dura_depth_mm, 0.001), dura_left)) * on;
+    float wo = otic_strength * (1.0 - math::smoothstep(0.0, math::max(otic_band_mm, 0.001), otic_left)) * on;
+
+    // Otic capsule: a hue shift of the bone itself, not a see-through.
+    color hued = diffuse_reflection_color * (color(1.0 - wo) + otic_color * wo);
+    float show = math::clamp(wn + wd, 0.0, 1.0);
+    color under = (nerve_color * wn + dura_color * wd) / math::max(wn + wd, 0.0001);
+    color base = hued * (1.0 - show) + under * show;
+
+    // A thin plate reads a little glassier.
+    float gloss = plate_gloss * show;
+    float rough = specular_reflection_roughness * (1.0 - 0.5 * gloss);
+    float coat = coat_weight + (1.0 - coat_weight) * gloss;
+} in ::OmniSurface::OmniSurfaceBase::OmniSurfaceBase(
+    diffuse_reflection_color: base,
+    diffuse_reflection_weight: diffuse_reflection_weight,
+    diffuse_reflection_roughness: diffuse_reflection_roughness,
+    metalness: metalness,
+    specular_reflection_weight: specular_reflection_weight,
+    specular_reflection_color: specular_reflection_color,
+    specular_reflection_roughness: rough,
+    specular_reflection_ior: specular_reflection_ior,
+    specular_reflection_anisotropy: specular_reflection_anisotropy,
+    specular_reflection_anisotropy_rotation: specular_reflection_anisotropy_rotation,
+    coat_weight: coat,
+    coat_color: coat_color,
+    coat_roughness: coat_roughness,
+    coat_ior: coat_ior,
+    coat_anisotropy: coat_anisotropy,
+    coat_anisotropy_rotation: coat_anisotropy_rotation,
+    coat_affect_color: coat_affect_color,
+    coat_affect_roughness: coat_affect_roughness,
+    enable_diffuse_transmission: enable_diffuse_transmission,
+    subsurface_weight: subsurface_weight,
+    subsurface_transmission_color: subsurface_transmission_color,
+    subsurface_scattering_color: subsurface_scattering_color,
+    subsurface_scale: subsurface_scale,
+    subsurface_anisotropy: subsurface_anisotropy,
+    enable_specular_transmission: enable_specular_transmission,
+    specular_transmission_weight: specular_transmission_weight,
+    specular_transmission_color: specular_transmission_color,
+    specular_transmission_scattering_depth: specular_transmission_scattering_depth,
+    specular_transmission_scattering_color: specular_transmission_scattering_color,
+    specular_transmission_scatter_anisotropy: specular_transmission_scatter_anisotropy,
+    specular_transmission_dispersion_abbe: specular_transmission_dispersion_abbe,
+    thin_walled: thin_walled,
+    specular_retro_reflection_weight: specular_retro_reflection_weight,
+    specular_retro_reflection_color: specular_retro_reflection_color,
+    specular_retro_reflection_roughness: specular_retro_reflection_roughness,
+    enable_opacity: enable_opacity,
+    geometry_opacity: geometry_opacity,
+    geometry_opacity_threshold: geometry_opacity_threshold,
+    emission_weight: emission_weight,
+    emission_intensity: emission_intensity,
+    emission_color: emission_color,
+    emission_use_temperature: emission_use_temperature,
+    emission_temperature: emission_temperature,
+    enable_thin_film: enable_thin_film,
+    thin_film_thickness: thin_film_thickness,
+    thin_film_ior: thin_film_ior
+);

@@ -316,6 +316,53 @@ def test_suction_clears_the_sheet_and_dust_sees_it():
     assert film.volume_mm3 < held * 0.5
 
 
+def _pooled():
+    """A held film with its deepest (most dependent) cell, jet off."""
+    occupied, frame = _slope()
+    hit = frame.index_to_world(np.array((24.5, 16.5, 15.5)))
+    film = _new_film()
+    _pour(film, occupied, frame, hit, jet_mm=0.5, spread=6.0, depth=0.8, seconds=1.0, incoming=(0, 0, -1))
+    depth = np.asarray(film.depth)
+    deepest = np.unravel_index(int(np.argmax(depth)), depth.shape)
+    bed = np.asarray(film.bed)[deepest]
+    return film, occupied, frame, bed, float(depth[deepest])
+
+
+def _hold(film, occupied, frame, seconds, tip, radius_mm=3.0):
+    for _ in range(int(round(seconds * 60))):
+        film.step(
+            1.0 / 60.0, None, 0.5, 6.0, 0.8, 0.0, frame, occupied, 0,
+            incoming=(0, 0, -1), suction_tip=tip, suction_radius_mm=radius_mm,
+        )
+
+
+def test_suction_in_the_pool_drains_it_and_its_triangles_go():
+    film, occupied, frame, bed, _depth = _pooled()
+    _hold(film, occupied, frame, 1.0, None)
+    left_alone = film.volume_mm3
+    film, occupied, frame, bed, depth = _pooled()
+    film.mesh()
+    tris_before = film.n_tris
+    # Tip in the water over the lowest spot, as you would hold a Frazier in a pool.
+    up = -np.asarray(WORLD_DOWN)
+    tip = bed + up * (0.5 * depth * MM_TO_SIM)
+    _hold(film, occupied, frame, 1.0, tip)
+    assert film.volume_mm3 < 0.2 * left_alone, (film.volume_mm3, left_alone)
+    film.mesh()
+    assert film.n_tris < 0.5 * tris_before, (film.n_tris, tris_before)
+
+
+def test_suction_draws_water_from_beyond_the_tip():
+    film, occupied, frame, bed, _depth = _pooled()
+    _hold(film, occupied, frame, 0.5, None)
+    left_alone = film.volume_mm3
+    film, occupied, frame, bed, _depth = _pooled()
+    # 4.5 mm above the bone: out of the 3 mm capture, inside the draw.
+    tip = bed - np.asarray(WORLD_DOWN) * (4.5 * MM_TO_SIM)
+    _hold(film, occupied, frame, 0.5, tip)
+    assert film.volume_mm3 < 0.9 * left_alone, (film.volume_mm3, left_alone)
+
+
 def test_moving_the_jet_leaves_the_old_water():
     occupied, frame = _slope()
     first = frame.index_to_world(np.array((12.5, 14.5, 16.5)))
@@ -417,7 +464,10 @@ def test_gpu_film_follows_the_numpy_film():
     # Float32 against float64; the wet patch and the volume still agree closely.
     wet_cpu, wet_gpu = cpu.depth >= 0.012, gpu.depth >= 0.012
     assert (wet_cpu == wet_gpu).mean() > 0.995
-    assert abs(cpu.volume_mm3 - gpu.volume_mm3) <= 0.02 * cpu.volume_mm3 + 1e-3
+    # Long and chaotic: the films drift a few percent mid-run, and the suction
+    # steps at the end draw that out. test_gpu_suction_matches_the_numpy_film
+    # checks one suction step on matching pools tightly.
+    assert abs(cpu.volume_mm3 - gpu.volume_mm3) <= 0.04 * cpu.volume_mm3 + 1e-3
     mesh = gpu.mesh()
     # Every wet vertex is drawn, at the place the full-grid mesh puts it.
     reference = cpu.mesh_cpu()
@@ -442,6 +492,31 @@ def _assert_no_bridges(film, mesh):
     for a, b in ((0, 1), (1, 2), (2, 0)):
         edge = np.linalg.norm(verts[floor[:, a]] - verts[floor[:, b]], axis=1) / MM_TO_SIM
         assert float(edge.max()) < 2.0, float(edge.max())
+
+
+def test_gpu_suction_matches_the_numpy_film():
+    from fluid.film_gpu import GpuFilm
+
+    occupied, frame = _slope()
+    hit = frame.index_to_world(np.array((24.5, 16.5, 15.5)))
+    films = [ImpactFilm(), GpuFilm()]
+    for film in films:
+        _pour(film, occupied, frame, hit, jet_mm=0.5, spread=6.0, depth=0.8, seconds=1.0, incoming=(0, 0, -1))
+    depth = np.asarray(films[0].depth)
+    deepest = np.unravel_index(int(np.argmax(depth)), depth.shape)
+    # Over the pool, outside the capture radius, inside the draw.
+    tip = np.asarray(films[0].bed)[deepest] - np.asarray(WORLD_DOWN) * (4.5 * MM_TO_SIM)
+    before = [film.volume_mm3 for film in films]
+    for film in films:
+        film.step(
+            1.0 / 60.0, None, 0.5, 6.0, 0.8, 0.0, frame, occupied, 0,
+            incoming=(0, 0, -1), suction_tip=tip, suction_radius_mm=3.0,
+        )
+    after = [film.volume_mm3 for film in films]
+    assert abs(before[0] - before[1]) <= 1e-3 * before[0]
+    assert after[0] < before[0] and after[1] < before[1]
+    assert abs(after[0] - after[1]) <= 0.02 * after[0], after
+    assert np.abs(np.asarray(films[0].depth) - np.asarray(films[1].depth)).max() < 0.02
 
 
 def test_gpu_sheet_does_not_bridge_drilled_walls():
@@ -508,6 +583,8 @@ TESTS = (
     test_rivulets_break_the_front_into_streams,
     test_raycast_is_cached_until_pose_or_occupancy_changes,
     test_suction_clears_the_sheet_and_dust_sees_it,
+    test_suction_in_the_pool_drains_it_and_its_triangles_go,
+    test_suction_draws_water_from_beyond_the_tip,
     test_moving_the_jet_leaves_the_old_water,
     test_two_aims_leave_two_films_that_stay_put,
     test_new_bone_below_the_old_read_still_gets_water,
@@ -528,4 +605,5 @@ if __name__ == "__main__":
     test_gpu_film_follows_the_numpy_film()
     test_gpu_sheet_keeps_its_triangles_while_water_flows()
     test_gpu_sheet_does_not_bridge_drilled_walls()
+    test_gpu_suction_matches_the_numpy_film()
     print("gpu film ok")

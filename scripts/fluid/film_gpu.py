@@ -77,8 +77,10 @@ P_SKIN = wp.constant(41)
 P_FLOOR = wp.constant(42)
 P_RIPPLE_FULL = wp.constant(43)
 P_GATHER = wp.constant(44)
-P_ANCHOR = wp.constant(45)
-P_COUNT = 48
+P_ANCHOR = wp.constant(45)  # vec3
+P_SUCK_REACH = wp.constant(48)
+P_SUCK_DRAW = wp.constant(49)
+P_COUNT = 50
 
 # ring[0:8] is the room in each inlet ring, ring[8:17] the volume left before each.
 RING_VOL = wp.constant(8)
@@ -330,8 +332,14 @@ def _cap_and_suck(
     if volume > limit and limit > 0.0:
         d = d * (limit / volume)
     if P[P_SUCK] != 0.0 and on_bone[i, j] != 0:
-        if wp.length(bed[i, j] - _v(P, P_TIP)) <= P[P_SUCK_R]:
+        # Same as ImpactFilm._suction: take water touching the tip, draw it out nearby.
+        gap = wp.max(wp.length(bed[i, j] - _v(P, P_TIP)) - d * MM, 0.0)
+        capture = P[P_SUCK_R]
+        reach = P[P_SUCK_REACH]
+        if gap <= capture:
             d = 0.0
+        elif gap < reach:
+            d = d * wp.exp(-P[P_SUCK_DRAW] * (1.0 - (gap - capture) / (reach - capture)))
     depth[i, j] = d
     if d > 0.0:
         wp.atomic_add(sums, 1, d)
@@ -1047,6 +1055,8 @@ class GpuFilm(F.ImpactFilm):
             p[P_SUCK] = 1.0
             p[P_TIP : P_TIP + 3] = np.asarray(tip, dtype=np.float64).reshape(3)
             p[P_SUCK_R] = float(tip_mm) * MM_TO_SIM
+            p[P_SUCK_REACH] = float(tip_mm) * F.SUCTION_REACH * MM_TO_SIM
+            p[P_SUCK_DRAW] = F.SUCTION_DRAW_PER_S * float(dt)
         p[P_DOWN : P_DOWN + 3] = self._down
         p[P_NORMAL : P_NORMAL + 3] = normal
         tangent = self._down - float(np.dot(self._down, normal)) * normal

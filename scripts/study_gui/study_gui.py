@@ -632,6 +632,10 @@ class Ui(QtWidgets.QWidget):
                     self.print_info(
                         f"WARNING! WiVRn IPC missing ({ipc}) — is the WiVRn server running?"
                     )
+            if use_openxr and use_rtx:
+                # The headset shows only the RTX view: black while it loads, never AMBF.
+                env.insert("AMBF_OPENXR_RTX", "only")
+                pathlib.Path("/dev/shm/fivrs_rtx_eyes").unlink(missing_ok=True)
             # ADF paths in launch.yaml are relative to the repo root.
             repo_root = pathlib.Path(self.gui_configuration.launch_file.get()).expanduser().resolve().parent
             self._ambf_process.setWorkingDirectory(str(repo_root))
@@ -649,9 +653,14 @@ class Ui(QtWidgets.QWidget):
                     f"XR_RUNTIME_JSON={env.value('XR_RUNTIME_JSON') or '(unset)'} — "
                     "Quest WiVRn must show Connection ready before HMD can stream"
                 )
+            # AMBF's output also goes to a file, so a crash can be read after the window closes.
+            self._ambf_log_path = pathlib.Path("/tmp/fivrs-rtx/ambf.log")
+            self._ambf_log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._ambf_log_path.write_text(f"{self.get_time_as_str()}AMBF [{mode}] {' '.join(self._current_args)}\n")
             self._ambf_process.start(ambf_bin, self._current_args)
             if use_rtx:
-                self._start_rtx_view(repo_root)
+                # With the OpenXR eyepiece, the headset shows the RTX view in stereo.
+                self._start_rtx_view(repo_root, headset=use_openxr)
             if not self._ambf_process.waitForStarted(5000):
                 self.print_info(f"ERROR! Failed to start AMBF: {ambf_bin}")
                 if self._rtx_process.state() != QProcess.NotRunning:
@@ -669,7 +678,7 @@ class Ui(QtWidgets.QWidget):
             else:
                 self._ambf_process.close()
 
-    def _start_rtx_view(self, repo_root):
+    def _start_rtx_view(self, repo_root, headset=False):
         venv_python = pathlib.Path(repo_root) / "middle_ear_newton" / ".venv" / "bin" / "python"
         script = pathlib.Path(repo_root) / "scripts" / "rtx_view" / "fivrs_rtx_view.py"
         if not venv_python.is_file() or not script.is_file():
@@ -695,6 +704,7 @@ class Ui(QtWidgets.QWidget):
             "export __GLX_VENDOR_LIBRARY_NAME=\"${__GLX_VENDOR_LIBRARY_NAME:-nvidia}\" && "
             "export VK_DRIVER_FILES=\"${VK_DRIVER_FILES:-/usr/share/vulkan/icd.d/nvidia_icd.json}\" && "
             f"exec \"{venv_python}\" \"{script}\" --anatomy-adf \"{self.active_volume_adf}\""
+            + (" --headset" if headset else "")
         )
         self._show_rtx_splash()
         self._rtx_process.setWorkingDirectory(str(repo_root))
@@ -823,6 +833,8 @@ class Ui(QtWidgets.QWidget):
             self._updating_log_checkbox = False
         if exit_code not in (0, None) and exit_status != QProcess.CrashExit:
             self.print_info(f"AMBF exited with code {exit_code}")
+        self._log_ambf(f"\n{self.get_time_as_str()}AMBF exited: code {exit_code}, "
+                       f"{'crashed' if exit_status == QProcess.CrashExit else 'normal exit'}\n")
         if exit_status == QProcess.CrashExit:
             self.print_info(
                 "AMBF crashed — check Debug pane for OpenXR/WiVRn errors "
@@ -1011,13 +1023,25 @@ class Ui(QtWidgets.QWidget):
     def print_debug(self, msg):
         self.textEdit_debug.insertPlainText(self.get_time_as_str() + msg)
 
+    def _log_ambf(self, msg):
+        path = getattr(self, "_ambf_log_path", None)
+        if path is None:
+            return
+        try:
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(msg)
+        except OSError:
+            pass
+
     def handle_stderr(self):
-        msg = bytes(self._ambf_process.readAllStandardError()).decode("utf-8")
+        msg = bytes(self._ambf_process.readAllStandardError()).decode("utf-8", errors="replace")
         self.print_debug(msg)
+        self._log_ambf(msg)
 
     def handle_stdout(self):
-        msg = bytes(self._ambf_process.readAllStandardOutput()).decode("utf-8")
+        msg = bytes(self._ambf_process.readAllStandardOutput()).decode("utf-8", errors="replace")
         self.print_debug(msg)
+        self._log_ambf(msg)
 
 
 app = QtWidgets.QApplication(sys.argv)

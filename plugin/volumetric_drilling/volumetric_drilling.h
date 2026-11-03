@@ -86,6 +86,10 @@ protected:
 
     // Move main_camera along the current look axis. Positive = dolly in (keep orientation).
     void dollyCamera(double distanceTowardVolume);
+    // Narrow (factor < 1) or widen the main_camera field of view, like microscope zoom.
+    // The camera does not move, so the scope light on the field is unchanged.
+    void zoomCamera(double factor);
+    void writeRtxFov(double fovRad);
 
     void applyVolumeLightingUniforms();
     // Empty-space color behind the microscope beam. 0 = black, 20 = white.
@@ -287,6 +291,8 @@ private:
     double m_cameraNudgePanRight = 0.0;
     double m_cameraNudgePanUp = 0.0;
     double m_cameraNudgeDolly = 0.0;
+    unsigned long long m_rtxFovSeq = 0;
+    bool m_rtxFovWritten = false;
     cLabel* m_calibrationWarningLabel;
     cLabel* m_noticeLabel;
     cLabel* m_vrHudLabel = nullptr;
@@ -298,8 +304,8 @@ private:
     double m_btn1LastClickTime = -1.0;
     bool m_btn2Prev = false;
     double m_btn2LastClickTime = -1.0;
-    bool m_suctionBtn1Prev = false;
-    double m_suctionBtn1LastClickTime = -1.0;
+    bool m_suctionBtn2Prev = false;
+    double m_suctionBtn2LastClickTime = -1.0;
     bool m_rtxView = false;
     bool m_rtxWindowSized = false;
     double m_rtxStatusTimer = 0.0;

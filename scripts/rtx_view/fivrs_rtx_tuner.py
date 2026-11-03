@@ -35,6 +35,7 @@ import markings
 import nerves
 import or_room
 import rtx_materials
+import thin_bone
 import tuner_launch_dialog
 from bone_debris import CONFIG_PATH as DEBRIS_PATH, load_config as load_debris
 from fluid.irrigation_bench import (
@@ -74,6 +75,41 @@ DEFAULT_LIGHTS = {
 }
 
 
+# Microscope light presets for the Light panel. Each changes only these keys;
+# everything else in tuner_light.json stays as you set it. Fill 4 keeps a
+# trace of room light so shadows are not pure black. A small disk with the
+# same brightness on the bone needs (old radius / new radius)^2 the intensity.
+MICROSCOPE_PRESETS = (
+    (
+        "No room light on bone",
+        "Your scope light, with the operating-room fill down to 4. The teal room no longer lights the bone, so it stays warm and the surround goes dark.",
+        {"fill": 4.0},
+    ),
+    (
+        "Even field",
+        "Light from a small spot at the objective, like a real scope, with a defined edge to the lit field. Sharper, smaller highlights.",
+        {"fill": 4.0, "disk_radius": 0.08, "cone_angle_deg": 9.0, "cone_softness": 0.15, "intensity_nits": 1.2e8},
+    ),
+    (
+        "Spot that falls off",
+        "As Even field, but a narrower beam, so the centre is brightest and the edges of the view darken.",
+        {"fill": 4.0, "disk_radius": 0.08, "cone_angle_deg": 7.0, "cone_softness": 0.35, "intensity_nits": 3.0e8},
+    ),
+    (
+        "Warm halogen spot",
+        "Spot that falls off, in the warmer colour of a halogen lamp instead of xenon or LED. The colour shows after both windows restart.",
+        {
+            "fill": 4.0,
+            "disk_radius": 0.08,
+            "cone_angle_deg": 7.0,
+            "cone_softness": 0.35,
+            "intensity_nits": 3.0e8,
+            "disk_color": [1.0, 0.86, 0.70],
+        },
+    ),
+)
+
+
 def load_document() -> dict:
     document = {"version": 1, "lights": dict(DEFAULT_LIGHTS)}
     if not SAVE_PATH.is_file():
@@ -86,6 +122,8 @@ def load_document() -> dict:
     lights = dict(DEFAULT_LIGHTS)
     lights.update(saved.get("lights") or {})
     document["lights"] = lights
+    # What the light was when the tuner opened, for the presets' way back.
+    document["start"] = json.loads(json.dumps(lights))
     return document
 
 
@@ -703,6 +741,23 @@ def _author_scene(viewer, lights, camera, close_all=False):
             print(f"No mesh prim for {name}", flush=True)
             continue
         rtx_materials.bind_prim(viewer, prim, segment, viewer._material_document)
+        if segment == frame.bone_hex and bone_surface is not None and len(bone_surface[1]):
+            try:
+                viewer._thin_index = thin_bone.build_index(
+                    occupied,
+                    colors,
+                    document,
+                    np.asarray(dimensions, np.float64) / np.asarray(occupied.shape, np.float64) / thin_bone.MM_TO_SIM,
+                    bone_rgb,
+                )
+                viewer._thin_cache_index = bone_mesh["index"]
+                viewer._thin_bone_hook = lambda prim_, name_, tris_, mask_, hidden_: thin_bone.attach_subset(
+                    viewer, prim_, name_, tris_, mask_, hidden_
+                )
+                thin_bone.attach_subset(viewer, prim, name, cache.tris, ~preview.masks["mask1"])
+            except Exception as exc:
+                print(f"Thin bone shading off: {exc}", flush=True)
+                viewer._thin_index = None
         if nerves.is_nerve(name):
             # The tuner meshes the volume in a unit cube; the ADF dimensions give sim mm.
             mm_per_local = np.asarray(dimensions, np.float64) / nerves.MM_TO_SIM
@@ -800,6 +855,7 @@ def _bind_light(viewer, lights):
         rtx_materials.flush_materials(viewer)
         markings.flush_runtime(viewer)
         nerves.flush_runtime(viewer)
+        thin_bone.flush_runtime(viewer)
 
     viewer._update_ovrtx_camera = update
 
@@ -1020,6 +1076,23 @@ def _draw_panel(imgui, document, status):
     imgui.set_next_window_size(imgui.ImVec2(360, 520), imgui.Cond_.first_use_ever)
     imgui.begin("Light")
     changed = False
+    if _section(imgui, "Microscope presets", True):
+        imgui.text_disabled("Try one; it saves at once and the live window follows.")
+        for name, note, values in MICROSCOPE_PRESETS:
+            if imgui.button(name):
+                for key, value in values.items():
+                    lights[key] = list(value) if isinstance(value, list) else float(value)
+                status["preset"] = name
+                changed = True
+            imgui.text_wrapped(note)
+        start = document.get("start")
+        if start is not None and imgui.button("Back to how it was when the tuner opened"):
+            lights.clear()
+            lights.update(json.loads(json.dumps(start)))
+            status["preset"] = "the light from when the tuner opened"
+            changed = True
+        if status.get("preset"):
+            imgui.text_disabled(f"Now on: {status['preset']}. Sliders below fine-tune it.")
     if _section(imgui, "Scope light", True):
         imgui.text_disabled("Angle and softness, then intensity, then fill.")
         touched, lights["cone_angle_deg"] = _slider(
@@ -1031,7 +1104,7 @@ def _draw_panel(imgui, document, status):
         )
         changed |= touched
         touched, lights["intensity_nits"] = _slider(
-            imgui, "Intensity", lights["intensity_nits"], 1.0e5, 2.0e7, "%.3g nits", log_flag
+            imgui, "Intensity", lights["intensity_nits"], 1.0e5, 1.0e9, "%.3g nits", log_flag
         )
         changed |= touched
         touched, lights["fill"] = _slider(imgui, "Fill", lights["fill"], 0.0, 200.0, "%.1f")
@@ -1042,6 +1115,11 @@ def _draw_panel(imgui, document, status):
         )
         changed |= touched
         imgui.text_disabled("Disk radius is the highlight width.")
+        touched, color = imgui.color_edit3("Light colour", [float(c) for c in lights["disk_color"]])
+        if touched:
+            lights["disk_color"] = [float(c) for c in color]
+            changed = True
+        imgui.text_disabled("Light colour applies when both windows restart.")
     if _section(imgui, "Operating room", True):
         imgui.text_disabled("Seen in the wet bone only. It does not light the bone.")
         touched, lights["room_nits"] = _slider(
@@ -1575,7 +1653,8 @@ def main():
     shaders = markings.ShaderPanel(viewer, cortex)
     cortex.on_masks_changed = shaders.apply_pattern
     nerve_panel = nerves.NervePanel(viewer)
-    shaders.others = [("Nerves", nerve_panel.draw_controls)]
+    thin_panel = thin_bone.ThinBonePanel(viewer)
+    shaders.others = [("Nerves", nerve_panel.draw_controls), ("Thin bone", thin_panel.draw_controls)]
     debris = load_debris()
     slurry = rtx_materials.slurry_params()
     paste = {
@@ -1605,7 +1684,7 @@ def main():
     print(
         f"Tuner ready. Views {camera_views.VIEWS_PATH.name}  light {SAVE_PATH.name}  "
         f"materials {rtx_materials.MATERIALS_PATH.name}  "
-        f"cortex {cortex_masks.CONFIG_PATH.name}  shaders {markings.CONFIG_PATH.name} {nerves.CONFIG_PATH.name}  "
+        f"cortex {cortex_masks.CONFIG_PATH.name}  shaders {markings.CONFIG_PATH.name} {nerves.CONFIG_PATH.name} {thin_bone.CONFIG_PATH.name}  "
         f"irrigation {IRRIGATION_PATH.name}  paste {rtx_materials.PASTE_PATH.name}",
         flush=True,
     )

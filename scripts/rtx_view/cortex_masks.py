@@ -1515,6 +1515,10 @@ class CortexPanel:
         params = rtx_materials.resolve(self.materials.document, segment)
         rtx_materials.apply_params(self.viewer, segment, params)
         rtx_materials.bind_prim(self.viewer, prim, segment, self.viewer._material_document)
+        hook = getattr(self.viewer, "_thin_bone_hook", None)
+        if hook is not None:
+            # The thin-bone shader replaces the plain bone material on this prim.
+            hook(prim, name, self.cache.tris, ~np.asarray(mask, dtype=bool), hidden)
         rtx_materials.set_visibility(self.viewer, prim, not hidden)
 
     def _author_appearance(self):

@@ -8,9 +8,9 @@
   "film_depth_mm": 4.08,
   "film_life_s": 15.1,
   "film_smooth": 1.0,
-  "film_ripple": 1.0,
+  "film_ripple": 0.2,
   "film_rivulets": 0.0,
-  "max_bounces": 4,
+  "max_bounces": 6,
   "gravity": [
     0.0,
     -1.0,
@@ -19,7 +19,7 @@
   "offset_mm": 2.0,
   "proximal_mm": 0.0,
   "opacity": 0.485,
-  "enabled": false,
+  "enabled": true,
   "water": {
     "diffuse_reflection_color": [
       1.0,
@@ -65,7 +65,7 @@
       1.0
     ],
     "specular_reflection_roughness": 0.04,
-    "specular_reflection_ior": 1.41,
+    "specular_reflection_ior": 1.33,
     "coat_weight": 0.0,
     "enable_specular_transmission": true,
     "specular_transmission_weight": 1.0,
