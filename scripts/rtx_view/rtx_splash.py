@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import pathlib
 import signal
 import subprocess
@@ -35,7 +36,10 @@ QPushButton:hover { background: #2589A8; }
 # First matching prefix wins. 100 closes the splash.
 STAGES = (
     ("Tuner ready", 100, "Tuner ready"),
-    ("RTX view ready", 100, "RTX view ready"),
+    # The live view opens its window hidden and reports the bone upload; it is
+    # ready only when the whole bone is in and the window is shown.
+    ("RTX bone ready", 100, "Ready"),
+    ("RTX view ready", 50, "Loading the bone"),
     ("Initializing RTX View", 6, "Initializing RTX View"),
     ("Tuner anatomy", 8, "Starting tuner"),
     ("Loading Newton", 16, "Loading Newton"),
@@ -56,11 +60,25 @@ STAGES = (
 )
 
 
+# "Loading bone 37%" from the live view maps onto this part of the bar.
+BONE_RANGE = (50, 99)
+
+
+def bone_fraction(line: str):
+    """0..1 from a "Loading bone NN%" line, else None."""
+    match = re.search(r"Loading bone (\d+)%", line)
+    return None if match is None else min(1.0, int(match.group(1)) / 100.0)
+
+
 def stage_from_line(line: str):
     """Return (percent or None, label) or None if the line is not a stage."""
     text = line.strip()
     if not text:
         return None
+    fraction = bone_fraction(text)
+    if fraction is not None:
+        low, high = BONE_RANGE
+        return int(low + (high - low) * fraction), "Loading the bone"
     for prefix, percent, label in STAGES:
         if text.startswith(prefix) or prefix in text:
             return percent, label
@@ -88,11 +106,49 @@ def kill_matching(script_name: str) -> None:
                 pass
 
 
+def make_spinner(qt_widgets, size=44):
+    """A turning arc, so the window reads as busy even while the bar waits."""
+    from PyQt5.QtCore import QRectF, Qt, QTimer
+    from PyQt5.QtGui import QColor, QPainter, QPen
+
+    class Spinner(qt_widgets.QWidget):
+        def __init__(self):
+            super().__init__()
+            self.setFixedSize(size, size)
+            self._angle = 0
+            self._timer = QTimer(self)
+            self._timer.timeout.connect(self._turn)
+            self._timer.start(16)
+
+        def _turn(self):
+            self._angle = (self._angle + 6) % 360
+            self.update()
+
+        def paintEvent(self, _event):
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing)
+            width = max(3.0, size / 9.0)
+            rect = QRectF(width, width, size - 2 * width, size - 2 * width)
+            track = QPen(QColor("#1E3A4F"), width)
+            painter.setPen(track)
+            painter.drawEllipse(rect)
+            arc = QPen(QColor("#2F8FBF"), width)
+            arc.setCapStyle(Qt.RoundCap)
+            painter.setPen(arc)
+            painter.drawArc(rect, -self._angle * 16, 100 * 16)
+
+    return Spinner()
+
+
 def add_loading_widgets(qt_widgets, layout, heading, cancelable=False, on_cancel=None):
-    """Heading, status, and bar. Returns (status_label, bar)."""
+    """Heading with a spinner, status, and bar. Returns (status_label, bar)."""
+    header = qt_widgets.QHBoxLayout()
+    header.addWidget(make_spinner(qt_widgets))
     title = qt_widgets.QLabel(heading)
     title.setStyleSheet("font-size: 20px; font-weight: 600;")
-    layout.addWidget(title)
+    title.setWordWrap(True)
+    header.addWidget(title, 1)
+    layout.addLayout(header)
     status = qt_widgets.QLabel("Starting…")
     status.setWordWrap(True)
     layout.addWidget(status)
@@ -147,7 +203,13 @@ class Splash:
             cancelable=cancelable,
             on_cancel=self.dialog.reject,
         )
+        self.detail = qt_widgets.QLabel("This may take a minute.")
+        self.detail.setStyleSheet("color: #9FB4C6;")
+        layout.addWidget(self.detail)
         self.dialog.setWindowModality(Qt.NonModal)
+        # Above the simulator windows, which open while this one is up.
+        self.dialog.setWindowFlags(self.dialog.windowFlags() | Qt.WindowStaysOnTopHint)
+        self._bone_started = None
 
     def show(self):
         self.dialog.show()
@@ -157,11 +219,37 @@ class Splash:
     def close(self):
         self.dialog.close()
 
-    def apply_line(self, line: str) -> bool:
+    def apply_line(self, line: str, now=None) -> bool:
         """Update from one log line. True when the process is ready."""
+        import time
+
         if apply_stage(self.status, self.bar, line):
             self.ready = True
+        fraction = bone_fraction(line)
+        if fraction is not None:
+            now = time.monotonic() if now is None else now
+            self.detail.setText(_bone_detail(fraction, self._bone_started, now))
+            if self._bone_started is None:
+                self._bone_started = (now, fraction)
         return self.ready
+
+
+def _bone_detail(fraction, started, now):
+    """Percent and an estimate of the time left, from the upload rate so far."""
+    pct = int(fraction * 100)
+    if started is None or fraction >= 1.0:
+        return f"{pct}%  ·  This may take a minute." if fraction < 1.0 else "Bone loaded. Opening the view…"
+    start_time, start_fraction = started
+    done = fraction - start_fraction
+    elapsed = now - start_time
+    if done <= 0.02 or elapsed <= 0.5:
+        return f"{pct}%  ·  This may take a minute."
+    left = elapsed / done * (1.0 - fraction)
+    if left < 60:
+        estimate = f"about {max(1, int(round(left / 5.0)) * 5)} s left"
+    else:
+        estimate = f"about {int(round(left / 60.0))} min left"
+    return f"{pct}%  ·  {estimate}"
 
 
 def _drain_log(path: pathlib.Path, offset: int) -> tuple[int, list[str]]:
@@ -249,7 +337,12 @@ def main():
 
 def _self_check():
     assert stage_from_line("Tuner ready. Views canonical_views.yaml")[0] == 100
-    assert stage_from_line("RTX view ready")[0] == 100
+    assert stage_from_line("RTX bone ready")[0] == 100
+    assert stage_from_line("RTX view ready")[0] < 100
+    assert stage_from_line("Loading bone 0%")[0] == BONE_RANGE[0]
+    assert stage_from_line("Loading bone 100%")[0] == BONE_RANGE[1]
+    assert _bone_detail(0.5, (0.0, 0.0), 10.0) == "50%  ·  about 10 s left"
+    assert _bone_detail(0.1, (0.0, 0.0), 40.0).endswith("about 6 min left")
     assert stage_from_line("Initializing RTX View")[1] == "Initializing RTX View"
     assert stage_from_line("Waiting for AMBF volume_info before opening the RTX window")[0] is None
     assert stage_from_line("Meshing union occupancy for bone")[1] == "Meshing surfaces"

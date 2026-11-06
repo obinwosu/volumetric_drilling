@@ -409,7 +409,13 @@ int DrillManager::init(afWorldPtr a_worldPtr, CameraPanelManager* a_panelManager
     cout << "INFO! Haptic devices found: " << m_deviceHandler->getNumDevices() << endl;
     m_suctionDevice = nullptr;
     m_suctionTracked = false;
-    if (m_deviceHandler->getNumDevices() > 1 && m_deviceHandler->getDevice(m_suctionDevice, 1) && m_suctionDevice){
+    // Study mode (FIVRS_SUCTION_DEVICE=0): only device 1 is used, for the drill.
+    const char* suctionEnv = getenv("FIVRS_SUCTION_DEVICE");
+    const bool suctionAllowed = !(suctionEnv && string(suctionEnv) == "0");
+    if (!suctionAllowed){
+        cout << "INFO! Study mode: second haptic device not used; the suction stays parked." << endl;
+    }
+    if (suctionAllowed && m_deviceHandler->getNumDevices() > 1 && m_deviceHandler->getDevice(m_suctionDevice, 1) && m_suctionDevice){
         // The drill cursor calls open() on device 0. Nothing else opens device 1,
         // and chai3d ignores position, rotation, and velocity until open().
         if (m_suctionDevice->open()){
@@ -1151,7 +1157,15 @@ bool DrillManager::setDrillSizeMm(int burrSizeMm)
 }
 
 void DrillManager::cycleDrillTypes(){
-    m_activeDrillIdx = (m_activeDrillIdx - 1) % m_drills.size();
+    const int n = static_cast<int>(m_drills.size());
+    if (n <= 0){
+        return;
+    }
+    applyActiveDrill((m_activeDrillIdx - 1 + n) % n);
+}
+
+void DrillManager::applyActiveDrill(int index){
+    m_activeDrillIdx = index;
     m_activeDrill = m_drills[m_activeDrillIdx];
     m_toolCursorList[0]->setRadius(m_activeDrill->m_size * 0.5);
     applyBurrVisualScale();
@@ -1170,6 +1184,21 @@ void DrillManager::toggleBurrStyle(){
     showOnlyActive();
     updateBurrLabel();
     cout << "Burr style changed to " << burrStyleName() << endl;
+}
+
+void DrillManager::setBurrStyle(BurrStyle style){
+    if (m_burrStyle == style){
+        return;
+    }
+    toggleBurrStyle();
+}
+
+void DrillManager::setActiveDrillIndex(int index){
+    const int n = static_cast<int>(m_drills.size());
+    if (n <= 0 || index < 0 || index >= n || index == m_activeDrillIdx){
+        return;
+    }
+    applyActiveDrill(index);
 }
 
 string DrillManager::burrStyleName() const{

@@ -183,6 +183,8 @@ class Eyes:
         self.eye_product = None
         self.eye_var = None
         self.failed = False
+        # Optional callable(left, right) that draws text into both eye images (headset_hud).
+        self.overlay = None
         original = viewer._add_camera_lights_and_render_product
 
         def author():
@@ -271,4 +273,11 @@ class Eyes:
                 self.failed = True
             return
         fov = float(np.radians(getattr(self.viewer.camera, "fov", 10.29)))
+        if self.overlay is not None:
+            try:
+                self.overlay(left, right)
+            except Exception as exc:
+                if not getattr(self, "_overlay_warned", False):
+                    print(f"Headset text failed: {exc}", flush=True)
+                    self._overlay_warned = True
         self.share.write(left, right, fov)

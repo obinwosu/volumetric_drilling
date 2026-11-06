@@ -1,16 +1,21 @@
 from PyQt5 import QtWidgets, uic
 from PyQt5.QtGui import QPixmap, QFont
-from PyQt5.QtCore import Qt, QProcess, QProcessEnvironment
+from PyQt5.QtCore import Qt, QProcess, QProcessEnvironment, QTimer
 from PyQt5.QtWidgets import QVBoxLayout, QButtonGroup, QFileDialog, QInputDialog, QMessageBox
 import sys
 from study_manager import StudyManager, RecordOptions
+import gui_setup
 from gui_setup import GUIConfiguration
 from user_profiles import UserProfileStore, DEFAULT_BURR_MM, VALID_BURR_SIZES
+import study_mode
 import datetime
 from enum import Enum
 import json
 import os
 import pathlib
+import shlex
+import subprocess
+import time
 import re
 import yaml
 
@@ -338,6 +343,7 @@ class Ui(QtWidgets.QWidget):
         self.button_toggle_shadows.clicked.connect(self.study_manager.toggle_shadows)
         self.button_toggle_vol_smooth = self.findChild(QtWidgets.QPushButton, "button_toggle_vol_smooth")
         self.button_toggle_vol_smooth.clicked.connect(self.study_manager.toggle_volume_smoothening)
+        self._build_sim_options_group()
 
         self.textEdit_info = self.findChild(QtWidgets.QPlainTextEdit, "textEdit_info")
         self.textEdit_debug = self.findChild(QtWidgets.QPlainTextEdit, "textEdit_debug")
@@ -373,6 +379,13 @@ class Ui(QtWidgets.QWidget):
         self._fluid_process = QProcess()
         self._rtx_splash = None
         self._rtx_log_file = None
+        self._raise_rtx_tries = 0
+        # While the RTX view loads, the AMBF window is kept minimized; the
+        # loading window and then the RTX window are what the user sees.
+        self._ambf_minimize_timer = QTimer(self)
+        self._ambf_minimize_timer.setInterval(500)
+        self._ambf_minimize_timer.timeout.connect(self._minimize_ambf_window)
+        self._ambf_minimize_until = 0.0
         self._rtx_process.readyReadStandardOutput.connect(self._rtx_output)
         self._rtx_process.finished.connect(self._rtx_finished)
         self._fluid_process.readyReadStandardOutput.connect(self._fluid_output)
@@ -384,6 +397,13 @@ class Ui(QtWidgets.QWidget):
         self._pupil_process = QProcess()
         self._recording_process = QProcess()
         self._current_args = []
+
+        # Study tab: tutorial + timed trial for the resident study (study_mode.py).
+        self.study_mode = None
+        self.study_panel = study_mode.StudyPanel(self)
+        tabs = self.findChild(QtWidgets.QTabWidget, "tabWidget")
+        if tabs is not None:
+            tabs.addTab(self.study_panel, "Study")
 
         self.place_on_pc_monitor(0)
         self.show()
@@ -505,6 +525,113 @@ class Ui(QtWidgets.QWidget):
         self.gui_configuration.params[param_id].set(folder)
         text_edit.setText(folder)
 
+    def _build_sim_options_group(self):
+        """Render preset, RTX quality, irrigation, dust, and suction. Read at launch; Save Configuration keeps them."""
+        box = QtWidgets.QGroupBox("Rendering / Instruments", self)
+        grid = QtWidgets.QGridLayout(box)
+
+        def combo(items, tip):
+            widget = QtWidgets.QComboBox(box)
+            for value, label in items:
+                widget.addItem(label, value)
+            widget.setToolTip(tip)
+            return widget
+
+        self.combo_render_preset = combo(
+            (("fastest", "Fastest"), ("balanced", "Balanced"), ("beautiful", "Most beautiful"), ("custom", "Custom")),
+            "Sets the options to the right. Changing any of them makes it Custom.",
+        )
+        self.combo_dlss = combo(
+            (("quality", "Quality"), ("balanced", "Balanced"), ("performance", "Performance"),
+             ("ultra_performance", "Ultra performance")),
+            "Lower levels path trace fewer pixels and upscale.",
+        )
+        self.combo_samples = combo(
+            tuple((n, str(n)) for n in gui_setup.SAMPLE_CHOICES),
+            "Path-tracing samples per pixel. More is less noisy and slower.",
+        )
+        self.combo_bounces = combo(
+            tuple((n, "Tuner value" if n == 0 else str(n)) for n in gui_setup.BOUNCE_CHOICES),
+            "Light bounces. Water refraction needs about 6-8; fewer is faster.",
+        )
+        self.check_irrigation = QtWidgets.QCheckBox("Irrigation", box)
+        self.check_irrigation.setToolTip("Water film and jet in the RTX view. Off saves frame time.")
+        self.check_bone_dust = QtWidgets.QCheckBox("Bone dust", box)
+        self.check_bone_dust.setToolTip("Dust from drilling in the RTX view. Costs frame time while drilling.")
+        self.check_suction = QtWidgets.QCheckBox("Suction (second Touch)", box)
+        self.check_suction.setToolTip("Off: the second Touch is not used and the suction stays parked.")
+
+        grid.addWidget(QtWidgets.QLabel("Preset:", box), 0, 0)
+        grid.addWidget(self.combo_render_preset, 0, 1)
+        grid.addWidget(QtWidgets.QLabel("RTX DLSS:", box), 0, 2)
+        grid.addWidget(self.combo_dlss, 0, 3)
+        grid.addWidget(QtWidgets.QLabel("Samples / pixel:", box), 0, 4)
+        grid.addWidget(self.combo_samples, 0, 5)
+        grid.addWidget(QtWidgets.QLabel("Light bounces:", box), 0, 6)
+        grid.addWidget(self.combo_bounces, 0, 7)
+        grid.addWidget(self.check_irrigation, 1, 1)
+        grid.addWidget(self.check_bone_dust, 1, 3)
+        grid.addWidget(self.check_suction, 1, 5, 1, 2)
+        grid.addWidget(QtWidgets.QLabel("Applies at the next Start Simulation.", box), 2, 0, 1, 8)
+        grid.setColumnStretch(8, 1)
+
+        sim_box = self.findChild(QtWidgets.QGroupBox, "groupBox_sim_controls")
+        layout = sim_box.parentWidget().layout()
+        layout.insertWidget(layout.indexOf(sim_box) + 1, box)
+        self._show_sim_options()
+        self.combo_render_preset.currentIndexChanged.connect(self._render_preset_chosen)
+        for widget in (self.combo_dlss, self.combo_samples, self.combo_bounces):
+            widget.currentIndexChanged.connect(self._sim_options_changed)
+        for widget in (self.check_irrigation, self.check_bone_dust, self.check_suction):
+            widget.toggled.connect(self._sim_options_changed)
+
+    def _sim_option_widgets(self):
+        return (self.combo_render_preset, self.combo_dlss, self.combo_samples, self.combo_bounces,
+                self.check_irrigation, self.check_bone_dust, self.check_suction)
+
+    def _show_sim_options(self):
+        options = self.gui_configuration.sim_options
+        for widget in self._sim_option_widgets():
+            widget.blockSignals(True)
+        for widget, key in ((self.combo_render_preset, "preset"), (self.combo_dlss, "dlss"),
+                            (self.combo_samples, "samples"), (self.combo_bounces, "bounces")):
+            widget.setCurrentIndex(max(0, widget.findData(options[key])))
+        self.check_irrigation.setChecked(options["irrigation"])
+        self.check_bone_dust.setChecked(options["bone_dust"])
+        self.check_suction.setChecked(options["suction"])
+        for widget in self._sim_option_widgets():
+            widget.blockSignals(False)
+
+    def _render_preset_chosen(self, *_):
+        preset = self.combo_render_preset.currentData()
+        if preset not in gui_setup.PRESETS:
+            return
+        self.gui_configuration.sim_options.update(gui_setup.PRESETS[preset], preset=preset)
+        self._show_sim_options()
+
+    def _sim_options_changed(self, *_):
+        options = {
+            "dlss": self.combo_dlss.currentData(),
+            "samples": self.combo_samples.currentData(),
+            "bounces": self.combo_bounces.currentData(),
+            "irrigation": self.check_irrigation.isChecked(),
+            "bone_dust": self.check_bone_dust.isChecked(),
+            "suction": self.check_suction.isChecked(),
+        }
+        options["preset"] = gui_setup.matching_preset(options)
+        self.gui_configuration.sim_options = options
+        self.combo_render_preset.blockSignals(True)
+        self.combo_render_preset.setCurrentIndex(self.combo_render_preset.findData(options["preset"]))
+        self.combo_render_preset.blockSignals(False)
+
+    def _launch_options(self):
+        """Options for this launch. Study mode always runs without irrigation or suction."""
+        options = dict(self.gui_configuration.sim_options)
+        if self.study_mode:
+            options["irrigation"] = False
+            options["suction"] = False
+        return options
+
     def save_configuration(self):
         for param_id, text_edit in self.gui_param_dialogs.items():
             value = text_edit.toPlainText().strip()
@@ -517,6 +644,7 @@ class Ui(QtWidgets.QWidget):
         self.gui_configuration.reload()
         for k, v in self.gui_param_dialogs.items():
             v.setText(self.gui_configuration.params[k].get_as_str())
+        self._show_sim_options()
 
     # ---- Simulation launch ----
     def pressed_start_simulation(self):
@@ -543,9 +671,16 @@ class Ui(QtWidgets.QWidget):
                 launch_file_adf_indices = launch_file_adf_indices + ",14"
             use_hmd = use_openxr or use_openvr
             use_wivrn = use_openxr
-            if not use_hmd and self.check_stream_depth.isChecked():
+            use_rtx = bool(self.check_rtx_view is not None and self.check_rtx_view.isChecked())
+            # The stream cameras open hidden AMBF windows. On AMBF 3 those freeze
+            # AMBF's event loop on its first frame, so nothing moves. The RTX view
+            # and the headset do not use them.
+            streams = self.check_stream_depth.isChecked() or self.check_stream_stereo.isChecked()
+            if streams and (use_hmd or use_rtx):
+                self.print_info("Stream depth / stereo are skipped with the RTX view or headset.")
+            if not (use_hmd or use_rtx) and self.check_stream_depth.isChecked():
                 launch_file_adf_indices = launch_file_adf_indices + ",4"
-            if not use_hmd and self.check_stream_stereo.isChecked():
+            if not (use_hmd or use_rtx) and self.check_stream_stereo.isChecked():
                 launch_file_adf_indices = launch_file_adf_indices + ",5"
             args = [
                 "--launch_file",
@@ -563,13 +698,13 @@ class Ui(QtWidgets.QWidget):
                 "--anatomy_adf",
                 self.active_volume_adf,
                 "--session_user",
-                self.active_participant_name() or "(none)",
+                # Study mode shows the Study ID, never the name.
+                (self.study_mode or {}).get("study_id") or self.active_participant_name() or "(none)",
                 "--session_anatomy",
                 self.active_volume_name or "",
                 "--startup_view",
                 self.selected_startup_view_id(),
             ]
-            use_rtx = bool(self.check_rtx_view is not None and self.check_rtx_view.isChecked())
             if use_rtx:
                 args.extend(["--rtx_view", "1"])
             self._current_args = args
@@ -589,6 +724,12 @@ class Ui(QtWidgets.QWidget):
             # Ensure Geomagic/OpenHaptics env is present even if the GUI was
             # started without scripts/setup_haptic_env.sh.
             env = QProcessEnvironment.systemEnvironment()
+            options = self._launch_options()
+            if not options["suction"]:
+                # Haptic device 1 drives the drill; the second Touch is not opened.
+                env.insert("FIVRS_SUCTION_DEVICE", "0")
+            if not options["irrigation"]:
+                env.insert("FIVRS_IRRIGATION", "0")
             if not env.value("GTDD_HOME"):
                 env.insert("GTDD_HOME", "/usr/share/3DSystems")
             if not env.value("OH_SDK_BASE"):
@@ -659,6 +800,8 @@ class Ui(QtWidgets.QWidget):
             self._ambf_log_path.write_text(f"{self.get_time_as_str()}AMBF [{mode}] {' '.join(self._current_args)}\n")
             self._ambf_process.start(ambf_bin, self._current_args)
             if use_rtx:
+                self._ambf_minimize_until = 0.0
+                self._ambf_minimize_timer.start()
                 # With the OpenXR eyepiece, the headset shows the RTX view in stereo.
                 self._start_rtx_view(repo_root, headset=use_openxr)
             if not self._ambf_process.waitForStarted(5000):
@@ -668,7 +811,7 @@ class Ui(QtWidgets.QWidget):
                 self.button_start_simulation.setText("Start Simulation")
                 self._set_sim_running_style(False)
                 return
-            if use_rtx:
+            if use_rtx and options["irrigation"]:
                 self._start_fluid(repo_root)
             self.button_start_simulation.setText("Close Simulation")
             self._set_sim_running_style(True)
@@ -693,6 +836,7 @@ class Ui(QtWidgets.QWidget):
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = log_dir / "view.log"
         self._rtx_log_file = log_file
+        options = self._launch_options()
         command = (
             "set +u && "
             "source /opt/ros/jazzy/setup.bash && "
@@ -703,8 +847,14 @@ class Ui(QtWidgets.QWidget):
             "export PYTHONUNBUFFERED=1 && "
             "export __GLX_VENDOR_LIBRARY_NAME=\"${__GLX_VENDOR_LIBRARY_NAME:-nvidia}\" && "
             "export VK_DRIVER_FILES=\"${VK_DRIVER_FILES:-/usr/share/vulkan/icd.d/nvidia_icd.json}\" && "
-            f"exec \"{venv_python}\" \"{script}\" --anatomy-adf \"{self.active_volume_adf}\""
+            + ("export FIVRS_IRRIGATION=0 && " if not options["irrigation"] else "")
+            + f"export FIVRS_DLSS={shlex.quote(options['dlss'])} && "
+            + f"export FIVRS_SPP={int(options['samples'])} && "
+            + (f"export FIVRS_MAX_BOUNCES={int(options['bounces'])} && " if options["bounces"] else "")
+            + f"export FIVRS_BONE_DUST={1 if options['bone_dust'] else 0} && "
+            + f"exec \"{venv_python}\" \"{script}\" --anatomy-adf \"{self.active_volume_adf}\""
             + (" --headset" if headset else "")
+            + (" --no-stream" if self.study_mode else "")
         )
         self._show_rtx_splash()
         self._rtx_process.setWorkingDirectory(str(repo_root))
@@ -735,6 +885,49 @@ class Ui(QtWidgets.QWidget):
         self._rtx_splash = None
         if splash is not None:
             splash.close()
+            # Keep catching a late AMBF window for a few seconds, then leave it be
+            # so it can be restored by hand.
+            if self._ambf_minimize_timer.isActive():
+                self._ambf_minimize_until = time.monotonic() + 5.0
+
+    def _raise_rtx_window(self):
+        """Activate the RTX window once it is ready. Retries for a few seconds while it maps."""
+        if self._rtx_process.state() == QProcess.NotRunning or self._raise_rtx_tries <= 0:
+            return
+        self._raise_rtx_tries -= 1
+        try:
+            found = subprocess.run(
+                ["xdotool", "search", "--onlyvisible", "--name", "^(FIVRS RTX|Newton RTX Viewer)"],
+                capture_output=True, text=True, timeout=1.0,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return  # no xdotool: the window can still be picked from the dock
+        windows = found.stdout.split()
+        if not windows:
+            QTimer.singleShot(500, self._raise_rtx_window)
+            return
+        try:
+            subprocess.run(["xdotool", "windowactivate", windows[-1]], capture_output=True, timeout=1.0)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    def _minimize_ambf_window(self):
+        if self._ambf_process.state() == QProcess.NotRunning or (
+            self._ambf_minimize_until and time.monotonic() > self._ambf_minimize_until
+        ):
+            self._ambf_minimize_timer.stop()
+            return
+        pid = int(self._ambf_process.processId() or 0)
+        if pid <= 0:
+            return
+        try:
+            found = subprocess.run(["xdotool", "search", "--onlyvisible", "--pid", str(pid)],
+                                   capture_output=True, text=True, timeout=1.0)
+        except (OSError, subprocess.TimeoutExpired):
+            self._ambf_minimize_timer.stop()  # no xdotool: leave the window alone
+            return
+        for window_id in found.stdout.split():
+            subprocess.run(["xdotool", "windowminimize", window_id], capture_output=True, timeout=1.0)
 
     def _start_fluid(self, repo_root):
         """Maelstrom jet for the RTX window. AMBF and the view are already up."""
@@ -804,6 +997,8 @@ class Ui(QtWidgets.QWidget):
             if splash is not None and splash.apply_line(line):
                 self._close_rtx_splash()
                 splash = None
+                self._raise_rtx_tries = 10
+                self._raise_rtx_window()
             if any(token in line for token in ("Traceback", "Error", "ERROR", "Exception", "did not publish")):
                 self.print_info(line)
 
@@ -826,6 +1021,7 @@ class Ui(QtWidgets.QWidget):
             self.print_info(f"Irrigation jet exited ({code}). See the Debug pane.")
 
     def _simulation_closed(self, exit_code=0, exit_status=None):
+        self.study_panel.simulator_closed()
         if self._recording_study:
             self._stop_study_logging(save_metadata=True)
             self._updating_log_checkbox = True

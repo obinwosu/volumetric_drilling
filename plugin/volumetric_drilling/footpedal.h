@@ -72,6 +72,11 @@ public:
 
     bool isCamClutchPressed();
 
+    // Held states of the left (a) and right (c) pedals. The plugin takes edges
+    // from these combined with the X11 keys, so one press counts once.
+    bool isStyleHeld();
+    bool isSizeHeld();
+
     bool isDeviceClutchPressed();
 
 private:

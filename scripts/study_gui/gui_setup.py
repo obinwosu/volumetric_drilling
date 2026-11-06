@@ -49,6 +49,45 @@ def _resolve_config_value(raw, *, as_path=True):
     return text
 
 
+# Advanced-tab simulation options. The defaults match the full lab setup.
+DLSS_LEVELS = ("quality", "balanced", "performance", "ultra_performance")
+SAMPLE_CHOICES = (1, 2, 4)
+# 0 = the tuner's irrigation panel value (tuner_irrigation.json max_bounces).
+BOUNCE_CHOICES = (0, 2, 4, 6, 8)
+# Render presets. Suction is left out: it is about the second Touch, not the look.
+PRESETS = {
+    "fastest": {"dlss": "ultra_performance", "samples": 1, "bounces": 2, "irrigation": False, "bone_dust": False},
+    "balanced": {"dlss": "performance", "samples": 1, "bounces": 0, "irrigation": True, "bone_dust": False},
+    "beautiful": {"dlss": "quality", "samples": 2, "bounces": 8, "irrigation": True, "bone_dust": True},
+}
+SIM_OPTION_DEFAULTS = {"preset": "balanced", **PRESETS["balanced"], "suction": True}
+
+
+def matching_preset(options):
+    """The preset these options equal, else "custom"."""
+    for name, values in PRESETS.items():
+        if all(options.get(key) == value for key, value in values.items()):
+            return name
+    return "custom"
+
+
+def _sim_options(raw):
+    """Read the sim_options block; unknown or missing values fall back to the defaults."""
+    raw = raw if isinstance(raw, dict) else {}
+    options = dict(SIM_OPTION_DEFAULTS)
+    if raw.get("dlss") in DLSS_LEVELS:
+        options["dlss"] = raw["dlss"]
+    if raw.get("samples") in SAMPLE_CHOICES:
+        options["samples"] = raw["samples"]
+    if raw.get("bounces") in BOUNCE_CHOICES:
+        options["bounces"] = raw["bounces"]
+    for key in ("irrigation", "bone_dust", "suction"):
+        if isinstance(raw.get(key), bool):
+            options[key] = raw[key]
+    options["preset"] = matching_preset(options)
+    return options
+
+
 class GUIConfiguration:
     def __init__(self, setup_filename):
         self.setup_file_name = setup_filename
@@ -81,6 +120,8 @@ class GUIConfiguration:
             self.yaml_data.get("external_video_recording_plugin", "") or ""
         )
 
+        self.sim_options = _sim_options(self.yaml_data.get("sim_options"))
+
         volumes_data = self.yaml_data['volumes']
         self.volumes_info = []
         for v in volumes_data:
@@ -105,6 +146,7 @@ class GUIConfiguration:
         for k, v in self.params.items():
             self.yaml_data[k] = v.get_as_str()
             print(k, v.get_as_str())
+        self.yaml_data["sim_options"] = dict(self.sim_options)
         self.yaml_file = open(str(self.yaml_file_path), 'w')
         yaml.dump(self.yaml_data, self.yaml_file)
         self.yaml_file.close()
@@ -125,6 +167,7 @@ class GUIConfiguration:
         self.external_video_recording_plugin = str(
             self.yaml_data.get("external_video_recording_plugin", "") or ""
         )
+        self.sim_options = _sim_options(self.yaml_data.get("sim_options"))
         self.yaml_file.close()
 
 

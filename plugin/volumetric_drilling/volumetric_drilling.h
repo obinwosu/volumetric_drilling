@@ -149,8 +149,23 @@ protected:
     void ensurePauseMenuLabel();
     void setVrHudVisible(bool visible);
     void refreshVrHudText();
+    // Pause menu text for the RTX headset view (/tmp/fivrs-rtx/pause_hud.txt); empty removes it.
+    void writeRtxPauseHud(const string& text);
+    string m_rtxPauseHudText;
     string controlHelpText(bool paused) const;
     void cyclePauseViewHighlight(int delta);
+    // Pause menu: views, then Burr type and Burr size, each opening a list.
+    enum class PauseSubmenu { NONE, BURR_TYPE, BURR_SIZE };
+    PauseSubmenu m_pauseSubmenu = PauseSubmenu::NONE;
+    int m_pauseSubIndex = 0;
+    int pauseViewCount();
+    int pauseRowCount();
+    int pauseSubmenuCount() const;
+    vector<int> burrSizeOrder() const;
+    void clampPauseIndex();
+    void pauseMenuSelect();
+    void pauseMenuBack();
+    string pauseMenuListText();
     // True if Ctrl is held system-wide (works even when study_gui / VR has focus).
     bool isCtrlHeld() const;
     // True if Shift is held system-wide (works even when study_gui / VR has focus).
@@ -253,6 +268,17 @@ private:
     // Rising-edge trackers for X11 FootSwitch fallback (linux KEY_F17/18/19 + 8).
     bool m_xFootStylePrev = false;
     bool m_xFootSizePrev = false;
+    // Left/right pedals (a/c) also act as zoom/orbit modifiers with a stylus
+    // button. A tap still changes the burr; a hold used with the stylus does not.
+    bool m_pedalDrillPrev = false;
+
+    // Study mode: /tmp/fivrs-rtx/study_drill_lock stops the drill (timed trial over).
+    bool m_studyDrillLock = false;
+    double m_studyLockPollTime = -1.0;
+    // Counters for the study tutorial, written to drill_state.json.
+    long m_zoomSteps = 0;
+    double m_zoomTravel = 0.0;  // total zoom applied, in doublings
+    long m_drillRecenterCount = 0;
 
     WaveGenerator m_waveGenerator;
 

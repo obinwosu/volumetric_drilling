@@ -306,7 +306,7 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
         cerr << "WARNING! NO FOOTPEDAL /dev/input DEVICE OPEN "
              << "(using keyboard a/b/c, + key 1 cam-clutch)\n";
     }
-    cerr << "INFO! Ikkegol pedals: a=diamond/cutting, b or Space=hold drill, c=size; key 1=cam clutch" << endl;
+    cerr << "INFO! Ikkegol pedals: hold a + stylus=zoom, hold b=drill, hold c + stylus=orbit; in the pause menu a=select, b=back, c=next; key 1=cam clutch" << endl;
 
     m_gazeMarkerController.init(m_worldPtr, &m_panelManager);
     cerr << "INFO! GAZE MARKER INITIALIZED \n";
@@ -458,6 +458,15 @@ void afVolmetricDrillingPlugin::publishDrillVisualState()
             << ",\"anatomy\":\"" << jsonEscape(m_sessionAnatomy) << "\""
             << ",\"laterality\":\"" << jsonEscape(m_anatomyLaterality) << "\""
             << ",\"drill\":\"" << jsonEscape(drillName) << "\""
+            << ",\"cam_clutch\":" << (m_drillManager.m_camClutch ? "true" : "false")
+            << ",\"device_clutch\":" << (m_drillManager.m_deviceClutch ? "true" : "false")
+            << ",\"orbit\":" << (m_drillManager.m_camOrbitBurr ? "true" : "false")
+            << ",\"zoom_steps\":" << m_zoomSteps
+            << ",\"zoom_travel\":" << m_zoomTravel
+            << ",\"recenter_count\":" << m_drillRecenterCount
+            << ",\"drill_locked\":" << (m_studyDrillLock ? "true" : "false")
+            << ",\"removed_voxels\":"
+            << (m_drillManager.m_drillingPub ? m_drillManager.m_drillingPub->removedCount() : 0)
             << "}\n";
     }
     std::error_code renameError;
@@ -1269,21 +1278,53 @@ void afVolmetricDrillingPlugin::updateButtons(){
     const bool xDrillHeld = isLetterKeyHeld(GLFW_KEY_B);
     const bool xSizeHeld  = isLetterKeyHeld(GLFW_KEY_C);
 
-    const bool styleEdge = (!m_xFootStylePrev && xStyleHeld);
-    const bool sizeEdge  = (!m_xFootSizePrev && xSizeHeld);
-    m_xFootStylePrev = xStyleHeld;
-    m_xFootSizePrev = xSizeHeld;
+    // The pedal can arrive both as an input device and as X11 keys; combine
+    // them so one press counts once.
+    const bool pedalLeftHeld = m_footpedal.isStyleHeld() || xStyleHeld;
+    const bool pedalRightHeld = m_footpedal.isSizeHeld() || xSizeHeld;
+    const bool pedalDrillHeld = m_footpedal.isDrillOn() || xDrillHeld;
+    const bool leftEdge = (!m_xFootStylePrev && pedalLeftHeld);
+    const bool rightEdge = (!m_xFootSizePrev && pedalRightHeld);
+    const bool drillEdge = (!m_pedalDrillPrev && pedalDrillHeld);
+    m_xFootStylePrev = pedalLeftHeld;
+    m_xFootSizePrev = pedalRightHeld;
+    m_pedalDrillPrev = pedalDrillHeld;
 
-    if (m_footpedal.isChangeBurrStylePressed() || styleEdge){
-        m_drillManager.toggleBurrStyle();
+    // Burr type and size are chosen in the pause menu, as a surgeon stops
+    // drilling to change burrs. There the pedals drive the menu: left (a)
+    // selects, middle (b) goes back, right (c) steps to the next item.
+    if (m_vrHudVisible){
+        if (leftEdge){
+            pauseMenuSelect();
+            refreshVrHudText();
+        }
+        if (drillEdge){
+            pauseMenuBack();
+            refreshVrHudText();
+        }
+        if (rightEdge){
+            cyclePauseViewHighlight(1);
+            refreshVrHudText();
+        }
     }
 
-    if (m_footpedal.isChangeBurrSizePressed() || sizeEdge){
-        m_drillManager.cycleDrillTypes();
+    // Study mode lock: polled a few times a second, not every frame.
+    {
+        const double now = glfwGetTime();
+        if (m_studyLockPollTime < 0.0 || now - m_studyLockPollTime > 0.1){
+            m_studyLockPollTime = now;
+            std::error_code lockError;
+            const bool locked = std::filesystem::exists("/tmp/fivrs-rtx/study_drill_lock", lockError);
+            if (locked != m_studyDrillLock){
+                cerr << "INFO! Study drill " << (locked ? "locked" : "unlocked") << endl;
+            }
+            m_studyDrillLock = locked;
+        }
     }
 
     // Hold-to-run drill: device pedal or keyboard 'b'.
-    m_drillManager.m_isOn = m_footpedal.isDrillOn() || xDrillHeld;
+    // In the pause menu the middle pedal means Back, not drill.
+    m_drillManager.m_isOn = pedalDrillHeld && !m_studyDrillLock && !m_vrHudVisible;
     m_drillManager.updateBurrLabel();
 
     m_drillManager.m_camClutch = false;
@@ -1321,7 +1362,7 @@ void afVolmetricDrillingPlugin::updateButtons(){
 
     }
 
-    // SayoDevice macro key programmed as "1": hold = camera clutch.
+    // SayoDevice macro key programmed as "1" (the microscope rig button): hold = camera clutch.
     if (isDigit1Held()){
         m_drillManager.m_camClutch = true;
     }
@@ -1337,8 +1378,12 @@ void afVolmetricDrillingPlugin::updateButtons(){
         m_drillManager.m_hapticDevice->getUserSwitch(1, btn1);
         m_drillManager.m_hapticDevice->getUserSwitch(0, btn2);
 
-        const bool ctrlHeld = isCtrlHeld();
-        const bool shiftHeld = isShiftHeld();
+        // Zoom: hold the left pedal (a) or Ctrl. Orbit: hold the right pedal (c)
+        // or Shift. The pedals no longer change the burr, so a resident in the
+        // headset can zoom and orbit without a keyboard. In the pause menu the
+        // pedals drive the menu instead.
+        const bool ctrlHeld = isCtrlHeld() || (pedalLeftHeld && !m_vrHudVisible);
+        const bool shiftHeld = isShiftHeld() || (pedalRightHeld && !pedalLeftHeld && !m_vrHudVisible);
 
         if (ctrlHeld){
             // Ctrl + button 2 = zoom in; Ctrl + button 1 = zoom out.
@@ -1363,9 +1408,9 @@ void afVolmetricDrillingPlugin::updateButtons(){
 
             if (shiftHeld){
                 if (m_vrHudVisible){
-                    // Paused: Shift + button 2 applies the highlighted canonical view.
+                    // Paused: Shift + button 2 selects the highlighted item.
                     if (btn2 && !m_btn2Prev){
-                        applyHighlightedPauseView();
+                        pauseMenuSelect();
                         refreshVrHudText();
                     }
                 }
@@ -1734,6 +1779,7 @@ void afVolmetricDrillingPlugin::requestDrillReposition()
         return;
     }
 
+    m_drillRecenterCount += 1;
     if (m_drillManager.m_drillingPub){
         m_drillManager.m_drillingPub->publishDrillReposition(
             poseFrom, m_drillManager.m_T_d, m_worldPtr->getCurrentTimeStamp());
@@ -2222,18 +2268,150 @@ vector<afVolmetricDrillingPlugin::PauseViewEntry> afVolmetricDrillingPlugin::bui
     return items;
 }
 
+int afVolmetricDrillingPlugin::pauseViewCount()
+{
+    return static_cast<int>(buildPauseViewList().size());
+}
+
+int afVolmetricDrillingPlugin::pauseRowCount()
+{
+    // Views, then Burr type, then Burr size.
+    return pauseViewCount() + 2;
+}
+
+vector<int> afVolmetricDrillingPlugin::burrSizeOrder() const
+{
+    // Smallest to largest, whatever order the drills were loaded in.
+    vector<int> order(m_drillManager.m_drills.size());
+    for (int i = 0; i < static_cast<int>(order.size()); i++){
+        order[i] = i;
+    }
+    std::stable_sort(order.begin(), order.end(), [&](int a, int b){
+        return m_drillManager.m_drills[a]->m_size < m_drillManager.m_drills[b]->m_size;
+    });
+    return order;
+}
+
+int afVolmetricDrillingPlugin::pauseSubmenuCount() const
+{
+    if (m_pauseSubmenu == PauseSubmenu::BURR_TYPE){
+        return 2;
+    }
+    if (m_pauseSubmenu == PauseSubmenu::BURR_SIZE){
+        return static_cast<int>(m_drillManager.m_drills.size());
+    }
+    return 0;
+}
+
+void afVolmetricDrillingPlugin::clampPauseIndex()
+{
+    const int n = pauseRowCount();
+    if (m_pauseViewIndex < 0 || m_pauseViewIndex >= n){
+        m_pauseViewIndex = 0;
+    }
+}
+
 void afVolmetricDrillingPlugin::cyclePauseViewHighlight(int delta)
 {
-    int n = static_cast<int>(buildPauseViewList().size());
-    if (n <= 0){
-        m_pauseViewIndex = 0;
+    if (m_pauseSubmenu != PauseSubmenu::NONE){
+        const int n = pauseSubmenuCount();
+        if (n > 0){
+            m_pauseSubIndex = ((m_pauseSubIndex + delta) % n + n) % n;
+        }
         return;
     }
+    int n = pauseRowCount();
     int idx = m_pauseViewIndex % n;
     if (idx < 0){
         idx += n;
     }
     m_pauseViewIndex = (idx + delta % n + n) % n;
+}
+
+void afVolmetricDrillingPlugin::pauseMenuSelect()
+{
+    if (m_pauseSubmenu == PauseSubmenu::BURR_TYPE){
+        m_drillManager.setBurrStyle(m_pauseSubIndex == 1 ? BurrStyle::DIAMOND : BurrStyle::CUTTING);
+        showNotice("Burr: " + m_drillManager.burrStyleName());
+        m_pauseSubmenu = PauseSubmenu::NONE;
+        return;
+    }
+    if (m_pauseSubmenu == PauseSubmenu::BURR_SIZE){
+        vector<int> order = burrSizeOrder();
+        if (m_pauseSubIndex >= 0 && m_pauseSubIndex < static_cast<int>(order.size())){
+            m_drillManager.setActiveDrillIndex(order[m_pauseSubIndex]);
+        }
+        if (m_drillManager.m_activeDrill){
+            showNotice("Burr size: " + m_drillManager.m_activeDrill->m_name);
+        }
+        m_pauseSubmenu = PauseSubmenu::NONE;
+        return;
+    }
+    clampPauseIndex();
+    const int views = pauseViewCount();
+    if (m_pauseViewIndex < views){
+        applyHighlightedPauseView();
+    }
+    else if (m_pauseViewIndex == views){
+        m_pauseSubmenu = PauseSubmenu::BURR_TYPE;
+        m_pauseSubIndex = (m_drillManager.m_burrStyle == BurrStyle::DIAMOND) ? 1 : 0;
+    }
+    else{
+        m_pauseSubmenu = PauseSubmenu::BURR_SIZE;
+        vector<int> order = burrSizeOrder();
+        m_pauseSubIndex = 0;
+        for (int k = 0; k < static_cast<int>(order.size()); k++){
+            if (order[k] == m_drillManager.m_activeDrillIdx){
+                m_pauseSubIndex = k;
+            }
+        }
+    }
+}
+
+void afVolmetricDrillingPlugin::pauseMenuBack()
+{
+    m_pauseSubmenu = PauseSubmenu::NONE;
+}
+
+string afVolmetricDrillingPlugin::pauseMenuListText()
+{
+    clampPauseIndex();
+    vector<PauseViewEntry> items = buildPauseViewList();
+    const bool inSub = m_pauseSubmenu != PauseSubmenu::NONE;
+    string text;
+    for (int i = 0; i < static_cast<int>(items.size()); i++){
+        const PauseViewEntry& e = items[i];
+        string marker = (!inSub && i == m_pauseViewIndex) ? "  > " : "    ";
+        string state = e.isHome ? "" : (e.valid ? "  saved" : "  empty");
+        text += marker + e.label + state + "\n";
+    }
+    const int views = static_cast<int>(items.size());
+    auto pad = [](string label){
+        while (label.size() < 14){
+            label += " ";
+        }
+        return label;
+    };
+    string current = m_drillManager.m_activeDrill ? m_drillManager.m_activeDrill->m_name : string("-");
+    text += "\nBURR\n";
+    text += string((!inSub && m_pauseViewIndex == views) ? "  > " : "    ")
+            + pad("Type") + m_drillManager.burrStyleName() + "\n";
+    if (m_pauseSubmenu == PauseSubmenu::BURR_TYPE){
+        const char* names[2] = {"Cutting", "Diamond"};
+        for (int k = 0; k < 2; k++){
+            text += string(k == m_pauseSubIndex ? "        > " : "          ") + names[k] + "\n";
+        }
+    }
+    text += string((!inSub && m_pauseViewIndex == views + 1) ? "  > " : "    ")
+            + pad("Size") + current + "\n";
+    if (m_pauseSubmenu == PauseSubmenu::BURR_SIZE){
+        vector<int> order = burrSizeOrder();
+        for (int k = 0; k < static_cast<int>(order.size()); k++){
+            text += string(k == m_pauseSubIndex ? "        > " : "          ")
+                    + m_drillManager.m_drills[order[k]]->m_name + "\n";
+        }
+    }
+    return text;
 }
 
 void afVolmetricDrillingPlugin::applyHighlightedPauseView()
@@ -2246,7 +2424,7 @@ void afVolmetricDrillingPlugin::applyHighlightedPauseView()
         m_pauseViewIndex = 0;
     }
     if (m_pauseViewIndex >= static_cast<int>(items.size())){
-        m_pauseViewIndex = static_cast<int>(items.size()) - 1;
+        return;  // a burr row, not a view
     }
     applyNamedView(items[m_pauseViewIndex].id);
 }
@@ -2261,7 +2439,7 @@ void afVolmetricDrillingPlugin::saveHighlightedPauseView()
         m_pauseViewIndex = 0;
     }
     if (m_pauseViewIndex >= static_cast<int>(items.size())){
-        m_pauseViewIndex = static_cast<int>(items.size()) - 1;
+        return;  // a burr row, not a view
     }
     const PauseViewEntry& e = items[m_pauseViewIndex];
     if (e.isHome){
@@ -2394,24 +2572,19 @@ void afVolmetricDrillingPlugin::refreshVrHudText()
     }
     viewsHeader += "\n";
 
-    vector<PauseViewEntry> items = buildPauseViewList();
-    if (items.empty()){
-        m_pauseViewIndex = 0;
-    }
-    else if (m_pauseViewIndex < 0){
-        m_pauseViewIndex = 0;
-    }
-    else if (m_pauseViewIndex >= static_cast<int>(items.size())){
-        m_pauseViewIndex = static_cast<int>(items.size()) - 1;
-    }
-    string viewList;
-    for (int i = 0; i < static_cast<int>(items.size()); i++){
-        const PauseViewEntry& e = items[i];
-        string marker = (i == m_pauseViewIndex) ? "  > " : "    ";
-        string state = e.isHome ? "" : (e.valid ? "  saved" : "  empty");
-        viewList += marker + e.label + state + "\n";
-    }
-    string text = status + session + viewsHeader + viewList + "\n" + controlHelpText(true);
+    string menuList = pauseMenuListText();
+    string text = status + session + viewsHeader + menuList + "\n" + controlHelpText(true);
+    // The headset shows the RTX image, not this panel, so the RTX window draws
+    // a shorter copy into both eyes. Written only when it changes.
+    string hints = (m_pauseSubmenu != PauseSubmenu::NONE)
+        ? "Next option          Stylus 2  or  right pedal (c)\n"
+          "Choose               Left pedal (a)\n"
+          "Back                 Middle pedal (b)\n"
+        : "Next item            Stylus 2  or  right pedal (c)\n"
+          "Select               Left pedal (a)\n"
+          "Recenter drill       Double-tap Stylus 2\n"
+          "Resume               Double-tap Stylus 1\n";
+    writeRtxPauseHud(status + viewsHeader.substr(1) + menuList + "\n" + hints);
     m_vrHudLabel->setText(text);
     m_panelManager.setText(m_vrHudLabel, text);
 }
@@ -2425,8 +2598,9 @@ string afVolmetricDrillingPlugin::controlHelpText(bool paused) const
     if (paused){
         s +=
             "MENU\n"
-            "  Select                 Up / Down  or  Stylus 2\n"
-            "  Confirm                Enter  or  Shift + Stylus 2\n"
+            "  Next item              Up / Down  or  Stylus 2  or  right pedal (c)\n"
+            "  Select                 Enter  or  left pedal (a)  or  Shift + Stylus 2\n"
+            "  Back                   Backspace  or  middle pedal (b)\n"
             "  Save to slot           Shift + Enter\n"
             "  Resume                 Double-tap Stylus 1  or  Ctrl + P\n"
             "  Recenter drill         Double-tap Stylus 2  or  F9\n"
@@ -2440,15 +2614,15 @@ string afVolmetricDrillingPlugin::controlHelpText(bool paused) const
     }
     s +=
             "  Camera clutch          Hold 1  or  Stylus 1  or  Alt (HMD)\n"
-            "  Drill (hold-to-run)    Middle pedal (b)  or  Space\n"
-            "  Burr style / size      Left pedal (a) / Right pedal (c)\n"
+            "  Drill (hold-to-run)    Middle pedal (b)\n"
+            "  Burr type / size       Pause menu (double-tap Stylus 1)\n"
             "  Suction size           F  (7 / 5 / 3 Fr)\n"
             "  Place WiVRn scene      Hold F10 (drag) / F11 lap / F12 look\n"
             "  Device clutch          Hold Stylus 2\n"
             "  Look                   Arrow Keys\n"
             "  Roll                   Ctrl + Mouse Wheel\n"
-            "  Zoom in / out          Ctrl + Stylus 2 / 1\n"
-            "  Orbit around burr      Shift + Hold Stylus 2\n"
+            "  Zoom in / out          Hold left pedal (a) or Ctrl + Stylus 2 / 1\n"
+            "  Orbit around burr      Hold right pedal (c) or Shift + hold Stylus 2\n"
             "  Recenter drill         Double-tap Stylus 2  or  F9\n"
             "  Recenter suction       Double-tap Stylus 2 on the suction device\n"
             "  Left / Right view      F3 / F4\n"
@@ -2541,10 +2715,41 @@ void afVolmetricDrillingPlugin::serviceRtxPauseMenu()
     }
 }
 
+void afVolmetricDrillingPlugin::writeRtxPauseHud(const string& text)
+{
+    namespace fs = std::filesystem;
+    const fs::path dir = "/tmp/fivrs-rtx";
+    const fs::path path = dir / "pause_hud.txt";
+    std::error_code error;
+    if (text.empty()){
+        fs::remove(path, error);
+        m_rtxPauseHudText.clear();
+        return;
+    }
+    if (text == m_rtxPauseHudText && fs::exists(path, error)){
+        return;
+    }
+    fs::create_directories(dir, error);
+    const fs::path partial = dir / "pause_hud.txt.part";
+    {
+        std::ofstream out(partial, std::ios::trunc);
+        if (!out){
+            return;
+        }
+        out << text;
+    }
+    fs::rename(partial, path, error);
+    m_rtxPauseHudText = text;
+}
+
 void afVolmetricDrillingPlugin::setVrHudVisible(bool visible)
 {
     m_vrHudVisible = visible;
+    m_pauseSubmenu = PauseSubmenu::NONE;
     applySimPause(visible);
+    if (!visible){
+        writeRtxPauseHud("");
+    }
 
     ensurePauseMenuLabel();
     if (!m_vrHudLabel){
@@ -2554,13 +2759,8 @@ void afVolmetricDrillingPlugin::setVrHudVisible(bool visible)
     }
 
     if (visible){
-        vector<PauseViewEntry> items = buildPauseViewList();
-        if (items.empty()){
-            m_pauseViewIndex = 0;
-        }
-        else if (m_pauseViewIndex < 0 || m_pauseViewIndex >= static_cast<int>(items.size())){
-            m_pauseViewIndex = 0;
-        }
+        m_pauseSubmenu = PauseSubmenu::NONE;
+        clampPauseIndex();
         refreshVrHudText();
     }
 
@@ -2775,6 +2975,8 @@ void afVolmetricDrillingPlugin::zoomCamera(double factor)
         return;
     }
     camera->setFieldViewAngleRad(next);
+    m_zoomSteps += 1;
+    m_zoomTravel += fabs(std::log2(next / fov));
     writeRtxFov(next);
 }
 
@@ -2999,11 +3201,18 @@ void afVolmetricDrillingPlugin::keyboardUpdate(GLFWwindow *a_window, int a_key, 
         }
         if (a_action == GLFW_PRESS && (a_key == GLFW_KEY_ENTER || a_key == GLFW_KEY_KP_ENTER)){
             if (shift){
-                saveHighlightedPauseView();
+                if (m_pauseSubmenu == PauseSubmenu::NONE && m_pauseViewIndex < pauseViewCount()){
+                    saveHighlightedPauseView();
+                }
             }
             else{
-                applyHighlightedPauseView();
+                pauseMenuSelect();
             }
+            refreshVrHudText();
+            return;
+        }
+        if (a_action == GLFW_PRESS && a_key == GLFW_KEY_BACKSPACE){
+            pauseMenuBack();
             refreshVrHudText();
             return;
         }

@@ -39,7 +39,9 @@ import nerves
 import or_room
 import islands
 import pause_menu
+import headset_hud
 import rtx_eyes
+import rtx_record
 import thin_bone
 import rtx_materials
 from fluid.cannula import SIZES as CANNULA_SIZES, load_obj as load_cannula_obj, mesh_path as cannula_mesh_path
@@ -88,6 +90,50 @@ FOV_PATH = RUNTIME / "camera_fov.txt"
 FOV_RANGE_RAD = (0.035, 0.60)
 # Bone dust costs frame time while drilling. FIVRS_BONE_DUST=1 turns it back on.
 BONE_DUST = os.environ.get("FIVRS_BONE_DUST", "0") == "1"
+# Study mode runs without irrigation (FIVRS_IRRIGATION=0) to keep the frame rate up.
+IRRIGATION_ON = os.environ.get("FIVRS_IRRIGATION", "1") != "0"
+# DLSS level from the study GUI's Advanced tab (FIVRS_DLSS). ovrtx has no
+# ultra-performance token, so that level is manual scaling at a third per axis.
+DLSS_LEVELS = {
+    "quality": {"omni:rtx:post:dlss:execMode": ("token", "quality")},
+    "balanced": {"omni:rtx:post:dlss:execMode": ("token", "balanced")},
+    "performance": {"omni:rtx:post:dlss:execMode": ("token", "performance")},
+    "ultra_performance": {
+        "omni:rtx:post:dlss:execMode": ("token", "manual"),
+        "omni:rtx:post:dlss:manualScaling": ("float", 1.0 / 3.0),
+    },
+}
+
+
+def launch_int(name: str, default: int, low: int, high: int) -> int:
+    """A whole-number launch option from the study GUI (FIVRS_SPP, FIVRS_MAX_BOUNCES)."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return int(default)
+    try:
+        value = int(raw)
+    except ValueError:
+        print(f"{name}={raw!r} is not a whole number; using {default}", flush=True)
+        return int(default)
+    return min(high, max(low, value))
+
+
+def dlss_settings(level=None) -> dict:
+    """Render settings for a DLSS level. Unknown levels use performance."""
+    level = level if level is not None else os.environ.get("FIVRS_DLSS", "performance")
+    if level not in DLSS_LEVELS:
+        print(f"FIVRS_DLSS={level!r} is not a DLSS level; using performance", flush=True)
+        level = "performance"
+    print(f"DLSS level {level}", flush=True)
+    return dict(DLSS_LEVELS[level])
+
+
+def _load_irrigation_settings():
+    settings = load_irrigation(IRRIGATION_PATH)
+    if not IRRIGATION_ON:
+        settings = dict(settings)
+        settings["enabled"] = False
+    return settings
 BONE_ROUGHNESS = 0.55
 # The specimen is one surface a few units in front of the camera. A distant
 # beam lights that whole surface evenly, so it stays off unless toggled.
@@ -119,6 +165,12 @@ EXPOSURE_MAX = 8.0
 # Geometry sent on the draw thread. A cut used to upload every touched block
 # before the drill could move again.
 UPLOAD_BUDGET_S = 0.008
+# While the window is still hidden at startup nobody watches the frame rate,
+# so the first bone upload takes much larger bites.
+STARTUP_UPLOAD_BUDGET_S = 0.25
+# Path-traced frames after the bone is in before the window is shown, so the
+# first thing seen is a settled image, not acceleration structures building.
+STARTUP_SETTLE_FRAMES = 20
 def _quat_matrix(x, y, z, w):
     n = x * x + y * y + z * z + w * w
     if n < 1e-12:
@@ -829,6 +881,12 @@ class Bridge:
                 pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w
             ),
         }
+        # The study recorder pairs each saved frame with the camera it was drawn from.
+        self.camera_stamped = (
+            msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
+            (pose.position.x, pose.position.y, pose.position.z,
+             pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w),
+        )
 
     def _pose(self, msg):
         pose = msg.pose
@@ -972,6 +1030,46 @@ def _set_exposure(viewer, scale):
     viewer._exposure = float(min(EXPOSURE_MAX, max(EXPOSURE_MIN, scale)))
     viewer._exposure_dirty = True
     print(f"RTX exposure {viewer._exposure:.2f}   [ darker   ] brighter   \\ reset", flush=True)
+
+
+def _hide_window_until_ready(viewer):
+    """Create the presentation window hidden; _show_window maps it later.
+
+    ViewerRTX opens its pyglet window on the first end_frame with visible=True.
+    Rendering and the headset eyes do not depend on the window being mapped.
+    """
+    original = getattr(viewer, "_init_window", None)
+    if original is None or getattr(viewer, "_window", None) is not None:
+        return
+
+    def init_hidden():
+        import pyglet.window as pyglet_window
+
+        base = pyglet_window.Window
+
+        class HiddenWindow(base):
+            def __init__(self, *args, **kwargs):
+                kwargs["visible"] = False
+                super().__init__(*args, **kwargs)
+
+        pyglet_window.Window = HiddenWindow
+        try:
+            original()
+        finally:
+            pyglet_window.Window = base
+
+    viewer._init_window = init_hidden
+
+
+def _show_window(viewer):
+    window = getattr(viewer, "_window", None)
+    if window is None:
+        return
+    try:
+        window.set_visible(True)
+        window.activate()
+    except Exception as exc:
+        print(f"Could not show the RTX window: {exc}", flush=True)
 
 
 def _bind_exposure_keys(viewer):
@@ -1238,7 +1336,7 @@ def _sync_irrigation(viewer):
     if mtime == getattr(viewer, "_irrigation_mtime", None):
         return
     viewer._irrigation_mtime = mtime
-    settings = load_irrigation(IRRIGATION_PATH)
+    settings = _load_irrigation_settings()
     viewer._irrigation = settings
     water = water_from_irrigation(settings, rtx_materials.WATER)
     film = film_look_from_irrigation(settings, rtx_materials.WATER)
@@ -2540,15 +2638,17 @@ def main():
         environment="none",
         async_rendering=True,
         render_settings={
-            "omni:rtx:pt:samplesPerPixel": ("uint", 1),
+            "omni:rtx:pt:samplesPerPixel": ("uint", launch_int("FIVRS_SPP", 1, 1, 16)),
             "omni:rtx:pt:denoising:enabled": ("bool", True),
             "omni:rtx:indirectDiffuse:denoiser:enabled": ("bool", False),
             "omni:rtx:dlss:frameGeneration": ("bool", False),
-            # Path traces about a quarter of the pixels and upscales; about 15 ms
-            # a frame with water and drilling, against 22 ms at "auto".
-            "omni:rtx:post:dlss:execMode": ("token", "performance"),
-            # Set in the tuner's irrigation panel. Water refraction needs about 6-8.
-            **rtx_materials.bounce_settings(int(load_irrigation(IRRIGATION_PATH).get("max_bounces", 4))),
+            # Performance by default: path traces about a quarter of the pixels and
+            # upscales; about 15 ms a frame with water and drilling, against 22 ms at "auto".
+            **dlss_settings(),
+            # Set in the tuner's irrigation panel unless the study GUI overrides it.
+            # Water refraction needs about 6-8.
+            **rtx_materials.bounce_settings(launch_int(
+                "FIVRS_MAX_BOUNCES", int(load_irrigation(IRRIGATION_PATH).get("max_bounces", 4)), 1, 16)),
             # Opacity on the water sheet. Authored before the render product exists.
             "omni:rtx:rt:fractionalOpacity": ("bool", True),
             **or_room.render_settings(_tuner_lights_from_file()[0]),
@@ -2759,7 +2859,7 @@ def main():
         getattr(viewer, "_lights", None) or _tuner_lights_from_file()[0],
     )
     viewer._irrigation_bench = IrrigationBench(remesh_occupied, volume_frame, gpu_film=True)
-    viewer._irrigation_bench.apply(getattr(viewer, "_irrigation", None) or load_irrigation(IRRIGATION_PATH))
+    viewer._irrigation_bench.apply(getattr(viewer, "_irrigation", None) or _load_irrigation_settings())
     # Only the bench may author fluid/sheet. Another log there before the first
     # frame binds a preview color and the stream material over the film look.
     viewer._irrigation_bench.prime(viewer)
@@ -2791,6 +2891,16 @@ def main():
         # The bone mesher keeps the occupancy on the GPU; the film reads bone there.
         viewer._irrigation_bench.film.occupancy_source = lambda: getattr(worker._blocks, "_warp", None)
     _install_frame_probes(viewer)
+    # Frames for the study recorder; idle unless a recording is running.
+    rtx_record.install(viewer, bridge)
+    # Pause menu and study prompts drawn into the headset eyes.
+    hud = headset_hud.install(viewer)
+    # The window opens hidden and appears once the whole bone is meshed and
+    # uploaded; the launcher's loading window shows progress until then.
+    _hide_window_until_ready(viewer)
+    if hud is not None:
+        hud.loading = ("Loading the bone", 0.0)
+    startup = {"loading": True, "done_frame": None, "last_pct": -1}
     print("RTX view ready", flush=True)
     print("RTX brightness: [ darker    ] brighter    \\ reset    L distant beam", flush=True)
     waiting_dump_since = None
@@ -2940,7 +3050,18 @@ def main():
         t_bone = time.perf_counter()
         if uploads:
             t0 = time.perf_counter()
-            finished = _drain_upload(viewer, uploads[0], UPLOAD_BUDGET_S)
+            budget = STARTUP_UPLOAD_BUDGET_S if startup["loading"] else UPLOAD_BUDGET_S
+            finished = _drain_upload(viewer, uploads[0], budget)
+            restoring = ((uploads[0].get("detail") or {}).get("reason") == "restore") if uploads else False
+            if startup["loading"] or restoring:
+                upload = uploads[0]
+                fraction = min(1.0, upload["cursor"] / max(1, len(upload["chunks"])))
+                pct = int(fraction * 100)
+                if startup["loading"] and startup["done_frame"] is None and pct >= startup["last_pct"] + 2:
+                    startup["last_pct"] = pct
+                    print(f"Loading bone {pct}%", flush=True)
+                if hud is not None:
+                    hud.loading = ("Loading the bone" if startup["loading"] else "Restoring the bone", fraction)
             uploads[0]["host_log_ms"] += (time.perf_counter() - t0) * 1e3
             if finished:
                 done = uploads.pop(0)
@@ -2959,6 +3080,13 @@ def main():
                         "queued_wall": time.time(),
                         "reason": detail.get("reason"),
                     }
+                if done["full"]:
+                    startup["full_done"] = True
+                # The island deletions sent at load can queue behind the full upload;
+                # startup ends once the full upload and anything queued behind it are in.
+                if startup["loading"] and startup["done_frame"] is None and startup.get("full_done") and not uploads:
+                    startup["done_frame"] = frame
+                    print("Loading bone 100%", flush=True)
                 if not uploads and (done["full"] or done.get("resync")):
                     mesh_generation += 1
                     (RUNTIME / "mesh_ready.json").write_text(
@@ -2971,6 +3099,8 @@ def main():
                         )
                     )
                     print(f"Bone upload finished, {len(getattr(viewer, '_chunk_names', {}))} meshes", flush=True)
+                    if not startup["loading"] and hud is not None:
+                        hud.loading = None
             last_upload_ms = (time.perf_counter() - t0) * 1e3
         t_tools = time.perf_counter()
         pause_menu.sync(viewer, _read_drill_state())
@@ -2995,6 +3125,12 @@ def main():
         t_render = time.perf_counter()
         viewer.end_frame()
         t_end = time.perf_counter()
+        if startup["loading"] and startup["done_frame"] is not None and frame - startup["done_frame"] >= STARTUP_SETTLE_FRAMES:
+            startup["loading"] = False
+            if hud is not None:
+                hud.loading = None
+            _show_window(viewer)
+            print("RTX bone ready", flush=True)
         _bind_window_input(viewer, bridge)
         frame += 1
         stamp = time.perf_counter()

@@ -3,7 +3,7 @@
   "Irrigation": false,
   "Paste": false,
   "Camera": false,
-  "Structures": true,
+  "Structures": false,
   "Cortex masks": false,
   "Shaders": false
 }

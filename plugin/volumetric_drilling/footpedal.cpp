@@ -83,6 +83,24 @@ bool FootPedal::isChangeBurrStylePressed()
     return risingEdge(curr, m_burrStyleBtnPrevState);
 }
 
+bool FootPedal::isStyleHeld()
+{
+    if (!isAvailable()){
+        return false;
+    }
+    return getButtonState(static_cast<int>(m_isKeyboard ? static_cast<int>(FootPedalKeyboardMap::BURR_STYLE)
+                                                        : static_cast<int>(FootPedalJoystickMap::BURR_STYLE)));
+}
+
+bool FootPedal::isSizeHeld()
+{
+    if (!isAvailable()){
+        return false;
+    }
+    return getButtonState(static_cast<int>(m_isKeyboard ? static_cast<int>(FootPedalKeyboardMap::CHANGE_BURR_SIZE)
+                                                        : static_cast<int>(FootPedalJoystickMap::CHANGE_BURR_SIZE)));
+}
+
 bool FootPedal::isCamClutchPressed()
 {
     return false;

@@ -112,6 +112,11 @@ public:
     // Toggle cutting (fluted) <-> diamond (sphere) tip visual.
     void toggleBurrStyle();
 
+    // Pause menu: pick a burr directly.
+    void setBurrStyle(BurrStyle style);
+    void setActiveDrillIndex(int index);
+    void applyActiveDrill(int index);
+
     // Select drill by physical burr diameter in mm (1, 2, 4, or 6).
     bool setDrillSizeMm(int burrSizeMm);
 
