@@ -253,6 +253,7 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
     m_voxelObj->m_material->setDamping(0.0);
     m_voxelObj->m_material->setDynamicFriction(0.0);
     m_voxelObj->setUseMaterial(true);
+    clearAirLabels();
 
     initializeLabels();
     applyStereoCenteredHud();
@@ -624,6 +625,61 @@ bool afVolmetricDrillingPlugin::dumpOccupancy(const std::string& path)
     return wrote;
 }
 
+namespace {
+// Segment colors cleared to air at load. Keep in step with
+// scripts/rtx_view/air_labels.py (AIR_LABEL_HEXES).
+const unsigned char kAirLabelRgb[][3] = {
+    {0xff, 0xe1, 0xd6},  // eac: a solid canal plug. The real canal is air lined by skin.
+};
+}
+
+void afVolmetricDrillingPlugin::clearAirLabels()
+{
+    if (m_voxelObj == nullptr || m_voxelObj->m_texture == nullptr){
+        return;
+    }
+    const cTexture3d* texture = dynamic_cast<const cTexture3d*>(m_voxelObj->m_texture.get());
+    if (texture == nullptr || texture == m_airClearedTexture){
+        return;
+    }
+    cMultiImagePtr image = dynamic_pointer_cast<cMultiImage>(m_voxelObj->m_texture->m_image);
+    if (image == nullptr || image->getArray() == nullptr){
+        return;
+    }
+    const size_t width = image->getWidth();
+    const size_t height = image->getHeight();
+    const size_t depth = image->getImageCount();
+    const size_t voxels = width * height;
+    const size_t bpp = (voxels > 0) ? image->getSizeInBytes() / voxels : 0;
+    m_airClearedTexture = texture;
+    if (bpp != 4){
+        cerr << "WARNING! Air labels not cleared: volume has " << bpp << " bytes per voxel" << endl;
+        return;
+    }
+    unsigned char* data = image->getArray();
+    const size_t total = voxels * depth;
+    size_t cleared = 0;
+    m_mutexVoxel.acquire();
+    for (size_t i = 0; i < total; ++i){
+        unsigned char* rgba = data + 4 * i;
+        if (rgba[3] == 0){
+            continue;
+        }
+        for (const auto& rgb : kAirLabelRgb){
+            if (rgba[0] == rgb[0] && rgba[1] == rgb[1] && rgba[2] == rgb[2]){
+                rgba[0] = rgba[1] = rgba[2] = rgba[3] = 0;
+                cleared += 1;
+                break;
+            }
+        }
+    }
+    m_mutexVoxel.release();
+    if (cleared > 0){
+        ((cTexture3d*)m_voxelObj->m_texture.get())->markForUpdate();
+    }
+    cerr << "INFO! Air labels cleared " << cleared << " voxels" << endl;
+}
+
 void afVolmetricDrillingPlugin::serviceRtxRestore()
 {
     if (!m_rtxView || m_volumeObject == nullptr){
@@ -892,6 +948,8 @@ void afVolmetricDrillingPlugin::serviceRtxCatchup()
 
 
 void afVolmetricDrillingPlugin::graphicsUpdate(){
+    // Before the restore dump, so a reset volume reaches RTX without the EAC.
+    clearAirLabels();
     serviceRtxRestore();
     serviceRtxCatchup();
     serviceRtxFlush();

@@ -32,6 +32,7 @@ import yaml
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
+import air_labels
 import bone_debris
 import cortex_masks
 import markings
@@ -219,7 +220,12 @@ def _slice_paths(folder: pathlib.Path, prefix: str, extension: str, count: int):
     return paths
 
 
-def _load_occupancy(anatomy_adf: pathlib.Path):
+def _load_occupancy(anatomy_adf: pathlib.Path, keep_air_labels: bool = False):
+    """Occupancy and RGB as AMBF holds them after load.
+
+    Air labels (the EAC plug, see ``air_labels.py``) are cleared, as the
+    plugin clears them. ``keep_air_labels`` returns the slices as stored.
+    """
     from PIL import Image
 
     text = anatomy_adf.read_text()
@@ -246,6 +252,10 @@ def _load_occupancy(anatomy_adf: pathlib.Path):
         rgba = np.flipud(np.asarray(Image.open(path).convert("RGBA")))
         occupied[:, :, index] = rgba[:, :, 3].T > 10
         colors[:, :, index, :] = np.transpose(rgba[:, :, :3], (1, 0, 2))
+    if not keep_air_labels:
+        occupied, cleared = air_labels.drop_air_labels(occupied, colors)
+        if cleared:
+            print(f"Air labels cleared {cleared} voxels", flush=True)
     return occupied, colors
 
 
@@ -2575,7 +2585,9 @@ def main():
 
     print("Initializing RTX View", flush=True)
     print("Loading anatomy slices", flush=True)
-    occupied, colors = _load_occupancy(pathlib.Path(args.anatomy_adf))
+    intact_occupied, colors = _load_occupancy(pathlib.Path(args.anatomy_adf), keep_air_labels=True)
+    occupied, cleared = air_labels.drop_air_labels(intact_occupied, colors)
+    print(f"Air labels cleared {cleared} voxels", flush=True)
     labels = np.unique(colors[occupied].reshape(-1, 3), axis=0)
     print(f"Volume {occupied.shape} with {len(labels)} segment colors", flush=True)
     document = rtx_materials.load_document()
@@ -2818,15 +2830,18 @@ def main():
     viewer._material_document = document
     _author_closed_structures(viewer, occupied, colors, bridge.volume, document, closed_found)
     print("Fitting the lateral cortex onto the live surface", flush=True)
+    # The lateral frame is fitted on the closed EAC solid, so this one step
+    # sees the label as loaded. Nothing else does.
     appearance = cortex_masks.build_appearance_index(
         blocks,
-        occupied,
+        intact_occupied,
         colors,
         bridge.volume["dimensions"],
         "",
         cortex_masks.named_rgb(document, "bone", "fff9db"),
         cortex_masks.named_rgb(document, "eac", "ffe1d6"),
     )
+    del intact_occupied
     viewer._appearance = appearance
     try:
         viewer._thin_index = thin_bone.build_index(

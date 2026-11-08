@@ -348,6 +348,9 @@ private:
     void serviceRtxFlush();
     void serviceRtxCatchup();
     bool dumpOccupancy(const std::string& path);
+    // Clears air-label voxels (the EAC plug) on a volume texture AMBF has
+    // just loaded or reset. Runs once per texture.
+    void clearAirLabels();
     bool loadRtxTrial(const std::string& path);
     void enqueueRemoved(int x, int y, int z, const std::string& trialId, bool silent);
     void writeTrialLine(const std::string& id, int cleared, uint64_t batchId, double wallClear, double wallPublish, double clearMs, bool dropped);
@@ -379,6 +382,8 @@ private:
     int m_rtxTrialScan = 0;
     int m_rtxRestoreWait = 0;
     uint64_t m_rtxNextBatch = 1;
+    // Texture the air labels were last cleared on. A reset swaps in a new one.
+    const cTexture3d* m_airClearedTexture = nullptr;
 };
 
 

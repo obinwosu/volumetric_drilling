@@ -29,6 +29,7 @@ import warp as wp
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
+import air_labels
 import camera_views
 import cortex_masks
 import markings
@@ -681,6 +682,11 @@ def _author_scene(viewer, lights, camera, close_all=False):
         occupied, colors, eac_rgb, bone_rgb, dimensions, laterality
     )
     frame.dimensions = dimensions
+    # The frame is fitted on the closed EAC solid. Everything after it sees
+    # the canal as air, as AMBF and the live window do.
+    intact_occupied = occupied
+    occupied, cleared = air_labels.drop_air_labels(intact_occupied, colors)
+    print(f"Air labels cleared {cleared} voxels", flush=True)
     groups, bone_mesh, rotation, translation = _bone_groups(
         occupied, colors, bone_rgb, document, close_all=close_all
     )
@@ -692,9 +698,10 @@ def _author_scene(viewer, lights, camera, close_all=False):
         bone_mesh["world"],
         bone_mesh["normals"],
         bone_rgb,
-        occupied,
+        intact_occupied,
         frame,
     )
+    del intact_occupied
     segments = []
     bone_surface = None
     if cache.ok:
