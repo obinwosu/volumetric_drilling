@@ -87,6 +87,9 @@ def test_chunks_match_the_v3_layout_and_open_in_the_reader():
             cont = f["vision_data/continuous_data"]
             assert cont["l_img"].shape == (15, 360, 640, 3)
             assert cont["pose_mastoidectomy_volume"].shape == (15, 7)
+            # Clutch / microscope-button flags, so slow-speed feedback can skip camera moves.
+            assert cont["user_controls"].shape == (15, 3)
+            assert cont["user_controls"].attrs["columns"] == "device_clutch,cam_clutch,scope_button"
             assert abs(f["metadata_v3/voxel_volume"][()] - (1000 / 256) ** 3 * 0.049202688 ** 3) < 1e-9
             assert f["metadata_v3/voxel_volume"].attrs["units"] == "mm^3, millimeters cubed"
             readme = f["metadata_v3/README"][()].decode()

@@ -30,6 +30,7 @@ Run with ROS 2 sourced; stop with SIGINT or SIGTERM, which writes the last chunk
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import pathlib
 import pickle
@@ -59,7 +60,21 @@ README = (
     "this recorder saves none. \n"
     "l_img is the RTX microscope view the participant saw, BGR, top row first. \n"
     "camera_intrinsic uses the chunk's first frame; frame_fov_y gives each frame's vertical field of view. \n"
+    "user_controls is one row per frame: device_clutch, cam_clutch, scope_button (1 = held), "
+    "read from the simulator's drill_state.json; -1 when it could not be read. \n"
 )
+USER_CONTROLS = ("device_clutch", "cam_clutch", "scope_button")
+DRILL_STATE = pathlib.Path("/tmp/fivrs-rtx/drill_state.json")
+
+
+def read_user_controls(path: pathlib.Path = DRILL_STATE):
+    """Clutch and microscope-button state at this moment, so the analysis can skip
+    stretches where the resident was moving the camera or repositioning the stylus."""
+    try:
+        state = json.loads(path.read_text())
+        return [1 if state.get(key) else 0 for key in USER_CONTROLS]
+    except (OSError, ValueError):
+        return [-1] * len(USER_CONTROLS)
 VOXEL_README = (
     "voxels_removed contains a group of voxels (Gv) removed. \n"
     "The voxel_time_stamp contains the time that the Gv was removed. The voxels_removed contains the voxels that comprise the Gv. \n"
@@ -188,6 +203,7 @@ class Recorder:
                     "pose_mastoidectomy_drill": drill,
                     "pose_main_camera": camera,
                     "fov_y": float(fov_y),
+                    "user_controls": read_user_controls(),
                 }
             )
             self.frames_total += 1
@@ -258,6 +274,9 @@ class Recorder:
                 compression_opts=4,
                 chunks=(1, height, width, 3),
             )
+            controls = continuous.create_dataset(
+                "user_controls", data=np.asarray([row["user_controls"] for row in frames], np.int8))
+            controls.attrs["columns"] = ",".join(USER_CONTROLS)
             continuous.create_dataset(
                 "pose_mastoidectomy_volume", data=np.stack([self.volume_pose] * len(frames)), compression="gzip"
             )

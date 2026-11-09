@@ -155,7 +155,7 @@ protected:
     string controlHelpText(bool paused) const;
     void cyclePauseViewHighlight(int delta);
     // Pause menu: views, then Burr type and Burr size, each opening a list.
-    enum class PauseSubmenu { NONE, BURR_TYPE, BURR_SIZE };
+    enum class PauseSubmenu { NONE, VIEWS, BURR_TYPE, BURR_SIZE };
     PauseSubmenu m_pauseSubmenu = PauseSubmenu::NONE;
     int m_pauseSubIndex = 0;
     int pauseViewCount();
@@ -271,6 +271,7 @@ private:
     // Left/right pedals (a/c) also act as zoom/orbit modifiers with a stylus
     // button. A tap still changes the burr; a hold used with the stylus does not.
     bool m_pedalDrillPrev = false;
+    bool m_pedalDrillSuppress = false;  // pause menu closed by the middle pedal: wait for release
 
     // Study mode: /tmp/fivrs-rtx/study_drill_lock stops the drill (timed trial over).
     bool m_studyDrillLock = false;
@@ -278,6 +279,11 @@ private:
     // Counters for the study tutorial, written to drill_state.json.
     long m_zoomSteps = 0;
     double m_zoomTravel = 0.0;  // total zoom applied, in doublings
+    double m_zoomInTravel = 0.0;
+    double m_zoomOutTravel = 0.0;
+    int m_pedalAdvanceCount = 0;  // left-pedal taps outside the menu (study tutorial)
+    int m_tutorialSkipCount = 0;  // right-arrow presses outside the menu (study tutorial)
+    bool m_rightArrowPrev = false;
     long m_drillRecenterCount = 0;
 
     WaveGenerator m_waveGenerator;

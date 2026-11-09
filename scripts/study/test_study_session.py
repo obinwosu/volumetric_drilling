@@ -9,6 +9,8 @@ import pathlib
 import sys
 import tempfile
 
+import numpy as np
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import study_session as ss  # noqa: E402
 
@@ -16,8 +18,11 @@ import study_session as ss  # noqa: E402
 class FakeIO:
     def __init__(self):
         self.t = 1000.0
-        self.state = {"px": 0.0, "py": 0.0, "pz": 0.0, "zoom_travel": 0.0, "recenter_count": 0,
-                      "removed_voxels": 0, "paused": False, "drill": "4mm", "style": "cutting"}
+        self.state = {"px": 0.0, "py": 0.0, "pz": 0.0, "zoom_in": 0.0, "zoom_out": 0.0, "recenter_count": 0,
+                      "removed_voxels": 0, "paused": False, "drill": "4mm", "style": "cutting",
+                      "advance_count": 0, "skip_count": 0, "hx": 0.0, "hy": 0.0, "hz": 0.0,
+                      "cx": 0.0, "cy": 0.0, "cz": 1.0, "lx": 0.0, "ly": 0.0, "lz": -1.0,
+                      "ux": 0.0, "uy": 1.0, "uz": 0.0, "fov": 0.2}
         self.hud = None
         self.locked = None
         self.restore_requested = self.reload_requested = False
@@ -32,6 +37,7 @@ class FakeIO:
     def set_drill_lock(self, locked): self.locked = locked
     def request_restore(self): self.restore_requested = True
     def restore_done(self): return self.restore_requested
+    def request_burr_reset(self): self.state.update(drill="6mm", style="cutting")
     def request_reload(self):
         self.reload_requested = True
         self.reload_wall = self.t
@@ -51,21 +57,51 @@ def run(session, io, seconds, hz=10, **state):
         session.tick()
 
 
+def advance(session, io):
+    io.state["advance_count"] += 1
+    run(session, io, 0.2)
+
+
 def tutorial(session, io):
+    run(session, io, 0.2)
+    assert session.hud(io.t)["panel"]["title"] == "Welcome"
+    assert session.hud(io.t)["panel"]["advance"]  # nothing to do: advance straight away
+    advance(session, io)
+    advance(session, io)  # a tap before the step is done does nothing
+    assert session.step == 1 and not session.progress.step_done
     for k in range(10):  # drill_move
         run(session, io, 0.1, px=0.06 * k)
-    assert session.progress.done["drill_move"]
-    run(session, io, 1.3, cam_clutch=True); run(session, io, 0.1, cam_clutch=False)
-    run(session, io, 0.1, zoom_travel=1.2)
-    run(session, io, 1.3, device_clutch=True); run(session, io, 0.1, device_clutch=False)
-    run(session, io, 0.1, recenter_count=1)
-    run(session, io, 1.3, orbit=True); run(session, io, 0.1, orbit=False)
-    run(session, io, 0.1, removed_voxels=500)
-    assert session.phase == "tutorial" and session.hud(io.t)["panel"]["title"].endswith("Pause menu and burrs")
-    run(session, io, 0.5, paused=True, drill="4mm"); run(session, io, 0.2, paused=False)
-    assert not session.progress.done.get("pause")  # resumed without changing the burr
-    run(session, io, 0.5, paused=True); run(session, io, 0.2, drill="2mm")
+    assert session.progress.step_done and session.step == 1  # done, still practising
+    assert session.hud(io.t)["panel"]["done"]
+    advance(session, io)
+    run(session, io, 2.0, device_clutch=True)  # held without moving: not done
+    assert not session.progress.step_done
+    for k in range(5):
+        run(session, io, 0.1, hx=0.005 * k)
+    run(session, io, 0.1, device_clutch=False)
+    assert session.progress.step_done
+    advance(session, io)
+    run(session, io, 0.1, recenter_count=1); advance(session, io)
+    assert ss.TUTORIAL[session.step].key == "camera"
+    run(session, io, 2.0, cam_clutch=True)  # clutch without moving the view: not done
+    look = session.hud(io.t)["panel"]["look"]
+    assert not session.progress.step_done
+    target = np.array(look["target"]); here = np.array([0.0, 0.0, 1.0])
+    d = (target - here) / np.linalg.norm(target - here)
+    run(session, io, 0.5, lx=d[0], ly=d[1], lz=d[2])
+    assert session.progress.step_done
+    advance(session, io)
+    run(session, io, 0.1, zoom_in=1.0)
+    assert not session.progress.step_done  # in only
+    run(session, io, 0.1, zoom_out=0.7); advance(session, io)
+    run(session, io, 0.1, removed_voxels=500); advance(session, io)
+    assert session.hud(io.t)["panel"]["title"].endswith("The pause menu")
+    run(session, io, 0.5, paused=True)
+    assert not session.progress.step_done
     run(session, io, 0.2, paused=False)
+    assert session.progress.step_done
+    advance(session, io)  # the last step: no burr change is asked for
+    assert session.phase == "ready", session.phase
 
 
 def test_full_session():
@@ -75,15 +111,20 @@ def test_full_session():
         session = ss.StudySession(io, "S001", rec, {"volume_adf": "ADF/volume_256_RT143.yaml"}, trial_seconds=30)
         assert io.locked is False
         session.tick()
-        assert io.hud["panel"]["title"].startswith("Tutorial 1 of 8")
+        assert io.hud["panel"]["title"] == "Welcome"
         tutorial(session, io)
         assert session.phase == "ready", session.phase
         assert all(session.progress.done.get(s.key) for s in ss.TUTORIAL)
 
-        session.begin_trial()
-        assert io.locked is True and io.restore_requested
+        assert io.hud["panel"]["advance"].endswith("begin your study session")
+        advance(session, io)  # the resident's left pedal
+        assert session.phase == "briefing" and io.locked is True and io.restore_requested
+        assert io.state["drill"] == "6mm" and io.hud["panel"]["cover"]
+        assert io.hud["panel"]["footer"].startswith("Press the left foot pedal")
         run(session, io, 0.5)
-        assert io.reload_requested and session.phase == "armed" and io.recorder == "on"
+        assert io.reload_requested and io.recorder == "on" and session.phase == "briefing"
+        advance(session, io)  # read the introduction
+        assert session.phase == "armed"
         assert io.locked is False and io.recorder_dir == rec
 
         run(session, io, 5.0)  # idle, practice count still 500: the timer has not started
@@ -113,6 +154,31 @@ def test_skip_and_reset_failure_returns_to_ready():
     session.begin_trial()
     run(session, io, ss.RESET_TIMEOUT_S + 1)
     assert session.phase == "ready" and session.error and io.locked is False
+    run(session, io, 1.0)
+    assert session.phase == "ready"  # no stray pedal count restarts it
+
+
+def test_resident_pedal_waits_for_the_bone_and_proctor_can_skip():
+    io = FakeIO()
+    session = ss.StudySession(io, "S004", pathlib.Path(tempfile.mkdtemp()) / "S004", {}, trial_seconds=30)
+    for _ in ss.TUTORIAL:
+        session.skip_step()
+    run(session, io, 0.2)
+    io.recorder_ready = lambda: False
+    advance(session, io); advance(session, io)  # begin, then "ready" at once
+    assert session.phase == "briefing"
+    assert session.hud(io.t)["panel"]["footer"].startswith("Thank you")
+    io.recorder_ready = lambda: io.recorder == "on"
+    run(session, io, 0.3)
+    assert session.phase == "armed"
+    io2 = FakeIO()
+    s2 = ss.StudySession(io2, "S005", pathlib.Path(tempfile.mkdtemp()) / "S005", {}, trial_seconds=30)
+    s2.begin_trial()
+    run(s2, io2, 0.5)
+    assert s2.phase == "briefing"
+    s2.begin_trial()  # the proctor, again: do not wait for the pedal
+    run(s2, io2, 0.2)
+    assert s2.phase == "armed"
 
 
 def test_one_minute_warning():
@@ -139,9 +205,29 @@ def test_reload_from_an_earlier_run_does_not_count_and_a_new_one_does():
     assert io.restore_reload_wall() >= started
 
 
+
+def test_right_arrow_skips_steps_and_begins():
+    io = FakeIO()
+    session = ss.StudySession(io, "S006", pathlib.Path(tempfile.mkdtemp()) / "S006", {}, trial_seconds=30)
+    run(session, io, 0.2)
+    for k in range(len(ss.TUTORIAL)):
+        assert session.phase == "tutorial" and session.step == k
+        run(session, io, 0.2, skip_count=k + 1)  # nothing done, still moves on
+    assert session.phase == "ready" and not session.progress.done.get("drill")
+    run(session, io, 0.2, paused=True, skip_count=20)
+    assert session.phase == "ready"  # arrows belong to the pause menu while it is open
+    run(session, io, 0.2, paused=False)
+    run(session, io, 0.2, skip_count=21)
+    assert session.phase == "briefing"
+    run(session, io, 0.5, skip_count=22)
+    assert session.phase == "armed"
+
+
 if __name__ == "__main__":
     test_reload_from_an_earlier_run_does_not_count_and_a_new_one_does()
     test_full_session()
     test_skip_and_reset_failure_returns_to_ready()
     test_one_minute_warning()
+    test_resident_pedal_waits_for_the_bone_and_proctor_can_skip()
+    test_right_arrow_skips_steps_and_begins()
     print("ok")

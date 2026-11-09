@@ -11,7 +11,10 @@ Sources, all under /tmp/fivrs-rtx:
                  also reports the simulator paused, so a stale file is ignored.
 - study_hud.json written by the study controller (scripts/study/study_session.py):
     {"panel": {"title": str, "lines": [str], "progress": [done], "checklist": [[label, done]],
-               "footer": str} | null,
+               "footer": str, "done": bool, "advance": str,
+               "pictures": [{"device": "stylus" | "pedals" | "scope" | "headset",
+                             "marks": {region: label}}],
+               "look": {"target": [x, y, z], "radius": float}} | null,
      "timer": {"remaining_s": float, "running": bool, "written_wall": float} | null,
      "banner": str | null}
 
@@ -33,6 +36,23 @@ PAUSE_PATH = RUNTIME / "pause_hud.txt"
 STUDY_PATH = RUNTIME / "study_hud.json"
 STATE_PATH = RUNTIME / "drill_state.json"
 FONT_DIR = pathlib.Path("/usr/share/fonts/truetype/dejavu")
+IMAGE_DIR = pathlib.Path(__file__).resolve().parent / "hud_images"
+
+# Button regions on the photos in hud_images (pixels of the saved image).
+# Stylus: tip to the right. Which physical button the plugin calls "1" and "2"
+# is set here; swap the two entries if the rig says otherwise.
+PICTURES = {
+    # Stylus upright, tip down. Button 1 is the one nearest the tip.
+    "stylus": {"file": "stylus.png", "regions": {
+        "2": ("ellipse", (24, 56, 95, 126)),
+        "1": ("ellipse", (24, 132, 95, 198)),
+    }},
+    "pedals": {"file": "pedals.png", "regions": {
+        "left": ("rect", (15, 49, 249, 326)),
+        "middle": ("rect", (374, 4, 531, 254)),
+        "right": ("rect", (670, 29, 887, 300)),
+    }},
+}
 
 PANEL_FILL = (12, 24, 36, 205)
 TEXT = (236, 242, 248, 255)
@@ -72,7 +92,7 @@ def _read_file(path: pathlib.Path, cache: dict):
     return text, True
 
 
-def render_panel(lines, width: int, font_px: int, mono: bool = False):
+def render_panel(lines, width: int, font_px: int, mono: bool = False, fill: bool = True):
     """lines: list of (text, colour, bold). Returns an RGBA uint8 array.
 
     Proportional text wraps to ``width``. Monospaced text (the pause menu's
@@ -108,7 +128,8 @@ def render_panel(lines, width: int, font_px: int, mono: bool = False):
     height = 2 * pad + line_h * len(wrapped) - gap
     image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
-    draw.rounded_rectangle((0, 0, width - 1, height - 1), radius=font_px, fill=PANEL_FILL)
+    if fill:
+        draw.rounded_rectangle((0, 0, width - 1, height - 1), radius=font_px, fill=PANEL_FILL)
     y = pad
     for text, colour, font in wrapped:
         draw.text((pad, y), text, fill=colour, font=font)
@@ -134,7 +155,8 @@ def blend(image: np.ndarray, overlay: np.ndarray, x: int, y: int) -> None:
 def study_lines(panel: dict):
     lines = []
     if panel.get("title"):
-        lines.append((str(panel["title"]), ACCENT, True))
+        done = bool(panel.get("done"))
+        lines.append((("✓  " if done else "") + str(panel["title"]), DONE if done else ACCENT, True))
     for text in panel.get("lines") or []:
         lines.append((str(text), TEXT, False))
     progress = panel.get("progress") or []
@@ -151,6 +173,189 @@ def study_lines(panel: dict):
     return lines
 
 
+_photo_cache = {}
+
+
+def _photo(name: str):
+    from PIL import Image
+
+    if name not in _photo_cache:
+        _photo_cache[name] = Image.open(IMAGE_DIR / PICTURES[name]["file"]).convert("RGBA")
+    return _photo_cache[name]
+
+
+def _label_pill(draw, text, centre_x, y, font, colour=ACCENT, anchor_top=True):
+    """Dark pill with text centred on centre_x, its top (or bottom) at y."""
+    w = draw.textlength(text, font=font)
+    h = font.size
+    pad = max(3, h // 3)
+    top = y if anchor_top else y - h - 2 * pad
+    box = (centre_x - w / 2 - pad, top, centre_x + w / 2 + pad, top + h + 2 * pad)
+    draw.rounded_rectangle(box, radius=pad + 2, fill=(10, 16, 24, 235), outline=colour, width=2)
+    draw.text((box[0] + pad, top + pad * 0.6), text, fill=colour, font=font)
+
+
+def _render_stylus(marks: dict, height: int, font):
+    """Upright stylus, button numbers on the left, what to do on the right of each marked button."""
+    from PIL import Image, ImageDraw
+
+    photo = _photo("stylus")
+    height = int(height * 1.5)  # narrow upright photo: taller than the others so the buttons read
+    scale = height / photo.height
+    body = photo.resize((max(1, int(photo.width * scale)), height), Image.LANCZOS)
+    measure = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    label_w = max([measure.textlength(str(v), font=font) for v in marks.values()] + [0])
+    left = int(font.size * 1.6)
+    right = int(label_w + font.size * 3.2) if marks else 0
+    image = Image.new("RGBA", (left + body.width + right, height), (0, 0, 0, 0))
+    image.alpha_composite(body, (left, 0))
+    draw = ImageDraw.Draw(image)
+    line = max(3, height // 60)
+    for region, (shape, box) in PICTURES["stylus"]["regions"].items():
+        x0, y0, x1, y1 = (v * scale for v in box)
+        cy = (y0 + y1) / 2
+        draw.text((left - font.size * 1.2, cy - font.size * 0.6), region, fill=(255, 255, 255, 255),
+                  font=font, stroke_width=2, stroke_fill=(0, 0, 0, 255))
+        if region in marks:
+            draw.ellipse((left + x0, y0, left + x1, y1), outline=ACCENT, width=line)
+            # Button 2's label goes up and right, button 1's down and right, so they never overlap.
+            ty = cy - font.size * 1.6 if region == "2" else cy + font.size * 1.6
+            ty = min(max(ty, font.size), height - font.size)
+            x = left + body.width + font.size * 1.2
+            draw.line((left + x1, cy, x, ty), fill=ACCENT, width=line)
+            text = str(marks[region])
+            w = draw.textlength(text, font=font)
+            _label_pill(draw, text, x + w / 2 + font.size * 0.35, ty - font.size * 0.85, font)
+    return np.asarray(image, dtype=np.uint8)
+
+
+def render_picture(picture: dict, height: int, font_px: int):
+    """One device picture with the buttons to use outlined and labelled. RGBA array."""
+    from PIL import Image, ImageDraw
+
+    device = picture.get("device")
+    marks = picture.get("marks") or {}
+    font = _font(max(10, font_px), bold=True)
+    if device == "stylus":
+        return _render_stylus(marks, height, font)
+    if device in PICTURES:
+        photo = _photo(device)
+        scale = height / photo.height
+        image = photo.resize((max(1, int(photo.width * scale)), height), Image.LANCZOS)
+        draw = ImageDraw.Draw(image)
+        line = max(3, height // 45)
+        for region, label in marks.items():
+            shape, box = PICTURES[device]["regions"][str(region)]
+            box = [v * scale for v in box]
+            if shape == "ellipse":
+                draw.ellipse(box, outline=ACCENT, width=line)
+            else:
+                draw.rounded_rectangle(box, radius=line * 3, outline=ACCENT, width=line)
+            cx = (box[0] + box[2]) / 2
+            _label_pill(draw, str(label), cx, min(box[3] - font.size * 2.2, height - font.size * 2.2), font)
+        return np.asarray(image, dtype=np.uint8)
+    # No photo for the microscope rig button or the headset: a labelled tile.
+    width = int(height * 1.2)
+    image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    marked = bool(marks)
+    draw.rounded_rectangle((2, 2, width - 3, height - 3), radius=height // 8, fill=(40, 52, 66, 255),
+                           outline=ACCENT if marked else DIM, width=max(3, height // 45))
+    words = {"scope": ["Microscope", "handle", "button"], "headset": ["Quest", "headset"]}.get(device, [str(device)])
+    title = _font(max(10, int(font_px * 0.9)), bold=True)
+    y = height * 0.10
+    for word in words:
+        w = draw.textlength(word, font=title)
+        draw.text(((width - w) / 2, y), word, fill=TEXT, font=title)
+        y += title.size * 1.25
+    for label in marks.values():
+        _label_pill(draw, str(label), width / 2, height - font.size * 1.9 - height * 0.06, font)
+    return np.asarray(image, dtype=np.uint8)
+
+
+def render_study_panel(panel: dict, width: int, font_px: int):
+    """The tutorial panel: text on the left, device pictures on the right."""
+    from PIL import Image
+
+    pictures = panel.get("pictures") or []
+    if not pictures:
+        return render_panel(study_lines(panel), width, font_px)
+    pad = font_px
+    pic_h = int(font_px * 6.5)
+    rendered = [render_picture(p, pic_h, int(font_px * 0.75)) for p in pictures]
+    pics_w = sum(r.shape[1] for r in rendered) + pad * (len(rendered) - 1)
+    max_pics_w = int(width * 0.45)
+    if pics_w > max_pics_w:  # shrink the pictures, never the text
+        pic_h = int(pic_h * max_pics_w / pics_w)
+        rendered = [render_picture(p, pic_h, int(font_px * 0.75)) for p in pictures]
+        pics_w = sum(r.shape[1] for r in rendered) + pad * (len(rendered) - 1)
+    text_w = width - pics_w - pad
+    text = render_panel(study_lines(panel), text_w, font_px, fill=False)
+    height = max([text.shape[0]] + [r.shape[0] + 2 * pad for r in rendered])
+    canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    from PIL import ImageDraw
+    ImageDraw.Draw(canvas).rounded_rectangle((0, 0, width - 1, height - 1), radius=font_px, fill=PANEL_FILL)
+    canvas.alpha_composite(Image.fromarray(text), (0, 0))
+    x = text_w
+    for r in rendered:
+        canvas.alpha_composite(Image.fromarray(r), (x, (height - r.shape[0]) // 2))
+        x += r.shape[1] + pad
+    return np.asarray(canvas, dtype=np.uint8)
+
+
+def camera_from_state(state: dict):
+    """(position, look, up, vertical fov) from drill_state.json, or None."""
+    try:
+        c = np.array([state["cx"], state["cy"], state["cz"]], float)
+        look = np.array([state["lx"], state["ly"], state["lz"]], float)
+        up = np.array([state["ux"], state["uy"], state["uz"]], float)
+        fov = float(state["fov"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if fov <= 0 or not np.all(np.isfinite(np.concatenate([c, look, up]))):
+        return None
+    look = look / np.linalg.norm(look)
+    up = up - look * float(up @ look)  # square to the look direction
+    return c, look, up / np.linalg.norm(up), fov
+
+
+def project(point, camera):
+    """Screen position of a world point in half-heights from the centre (x right, y down), or None if behind."""
+    c, look, up, fov = camera
+    d = np.asarray(point, float) - c
+    depth = float(d @ look)
+    if depth <= 1e-9:
+        return None
+    right = np.cross(look, up)
+    t = np.tan(fov / 2.0)
+    return float(d @ right) / depth / t, -float(d @ up) / depth / t
+
+
+def _ring(radius_px: int, colour, line: int, cross: bool = False, dot: bool = False):
+    from PIL import Image, ImageDraw
+
+    size = 2 * radius_px + 2 * line + 2
+    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    m = line + 1
+    draw.ellipse((m, m, size - m - 1, size - m - 1), outline=(0, 0, 0, 160), width=line + 2)
+    draw.ellipse((m, m, size - m - 1, size - m - 1), outline=colour, width=line)
+    mid = size // 2
+    if cross:
+        arm = radius_px // 3
+        draw.line((mid - arm, mid, mid + arm, mid), fill=colour, width=line)
+        draw.line((mid, mid - arm, mid, mid + arm), fill=colour, width=line)
+    if dot:
+        r = max(3, radius_px // 4)
+        draw.ellipse((mid - r, mid - r, mid + r, mid + r), fill=colour)
+    return np.asarray(image, dtype=np.uint8)
+
+
+# Timer corner: the headset image edges are blurred and partly hidden by the lenses.
+HEADSET_TIMER_INSET = (0.20, 0.18)
+DESKTOP_TIMER_INSET = (0.02, 0.03)
+
+
 def format_clock(seconds: float) -> str:
     seconds = max(0, int(np.ceil(seconds)))
     return f"{seconds // 60:d}:{seconds % 60:02d}"
@@ -164,9 +369,11 @@ class HeadsetHud:
         self._study = {}
         self._pause_text = None
         self._paused = False
+        self._state = {}
         self._state_checked = 0.0
         self._cache = {}
         self.loading = None  # (label, fraction 0..1) while the bone is loading
+        self.timer_inset = HEADSET_TIMER_INSET  # (from the right, from the top) as fractions
 
     def _loading_layer(self, width: int, height: int):
         label, fraction = self.loading
@@ -185,13 +392,17 @@ class HeadsetHud:
             except json.JSONDecodeError:
                 pass
         self._pause_text, _ = _read_file(PAUSE_PATH, self._files)
-        if now - self._state_checked > 0.1:
+        # Every frame while a look target is up (it follows the camera), else 10 Hz.
+        looking = bool(((self._study or {}).get("panel") or {}).get("look"))
+        if looking or now - self._state_checked > 0.1:
             self._state_checked = now
-            state, _ = _read_file(STATE_PATH, self._files)
-            try:
-                self._paused = bool(json.loads(state).get("paused")) if state else False
-            except json.JSONDecodeError:
-                pass
+            state, changed = _read_file(STATE_PATH, self._files)
+            if changed:
+                try:
+                    self._state = json.loads(state) if state else {}
+                except json.JSONDecodeError:
+                    pass
+            self._paused = bool(self._state.get("paused"))
 
     def _cached(self, key, build):
         hit = self._cache.get(key)
@@ -216,8 +427,19 @@ class HeadsetHud:
             out.append((rgba, (width - rgba.shape[1]) // 2, (height - rgba.shape[0]) // 2))
             return out  # the pause menu covers everything else
         study = self._study or {}
-        # The bone fills the middle of the view, so the timer and study text sit
-        # in a band along the top; only the pause menu and short banners centre.
+        panel = study.get("panel") or {}
+        if panel.get("cover"):
+            # A full-screen card (the study introduction): centred on a plain
+            # background, and it hides a bone reset going on behind it.
+            lines = study_lines(panel)
+            if self.loading is not None:
+                pct = int(max(0.0, min(1.0, float(self.loading[1]))) * 100)
+                lines.append((f"Preparing the bone {pct}%", DIM, False))
+            key = ("cover", json.dumps(panel, sort_keys=True), len(lines), lines[-1][0], width, height)
+            rgba = self._cached(key, lambda: render_panel(lines, int(width * 0.62), font_px))
+            return [(rgba, (width - rgba.shape[1]) // 2, (height - rgba.shape[0]) // 2)]
+        # The bone fills the middle of the view, so the study text sits in a band
+        # along the top and the timer in the top-right corner.
         top = int(height * 0.06)
         timer = study.get("timer")
         if timer:
@@ -228,8 +450,10 @@ class HeadsetHud:
             colour = ACCENT if remaining <= 60 else TEXT
             rgba = self._cached(("timer", label, colour, height),
                                 lambda: render_panel([(label, colour, True)], font_px * 5, font_px))
-            out.append((rgba, (width - rgba.shape[1]) // 2, top))
-            top += rgba.shape[0] + int(font_px * 0.6)
+            # Top right, out of the way of the study text. The headset keeps it
+            # further in, where both eyes see it sharply through the lenses.
+            inset_x, inset_y = self.timer_inset
+            out.append((rgba, width - int(width * inset_x) - rgba.shape[1], int(height * inset_y)))
         banner = study.get("banner")
         if banner:
             rgba = self._cached(("banner", banner, width, height),
@@ -237,24 +461,99 @@ class HeadsetHud:
             out.append((rgba, (width - rgba.shape[1]) // 2, (height - rgba.shape[0]) // 2))
         panel = study.get("panel")
         if panel:
-            key = ("panel", json.dumps(panel, sort_keys=True), width, height)
+            shown = {k: v for k, v in panel.items() if k not in ("look", "advance")}
+            key = ("panel", json.dumps(shown, sort_keys=True), width, height)
             # Wide and a little smaller than the timer, so it takes few lines of the top band.
-            rgba = self._cached(key, lambda: render_panel(study_lines(panel), int(width * 0.70),
-                                                          max(12, int(font_px * 0.85))))
+            rgba = self._cached(key, lambda: render_study_panel(shown, int(width * 0.86),
+                                                                max(12, int(font_px * 0.85))))
             out.append((rgba, (width - rgba.shape[1]) // 2, top))
+            top += rgba.shape[0] + int(font_px * 0.5)
+            if panel.get("advance"):
+                text = str(panel["advance"])
+                pill = self._cached(("advance", text, height),
+                                    lambda: render_panel([(text, DONE, True)], int(width * 0.45), font_px))
+                out.append((pill, (width - pill.shape[1]) // 2, top))
+            if panel.get("look"):
+                out.extend(self._look_layers(panel["look"], width, height))
         return out
+
+    def _look_layers(self, look: dict, width: int, height: int):
+        """Centre circle (where the microscope points) and the target to bring into it."""
+        radius = float(look.get("radius", 0.15))
+        r_px = max(8, int(radius * height / 2))
+        line = max(2, height // 300)
+        cx, cy = width // 2, height // 2
+        camera = camera_from_state(self._state)
+        spot = project(look.get("target", (0, 0, 0)), camera) if camera else None
+        inside = spot is not None and np.hypot(*spot) <= radius
+        colour = DONE if inside else TEXT
+        centre = self._cached(("centre", r_px, colour), lambda: _ring(r_px, colour, line, cross=True))
+        out = [(centre, cx - centre.shape[1] // 2, cy - centre.shape[0] // 2)]
+        if spot is not None and not inside:
+            t_px = max(6, r_px // 2)
+            target = self._cached(("target", t_px), lambda: _ring(t_px, ACCENT, line + 1, dot=True))
+            # Kept on screen at the edge when it is out of view, so it shows the way.
+            margin = target.shape[0]
+            x = int(np.clip(cx + spot[0] * height / 2, margin, width - margin)) - target.shape[1] // 2
+            y = int(np.clip(cy + spot[1] * height / 2, margin, height - margin)) - target.shape[0] // 2
+            out.append((target, x, y))
+        return out
+
+    def frame(self, width: int, height: int):
+        """(cover the picture?, layers) for one frame."""
+        layers = self.layers(width, height)
+        panel = (self._study or {}).get("panel") or {}
+        paused = bool(self._pause_text and self._paused)
+        if panel.get("cover") and not paused:
+            return True, layers
+        if self.loading is not None:
+            return True, [self._loading_layer(width, height)]
+        return False, layers
 
     def draw(self, left: np.ndarray, right: np.ndarray) -> None:
         height, width = left.shape[:2]
-        if self.loading is not None:
-            rgba, x, y = self._loading_layer(width, height)
-            for eye in (left, right):
+        cover, layers = self.frame(width, height)
+        for eye in (left, right):
+            if cover:
                 eye[..., :3] = LOADING_BACKGROUND
+            for rgba, x, y in layers:
                 blend(eye, rgba, x, y)
-            return
-        for rgba, x, y in self.layers(width, height):
-            blend(left, rgba, x, y)
-            blend(right, rgba, x, y)
+
+
+def install_desktop(viewer) -> HeadsetHud:
+    """Draw the same text into the desktop window (study without the headset, for development).
+
+    Each frame with text is copied to the CPU, drawn on and copied back before the
+    window shows it; frames without text go straight through.
+    """
+    import warp as wp
+
+    PAUSE_PATH.unlink(missing_ok=True)
+    hud = HeadsetHud()
+    hud.timer_inset = DESKTOP_TIMER_INSET
+    blit = viewer._blit_to_window
+    warned = []
+
+    def blit_with_text(pixels):
+        try:
+            height, width = pixels.shape[:2]
+            cover, layers = hud.frame(width, height)
+            if layers or cover:
+                image = pixels.numpy()
+                if cover:
+                    image[..., :3] = LOADING_BACKGROUND
+                for rgba, x, y in layers:
+                    blend(image, rgba, x, y)
+                pixels = wp.array(image, dtype=wp.vec4ub, device=pixels.device)
+        except Exception as exc:  # text must never stop the picture
+            if not warned:
+                print(f"Desktop study text failed: {exc}", flush=True)
+                warned.append(True)
+        blit(pixels)
+
+    viewer._blit_to_window = blit_with_text
+    print("Desktop study text ready (pause menu, study prompts)", flush=True)
+    return hud
 
 
 def install(viewer) -> HeadsetHud | None:

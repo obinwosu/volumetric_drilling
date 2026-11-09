@@ -11,6 +11,8 @@ volume1:
   icon_path: ./assets/RT143.png
   name: Anatomy A
   description: 'Anatomy A: Temporal bone CT volume (right ear).'
+  sdf_path: /edt_grids_RT143_256/
+  unit: 0.02032409291371874
 volume10:
   adf_path: ../../ADF/volume_256_LT147.yaml
   icon_path: ./assets/LT147.png

@@ -23,6 +23,7 @@ from __future__ import annotations
 import mmap
 import os
 import pathlib
+import time
 
 import numpy as np
 
@@ -71,11 +72,13 @@ class EyeShare:
         self._map = None
         self._shape = None
         self._seq = 0
+        self._eye_views = []
         self.frames = 0
 
     def _open(self, width: int, height: int):
         size = HEADER + 2 * width * height * 4
         if self._map is not None:
+            self._eye_views = []
             self._map.close()
         # Write the new file aside and rename it, so a reader never maps half a resize.
         partial = self.path.with_suffix(".part")
@@ -92,6 +95,11 @@ class EyeShare:
         self._map[0:HEADER] = header.tobytes()
         self._shape = (height, width)
         self._seq = 0
+        eye = width * height * 4
+        self._eye_views = [
+            np.frombuffer(self._map, np.uint8, count=eye, offset=HEADER + k * eye).reshape(height, width, 4)
+            for k in range(2)
+        ]
 
     def write(self, left: np.ndarray, right: np.ndarray, fov_y: float = 0.0) -> None:
         """left, right: (H, W, 4) uint8, top row first as the renderer returns them."""
@@ -101,14 +109,12 @@ class EyeShare:
         if self._shape != (height, width):
             self._open(width, height)
         m = self._map
-        eye = width * height * 4
         self._seq += 1  # odd: writing
         m[8:16] = np.uint64(self._seq).tobytes()
         m[24:28] = np.float32(fov_y).tobytes()
-        for k, image in enumerate((left, right)):
-            flipped = np.ascontiguousarray(image[::-1, :, :4], dtype=np.uint8)
-            start = HEADER + k * eye
-            m[start : start + eye] = flipped.tobytes()
+        # One copy per eye, straight into the shared file, flipped to bottom row first.
+        for target, image in zip(self._eye_views, (left, right)):
+            np.copyto(target, image[::-1, :, :4], casting="unsafe")
         self._seq += 1  # even: complete
         m[8:16] = np.uint64(self._seq).tobytes()
         self.frames += 1
@@ -122,6 +128,7 @@ class EyeShare:
 
     def close(self):
         if self._map is not None:
+            self._eye_views = []  # numpy views must go before the map can close
             self._map.close()
             self._map = None
 
@@ -185,6 +192,8 @@ class Eyes:
         self.failed = False
         # Optional callable(left, right) that draws text into both eye images (headset_hud).
         self.overlay = None
+        # Mean ms per step over recent frames, for summary.json.
+        self.timing = {}
         original = viewer._add_camera_lights_and_render_product
 
         def author():
@@ -199,7 +208,9 @@ class Eyes:
                 return accept(products)
             main = viewer._render_product_path
             shown = {name: product for name, product in products.items() if name == main} or products
+            t0 = time.perf_counter()
             accept(shown)
+            self._time("window", t0)
             self._share(products)
 
         viewer._accept_render = accept_render
@@ -254,9 +265,14 @@ class Eyes:
         if self.eye_camera:
             self.viewer._write_runtime_attribute([self.eye_camera], "focalLength", np.array([focal], np.float32))
 
+    def _time(self, name, start):
+        ms = (time.perf_counter() - start) * 1e3
+        self.timing[name] = 0.9 * self.timing.get(name, ms) + 0.1 * ms
+
     def _share(self, products):
         from ovrtx import Device
 
+        t0 = time.perf_counter()
         images = {}
         for name, product in products.items():
             for frame in product.frames:
@@ -272,7 +288,9 @@ class Eyes:
                 print(f"Headset eyes: missing a render ({sorted(images)})", flush=True)
                 self.failed = True
             return
+        self._time("readback", t0)
         fov = float(np.radians(getattr(self.viewer.camera, "fov", 10.29)))
+        t0 = time.perf_counter()
         if self.overlay is not None:
             try:
                 self.overlay(left, right)
@@ -280,4 +298,7 @@ class Eyes:
                 if not getattr(self, "_overlay_warned", False):
                     print(f"Headset text failed: {exc}", flush=True)
                     self._overlay_warned = True
+        self._time("text", t0)
+        t0 = time.perf_counter()
         self.share.write(left, right, fov)
+        self._time("write", t0)

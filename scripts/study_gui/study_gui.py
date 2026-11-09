@@ -403,7 +403,12 @@ class Ui(QtWidgets.QWidget):
         self.study_panel = study_mode.StudyPanel(self)
         tabs = self.findChild(QtWidgets.QTabWidget, "tabWidget")
         if tabs is not None:
-            tabs.addTab(self.study_panel, "Study")
+            # Scrolls when the launcher window is shorter than the tab.
+            scroll = QtWidgets.QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+            scroll.setWidget(self.study_panel)
+            tabs.addTab(scroll, "Study")
 
         self.place_on_pc_monitor(0)
         self.show()
@@ -800,8 +805,9 @@ class Ui(QtWidgets.QWidget):
             self._ambf_log_path.write_text(f"{self.get_time_as_str()}AMBF [{mode}] {' '.join(self._current_args)}\n")
             self._ambf_process.start(ambf_bin, self._current_args)
             if use_rtx:
-                self._ambf_minimize_until = 0.0
-                self._ambf_minimize_timer.start()
+                # AMBF's window is left as it opens. Minimizing it before its first
+                # frame stopped its graphics loop (no headset, no camera) until it
+                # was restored (2026-11-08), so the minimize timer is not started.
                 # With the OpenXR eyepiece, the headset shows the RTX view in stereo.
                 self._start_rtx_view(repo_root, headset=use_openxr)
             if not self._ambf_process.waitForStarted(5000):
@@ -819,7 +825,7 @@ class Ui(QtWidgets.QWidget):
             if self._recording_study:
                 self.print_info("Must stop logging study data first!")
             else:
-                self._ambf_process.close()
+                self.close_simulation()
 
     def _start_rtx_view(self, repo_root, headset=False):
         venv_python = pathlib.Path(repo_root) / "middle_ear_newton" / ".venv" / "bin" / "python"
@@ -835,6 +841,10 @@ class Ui(QtWidgets.QWidget):
         log_dir = pathlib.Path("/tmp/fivrs-rtx")
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = log_dir / "view.log"
+        # One log per launch (the previous one is kept beside it), so an error from
+        # an earlier run is never read as this run's.
+        if log_file.exists():
+            log_file.replace(log_dir / "view.prev.log")
         self._rtx_log_file = log_file
         options = self._launch_options()
         command = (
@@ -855,6 +865,8 @@ class Ui(QtWidgets.QWidget):
             + f"exec \"{venv_python}\" \"{script}\" --anatomy-adf \"{self.active_volume_adf}\""
             + (" --headset" if headset else "")
             + (" --no-stream" if self.study_mode else "")
+            # Study without the headset (development): the study text goes in this window.
+            + (" --desktop-hud" if self.study_mode and not headset else "")
         )
         self._show_rtx_splash()
         self._rtx_process.setWorkingDirectory(str(repo_root))
@@ -1004,6 +1016,14 @@ class Ui(QtWidgets.QWidget):
 
     def _rtx_finished(self, code, status):
         self._close_rtx_splash()
+        log_file = self._rtx_log_file
+        if log_file is not None:
+            how = "crashed" if status == QProcess.CrashExit else "normal exit"
+            try:
+                with open(log_file, "a", encoding="utf-8") as handle:
+                    handle.write(f"\n{self.get_time_as_str()}RTX view exited: code {code}, {how}\n")
+            except OSError:
+                pass
         if code not in (0, None) and self._ambf_process.state() == QProcess.Running:
             self.print_info(f"RTX bone view exited ({code}). See the Debug pane.")
 
@@ -1021,6 +1041,10 @@ class Ui(QtWidgets.QWidget):
             self.print_info(f"Irrigation jet exited ({code}). See the Debug pane.")
 
     def _simulation_closed(self, exit_code=0, exit_status=None):
+        if getattr(self, "_closing_ambf", False):
+            self._closing_ambf = False
+            exit_code, exit_status = 0, QProcess.NormalExit
+            self.print_info("Simulator closed")
         self.study_panel.simulator_closed()
         if self._recording_study:
             self._stop_study_logging(save_metadata=True)
@@ -1043,7 +1067,14 @@ class Ui(QtWidgets.QWidget):
         self._close_rtx_splash()
         self._stop_fluid()
 
+    def close_simulation(self):
+        """Close AMBF on purpose. QProcess reports that as a crash; this run should not."""
+        self._closing_ambf = True
+        self._ambf_process.close()
+
     def _ambf_process_error(self, error):
+        if getattr(self, "_closing_ambf", False) and error == QProcess.Crashed:
+            return  # we closed it
         self.print_info(f"ERROR! AMBF process: {self._ambf_process.errorString()} ({error})")
 
     def pupil_capture_toggled(self, checked):
@@ -1215,6 +1246,9 @@ class Ui(QtWidgets.QWidget):
 
     def print_info(self, msg):
         self.textEdit_info.insertPlainText(self.get_time_as_str() + msg + "\n")
+        panel = getattr(self, "study_panel", None)
+        if panel is not None:
+            panel.activity_line(self.get_time_as_str() + msg)
 
     def print_debug(self, msg):
         self.textEdit_debug.insertPlainText(self.get_time_as_str() + msg)

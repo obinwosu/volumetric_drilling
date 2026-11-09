@@ -8,9 +8,12 @@ Everything that touches files or processes goes through ``SessionIO`` so tests
 can replace it.
 
 Flow:
-    tutorial  -> each step ticks off from the simulator's live state
-    ready     -> "Tell the proctor"; the proctor presses Begin trial
-    resetting -> drill locked, bone restored in AMBF and reloaded in RTX
+    tutorial  -> each step ticks off from the simulator's live state; left pedal advances
+    ready     -> "Press the left foot pedal to begin your study session" (or the proctor's Begin)
+    briefing  -> the study introduction covers the view while, behind it, the drill is
+                 locked, the burr goes back to 6 mm cutting, the bone is restored in AMBF and
+                 reloaded in RTX and the recorder starts; the left pedal (once all that is
+                 done) begins the trial
     armed     -> recorder running, drill unlocked; timer waits for first bone removed
     running   -> 10:00 of drilling time; pauses (pause menu) do not count
     done      -> drill locked, recorder stopped, metadata written
@@ -23,8 +26,14 @@ import os
 import pathlib
 import signal
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
+
+import numpy as np
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "rtx_view"))
+import headset_hud  # noqa: E402  (camera projection shared with the headset drawing)
 
 RUNTIME = pathlib.Path("/tmp/fivrs-rtx")
 TRIAL_SECONDS = 600.0
@@ -33,47 +42,103 @@ RESET_TIMEOUT_S = 45.0
 RECORDER_START_TIMEOUT_S = 30.0
 PAUSE_FOOTER = "Double-tap Stylus 1 any time for the pause menu."
 
+BRIEFING_TITLE = "The study session"
+BRIEFING_LINES = [
+    "This is a small user study examining two different methods of automated feedback in "
+    "virtual reality mastoidectomy. You will be given 10 minutes to perform a cortical "
+    "mastoidectomy with the goal of identifying the incus short process.",
+    "",
+    "Your performance is not a primary endpoint in the study and will not be used to evaluate "
+    "you whatsoever.",
+    "",
+    "It is okay if you do not complete the task in the allotted time.",
+    "",
+    "After 10 minutes, you will be asked to complete a handful of brief questionnaires and "
+    "review two forms of feedback.",
+]
+BRIEFING_FOOTER = "Press the left foot pedal once you are ready to begin."
 
 @dataclass
 class Step:
     key: str
     title: str
-    lines: list
-    checklist: str
+    lines: list          # how to do it, shown in the headset
+    pictures: list = field(default_factory=list)  # headset_hud device pictures with marked buttons
 
 
-# Wording shown in the headset. Each step is checked from drill_state.json in _progress().
+ADVANCE_TEXT = "Press the left foot pedal to advance"
+
+# Wording shown in the headset. Each step is checked from drill_state.json in _tutorial();
+# once done it turns green, the resident may keep practising, and the left pedal advances.
 TUTORIAL = [
-    Step("drill_move", "Move the drill",
-         ["Move the stylus to move the drill around the field."], "Move the drill"),
-    Step("camera", "Move the microscope",
-         ["Hold the microscope button and move your head to move the view.",
-          "Release the button to fix the view."], "Move the microscope"),
-    Step("zoom", "Zoom",
-         ["Hold the left pedal and press Stylus 2 to zoom in, Stylus 1 to zoom out."], "Zoom in and out"),
-    Step("device_clutch", "Drill clutch",
-         ["Hold Stylus 2 and move the stylus to a comfortable spot without moving the drill.",
-          "Release Stylus 2 to continue."], "Drill clutch"),
-    Step("recenter", "Recenter the drill",
-         ["Double-tap Stylus 2 to bring the drill back into view."], "Recenter the drill"),
-    Step("orbit", "Orbit around the burr",
-         ["Hold the right pedal and Stylus 2, then move the stylus to orbit the view around the burr."],
-         "Orbit around the burr"),
-    Step("drill", "Drill",
-         ["Hold the middle pedal to run the drill and remove some bone.",
-          "This practice bone is restored before the timed trial."], "Drill some bone"),
-    Step("pause", "Pause menu and burrs",
-         ["Double-tap Stylus 1 to open the pause menu.",
-          "Right pedal moves down to Burr size, left pedal opens it and picks a size,",
-          "middle pedal goes back. Double-tap Stylus 1 to resume."],
-         "Change the burr in the pause menu"),
+    Step("welcome", "Welcome",
+         ["This tutorial includes steps intended to familiarize you with the drilling simulator. "
+          "After completing a tutorial step, press the left foot pedal to advance. Once you complete "
+          "all tutorial steps, you may begin the study session."],
+         [{"device": "pedals", "marks": {"left": "Advance"}}]),
+    Step("drill_move", "Moving the drill",
+         ["Move the stylus to move the drill around the surgical field."],
+         [{"device": "stylus", "marks": {}}]),
+    Step("reposition", "Repositioning the haptic device",
+         ["The haptic device has a set working area. Holding stylus button 2 allows you to "
+          "reposition the device without moving the drill.",
+          "Hold button 2, move the stylus, then release."],
+         [{"device": "stylus", "marks": {"2": "Hold"}}]),
+    Step("recenter", "Recentering the drill in view",
+         ["To quickly recenter the drill and keep the haptic device in the working area, "
+          "double-tap stylus button 2."],
+         [{"device": "stylus", "marks": {"2": "Double-tap"}}]),
+    Step("camera", "Moving the microscope",
+         ["The view in the simulator is controlled by the position of the Quest headset. To move "
+          "the camera, press and hold the button on the microscope handle and then reposition "
+          "the Quest headset.",
+          "Move the view until the yellow target is inside the centre circle."],
+         [{"device": "scope", "marks": {"button": "Hold"}}, {"device": "headset", "marks": {}}]),
+    Step("zoom", "Zooming in and out",
+         ["To zoom in, press the button on the microscope AND press the left foot pedal. To zoom "
+          "out, press the button on the microscope AND press the right foot pedal.",
+          "Zoom in, then zoom out."],
+         [{"device": "scope", "marks": {"button": "Hold"}},
+          {"device": "pedals", "marks": {"left": "Zoom in", "right": "Zoom out"}}]),
+    Step("drill", "Activating the drill",
+         ["To activate the drill, press the middle pedal. Practice making contact and removing bone.",
+          "This practice bone is restored before the study session."],
+         [{"device": "pedals", "marks": {"middle": "Drill"}}]),
+    Step("pause", "The pause menu",
+         ["To open the pause menu, double-tap stylus button 1. The burr size and type are "
+          "changed here.",
+          "In the menu: stylus button 2 moves down, stylus button 1 moves up, the left pedal "
+          "selects, and the middle pedal goes back or closes the menu.",
+          "Open the pause menu, then close it with the middle pedal."],
+         [{"device": "stylus", "marks": {"1": "Double-tap: open   Tap: up", "2": "Tap: down"}},
+          {"device": "pedals", "marks": {"left": "Select", "middle": "Back / close"}}]),
 ]
 
 # Thresholds for each tutorial check.
 DRILL_TRAVEL_UNITS = 0.5   # simulator units of tip travel (about 25 mm)
-HOLD_SECONDS = 1.0         # clutch / orbit held long enough to have been tried
-ZOOM_DOUBLINGS = 1.0       # total zoom in plus out, in doublings of magnification
+DEVICE_TRAVEL_M = 0.015    # stylus travel while clutched, metres
+HOLD_SECONDS = 1.0         # clutch held this long, when the plugin reports no stylus position
+ZOOM_EACH_WAY = 0.5        # doublings of magnification, in and then out
 DRILL_VOXELS = 200         # voxels removed in practice
+LOOK_RADIUS = 0.15         # centre circle, in half-heights of the view
+LOOK_OFFSET = (0.55, 0.30) # target start: right and up of centre, in half-heights
+LOOK_HOLD_S = 0.3          # target held inside the circle
+
+
+def look_target(state: dict):
+    """A point on the drill tip's depth plane, right of and above the centre of the view."""
+    camera = headset_hud.camera_from_state(state)
+    if camera is None:
+        return None
+    c, look, up, fov = camera
+    tip = np.array([state.get("px", 0.0), state.get("py", 0.0), state.get("pz", 0.0)], float)
+    depth = float((tip - c) @ look)
+    if depth <= 1e-6:
+        depth = 1.0
+    half = depth * np.tan(fov / 2.0)
+    right = np.cross(look, up)
+    point = c + look * depth + right * (LOOK_OFFSET[0] * half) + up * (LOOK_OFFSET[1] * half)
+    return [float(v) for v in point]
 
 
 class SessionIO:
@@ -120,6 +185,11 @@ class SessionIO:
 
     def request_reload(self) -> None:
         (self.runtime / "reload.request").write_text("reload\n")
+
+    def request_burr_reset(self) -> None:
+        """The plugin sets the burr to 6 mm cutting (volumetric_drilling.cpp)."""
+        self.runtime.mkdir(parents=True, exist_ok=True)
+        (self.runtime / "burr_reset.request").write_text("6mm cutting\n")
 
     def restore_reload_wall(self) -> float:
         """Wall time of the RTX window's last bone reload after a restore, or 0.
@@ -175,14 +245,17 @@ class SessionIO:
 class Progress:
     travel: float = 0.0
     last_tip: tuple | None = None
+    device_travel: float = 0.0
+    last_device: tuple | None = None
     clutch_s: float = 0.0
-    device_clutch_s: float = 0.0
-    orbit_s: float = 0.0
-    zoom_start: float | None = None
+    zoom_start: tuple | None = None
     recenter_start: int | None = None
     removed_start: int | None = None
     saw_pause: bool = False
-    burr_start: tuple | None = None
+    look_target: list | None = None
+    look_s: float = 0.0
+    step_done: bool = False          # current step done; waiting for the left pedal
+    advance_base: int | None = None  # advance_count when it was done
     done: dict = field(default_factory=dict)
 
 
@@ -216,15 +289,32 @@ class StudySession:
             self._log("tutorial_step_skipped", step=TUTORIAL[self.step].key)
             self._advance_step()
 
-    def begin_trial(self):
-        """Proctor: the resident is ready. Reset the bone, then arm the trial."""
+    def begin_trial(self, by: str = "proctor"):
+        """Show the study introduction and prepare the trial behind it.
+
+        From the tutorial (resident's left pedal or the proctor's Begin): lock the
+        drill, put the burr back to 6 mm cutting, restore the bone and start the
+        recorder while the resident reads. Pressed again during the introduction
+        by the proctor, it skips waiting for the resident's pedal.
+        """
+        if self.phase == "briefing" and by == "proctor":
+            self._briefing_ack = True
+            self._log("briefing_skipped_by_proctor")
+            return
         if self.phase not in ("tutorial", "ready"):
             return
-        self._log("trial_requested", tutorial_complete=self.phase == "ready")
-        self.phase = "resetting"
+        self._log("trial_requested", by=by, tutorial_complete=self.phase == "ready")
+        self._ready_base = None  # a failed reset returns to ready and waits for a new press
+        self.phase = "briefing"
+        self.error = None
         self.io.set_drill_lock(True)
+        self.io.request_burr_reset()
         self._reset_started = self.io.now()
         self._reload_sent = False
+        self._reset_ready = False
+        self._briefing_ack = False
+        self._briefing_base = int((self.io.read_state() or {}).get("advance_count") or 0)
+        self._recorder_started = None
         self.io.request_restore()
 
     def end_early(self):
@@ -239,10 +329,21 @@ class StudySession:
         dt = 0.0 if self._last_tick is None else max(0.0, min(1.0, now - self._last_tick))
         self._last_tick = now
         state = self.io.read_state() or {}
+        if self._right_arrow(state):
+            self._log("right_arrow", phase=self.phase,
+                      step=TUTORIAL[self.step].key if self.phase == "tutorial" else None)
+            if self.phase == "tutorial":
+                self._advance_step()  # move on whether or not the step is done
+            elif self.phase == "ready":
+                self.begin_trial(by="resident")
+            elif self.phase == "briefing":
+                self._briefing_ack = True
         if self.phase == "tutorial":
             self._tutorial(state, dt)
-        elif self.phase == "resetting":
-            self._resetting(now)
+        elif self.phase == "ready":
+            self._ready(state)
+        elif self.phase == "briefing":
+            self._briefing(state, now)
         elif self.phase == "armed":
             self._armed(state, now)
         elif self.phase == "running":
@@ -253,16 +354,20 @@ class StudySession:
     # ---- tutorial ----
     def _tutorial(self, state, dt):
         p = self.progress
+        key = TUTORIAL[self.step].key
         tip = (state.get("px"), state.get("py"), state.get("pz"))
         if None not in tip:
-            if p.last_tip is not None:
+            if p.last_tip is not None and key == "drill_move":
                 p.travel += math.dist(tip, p.last_tip)
             p.last_tip = tip
-        p.clutch_s += dt if state.get("cam_clutch") else 0.0
-        p.device_clutch_s += dt if state.get("device_clutch") else 0.0
-        p.orbit_s += dt if state.get("orbit") else 0.0
-        key = TUTORIAL[self.step].key
-        zoom = float(state.get("zoom_travel") or 0.0)
+        device = (state.get("hx"), state.get("hy"), state.get("hz"))
+        clutched = bool(state.get("device_clutch"))
+        if None not in device:
+            if p.last_device is not None and clutched and key == "reposition":
+                p.device_travel += math.dist(device, p.last_device)
+            p.last_device = device
+        p.clutch_s += dt if clutched and key == "reposition" else 0.0
+        zoom = (float(state.get("zoom_in") or 0.0), float(state.get("zoom_out") or 0.0))
         recenter = int(state.get("recenter_count") or 0)
         removed = int(state.get("removed_voxels") or 0)
         if p.zoom_start is None or key != "zoom":
@@ -271,34 +376,81 @@ class StudySession:
             p.recenter_start = recenter
         if p.removed_start is None or key != "drill":
             p.removed_start = removed
-        burr = (state.get("drill"), state.get("style"))
-        if key != "pause" or p.burr_start is None:
-            p.burr_start = burr
         if key != "pause":
             p.saw_pause = False
-        done = {
-            "drill_move": p.travel >= DRILL_TRAVEL_UNITS,
-            "camera": p.clutch_s >= HOLD_SECONDS,
-            "zoom": zoom - p.zoom_start >= ZOOM_DOUBLINGS,
-            "device_clutch": p.device_clutch_s >= HOLD_SECONDS,
-            "recenter": recenter > p.recenter_start,
-            "orbit": p.orbit_s >= HOLD_SECONDS,
-            "drill": removed - p.removed_start >= DRILL_VOXELS,
-            "pause": p.saw_pause and burr != p.burr_start and not state.get("paused"),
-        }
-        if key == "pause" and state.get("paused"):
+        elif state.get("paused"):
             p.saw_pause = True
-        if done[key]:
-            self._log("tutorial_step_done", step=key)
+        if key == "camera":
+            if p.look_target is None:
+                p.look_target = look_target(state)
+            camera = headset_hud.camera_from_state(state)
+            spot = headset_hud.project(p.look_target, camera) if (camera and p.look_target) else None
+            inside = spot is not None and math.hypot(*spot) <= LOOK_RADIUS
+            p.look_s = p.look_s + dt if inside else 0.0
+        if not p.step_done:
+            has_device = None not in device
+            checks = {
+                "welcome": True,
+                "drill_move": p.travel >= DRILL_TRAVEL_UNITS,
+                "reposition": (p.device_travel >= DEVICE_TRAVEL_M if has_device
+                               else p.clutch_s >= HOLD_SECONDS),
+                "recenter": recenter > p.recenter_start,
+                "camera": p.look_s >= LOOK_HOLD_S,
+                "zoom": (zoom[0] - p.zoom_start[0] >= ZOOM_EACH_WAY - 1e-6
+                         and zoom[1] - p.zoom_start[1] >= ZOOM_EACH_WAY - 1e-6),
+                "drill": removed - p.removed_start >= DRILL_VOXELS,
+                "pause": p.saw_pause and not state.get("paused"),
+            }
+            if checks[key]:
+                p.step_done = True
+                p.advance_base = int(state.get("advance_count") or 0)
+                self.progress.done[key] = True
+                self._log("tutorial_step_done", step=key)
+        elif not state.get("paused") and int(state.get("advance_count") or 0) > p.advance_base:
+            self._log("tutorial_step_advanced", step=key)
             self._advance_step()
 
     def _advance_step(self):
-        self.progress.done[TUTORIAL[self.step].key] = True
+        self.progress.done.setdefault(TUTORIAL[self.step].key, False)
+        self.progress.step_done = False
+        self.progress.advance_base = None
+        self.progress.look_target = None
+        self.progress.look_s = 0.0
         self.step += 1
         if self.step >= len(TUTORIAL):
             self.step = len(TUTORIAL) - 1
             self.phase = "ready"
             self._log("tutorial_complete")
+
+    def _right_arrow(self, state) -> bool:
+        """A new Right-arrow press (the plugin's skip_count), outside the pause menu."""
+        count = int(state.get("skip_count") or 0)
+        seen = getattr(self, "_skip_seen", None)
+        self._skip_seen = count
+        return seen is not None and count > seen and not state.get("paused")
+
+    # ---- end of the tutorial ----
+    def _ready(self, state):
+        count = int(state.get("advance_count") or 0)
+        if getattr(self, "_ready_base", None) is None:
+            self._ready_base = count
+        if count > self._ready_base and not state.get("paused"):
+            self._ready_base = None
+            self.begin_trial(by="resident")
+
+    def _briefing(self, state, now):
+        if not state.get("paused") and int(state.get("advance_count") or 0) > self._briefing_base:
+            if not self._briefing_ack:
+                self._log("briefing_read")
+            self._briefing_ack = True
+        if not self._reset_ready:
+            self._resetting(now)
+        if self.phase == "briefing" and self._reset_ready and self._briefing_ack:
+            state = self.io.read_state() or {}
+            self._armed_removed = int(state.get("removed_voxels") or 0)
+            self.io.set_drill_lock(False)
+            self.phase = "armed"
+            self._log("trial_armed")
 
     # ---- reset and start ----
     def _resetting(self, now):
@@ -322,10 +474,7 @@ class StudySession:
         if self._recorder_started is not None:
             if self.io.recorder_ready():
                 self._log("recording_started")
-                state = self.io.read_state() or {}
-                self._armed_removed = int(state.get("removed_voxels") or 0)
-                self.io.set_drill_lock(False)
-                self.phase = "armed"
+                self._reset_ready = True
             elif not self.io.recorder_running() or now - self._recorder_started > RECORDER_START_TIMEOUT_S:
                 self.error = "The recorder did not start. See the recorder log next to the recording."
                 self.status = self.error
@@ -367,24 +516,38 @@ class StudySession:
     def hud(self, now) -> dict:
         if self.phase == "tutorial":
             step = TUTORIAL[self.step]
-            return {
-                "panel": {
-                    "title": f"Tutorial {self.step + 1} of {len(TUTORIAL)}: {step.title}",
-                    "lines": step.lines,
-                    # One row of dots, not a checklist: the panel stays short so it
-                    # sits above the field instead of over the bone.
-                    "progress": [bool(self.progress.done.get(s.key)) for s in TUTORIAL],
-                },
-                "timer": None, "banner": None,
+            p = self.progress
+            numbered = [s for s in TUTORIAL if s.key != "welcome"]
+            title = step.title if step.key == "welcome" else \
+                f"Step {numbered.index(step) + 1} of {len(numbered)}: {step.title}"
+            panel = {
+                "title": title,
+                "lines": step.lines,
+                "pictures": step.pictures,
+                "done": p.step_done and step.key != "welcome",
+                "advance": ADVANCE_TEXT if p.step_done else None,
+                # One row of dots, not a checklist: the panel stays short so it
+                # sits above the field instead of over the bone.
+                "progress": [bool(p.done.get(s.key)) for s in numbered],
             }
+            if step.key == "welcome":
+                panel["progress"] = []
+            if step.key == "camera" and p.look_target is not None and not p.step_done:
+                panel["look"] = {"target": p.look_target, "radius": LOOK_RADIUS}
+            return {"panel": panel, "timer": None, "banner": None}
         if self.phase == "ready":
-            lines = ["You have practiced every control.", "Tell the proctor when you are ready to begin."]
+            lines = ["You have completed the tutorial. You may keep practicing."]
             if self.error:
-                lines = [self.error]
-            return {"panel": {"title": "Tutorial complete", "lines": lines, "footer": PAUSE_FOOTER},
+                lines = [self.error, "Please tell the proctor."]
+            return {"panel": {"title": "Tutorial complete", "lines": lines, "done": True,
+                              "advance": None if self.error else "Press the left foot pedal to begin your study session"},
                     "timer": None, "banner": None}
-        if self.phase == "resetting":
-            return {"panel": None, "timer": None, "banner": "Restoring the bone for the timed trial..."}
+        if self.phase == "briefing":
+            footer = BRIEFING_FOOTER
+            if self._briefing_ack and not self._reset_ready:
+                footer = "Thank you. Preparing the bone..."
+            return {"panel": {"title": BRIEFING_TITLE, "lines": BRIEFING_LINES, "footer": footer, "cover": True},
+                    "timer": None, "banner": None}
         timer = {"remaining_s": self.remaining(), "running": False, "written_wall": now}
         if self.phase == "armed":
             return {

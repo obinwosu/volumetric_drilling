@@ -784,7 +784,12 @@ class Bridge:
         # Receipt stays on this thread so a mesh rebuild or a snapshot read
         # cannot stop new deletions from being recorded.
         while self._running:
-            self._rclpy.spin_once(self.node, timeout_sec=0.01)
+            try:
+                self._rclpy.spin_once(self.node, timeout_sec=0.01)
+            except Exception:
+                if not self._running or not self._rclpy.ok():
+                    return  # ROS was shut down while closing
+                raise
 
     def publish_camera_nudge(self, yaw=0.0, pitch=0.0, pan_right=0.0, pan_up=0.0, dolly=0.0):
         """Ask AMBF to move main_camera. This window then draws the published pose.
@@ -862,7 +867,9 @@ class Bridge:
     def close(self):
         self._running = False
         self.node.destroy_node()
-        self._rclpy.shutdown()
+        # The launcher's interrupt may already have shut ROS down.
+        if self._rclpy.ok():
+            self._rclpy.shutdown()
 
     def _volume(self, msg):
         self._arrived += 1
@@ -1040,6 +1047,53 @@ def _set_exposure(viewer, scale):
     viewer._exposure = float(min(EXPOSURE_MAX, max(EXPOSURE_MIN, scale)))
     viewer._exposure_dirty = True
     print(f"RTX exposure {viewer._exposure:.2f}   [ darker   ] brighter   \\ reset", flush=True)
+
+
+class LoopWatchdog:
+    """Prints every thread's stack if the frame loop stops for stall_s.
+
+    The launcher copies this window's output into view.log, so a hang leaves
+    a record of where it was stuck. Armed once the bone is shown, since the
+    first frames legitimately take many seconds.
+    """
+
+    def __init__(self, stall_s: float = 8.0):
+        self.stall_s = float(stall_s)
+        self._beat = time.monotonic()
+        self._armed = False
+        self._dumped = False
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._watch, name="rtx-loop-watchdog", daemon=True)
+        self._thread.start()
+
+    def arm(self):
+        self._beat = time.monotonic()
+        self._armed = True
+
+    def beat(self):
+        now = time.monotonic()
+        if self._dumped:
+            print(f"RTX frame loop resumed after {now - self._beat:.1f} s", flush=True)
+            self._dumped = False
+        self._beat = now
+
+    def stop(self):
+        self._stop.set()
+
+    def _watch(self):
+        import faulthandler
+
+        while not self._stop.wait(1.0):
+            stalled = time.monotonic() - self._beat
+            if not self._armed or self._dumped or stalled < self.stall_s:
+                continue
+            self._dumped = True
+            print(f"RTX frame loop stalled for {stalled:.0f} s; thread stacks follow", flush=True)
+            try:
+                faulthandler.dump_traceback(file=sys.stdout, all_threads=True)
+                sys.stdout.flush()
+            except (OSError, ValueError, AttributeError):
+                pass
 
 
 def _hide_window_until_ready(viewer):
@@ -2562,6 +2616,10 @@ def main():
         action="store_true",
         help="Also render a right eye and send both eyes to the OpenXR eyepiece plugin. The window shows the left eye.",
     )
+    parser.add_argument(
+        "--desktop-hud", action="store_true",
+        help="Draw the study text and pause menu in this window (study without the headset, for development).",
+    )
     parser.add_argument("--stereo-base-mm", type=float, default=rtx_eyes.BASE_MM)
     parser.add_argument(
         "--stereo-focus-mm", type=float, default=None,
@@ -2910,6 +2968,8 @@ def main():
     rtx_record.install(viewer, bridge)
     # Pause menu and study prompts drawn into the headset eyes.
     hud = headset_hud.install(viewer)
+    if hud is None and args.desktop_hud:
+        hud = headset_hud.install_desktop(viewer)
     # The window opens hidden and appears once the whole bone is meshed and
     # uploaded; the launcher's loading window shows progress until then.
     _hide_window_until_ready(viewer)
@@ -2932,8 +2992,10 @@ def main():
     frame = 0
     mesh_generation = 0
     RUNTIME.mkdir(parents=True, exist_ok=True)
+    watchdog = LoopWatchdog()
 
     while viewer.is_running():
+        watchdog.beat()
         batches, missing = bridge.take_batches()
         now = time.perf_counter()
         wall_now = time.time()
@@ -3118,7 +3180,8 @@ def main():
                         hud.loading = None
             last_upload_ms = (time.perf_counter() - t0) * 1e3
         t_tools = time.perf_counter()
-        pause_menu.sync(viewer, _read_drill_state())
+        if not args.desktop_hud:  # with the study text here, the study pause menu replaces the card
+            pause_menu.sync(viewer, _read_drill_state())
         if bridge.drill is not None:
             _log_instrument(viewer, bridge)
         _log_suction(viewer)
@@ -3146,6 +3209,7 @@ def main():
                 hud.loading = None
             _show_window(viewer)
             print("RTX bone ready", flush=True)
+            watchdog.arm()
         _bind_window_input(viewer, bridge)
         frame += 1
         stamp = time.perf_counter()
@@ -3204,6 +3268,7 @@ def main():
                 "irrigation_geometry_ms": float(getattr(viewer, "_irrig_geometry_ms", 0.0)),
                 "stream": None if stream is None else stream.snapshot(),
                 "sph": _sph_snapshot(viewer),
+                "headset_eyes_ms": dict(getattr(getattr(viewer, "_eyes", None), "timing", {}) or {}),
                 "debris": viewer._bone_debris.snapshot(),
                 "stages_ms": {name: float(np.mean(values)) for name, values in stage_ms.items() if values},
                 "stages_note": (
@@ -3244,6 +3309,9 @@ def main():
         if frame == 1:
             print(f"ViewerRTX first frame {(time.perf_counter() - started) * 1e3:.0f} ms", flush=True)
 
+    watchdog.stop()
+    # The launcher's status reads this line: the window was closed, not frozen.
+    print("RTX window closed; the RTX view is exiting", flush=True)
     bridge.close()
     viewer.close()
 

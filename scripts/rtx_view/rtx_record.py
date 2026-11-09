@@ -203,9 +203,11 @@ def install(viewer, bridge, rate_hz: float = RATE_HZ):
         try:
             from ovrtx import Device
 
-            product = products.get(viewer._render_product_path)
-            if product is None:
+            # ovrtx's result set is dict-like but has no .get().
+            path = viewer._render_product_path
+            if path not in products:
                 return
+            product = products[path]
             rgba = None
             for frame in product.frames:
                 for var in frame.render_vars.values():
