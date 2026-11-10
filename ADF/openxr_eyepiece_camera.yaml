@@ -1,6 +1,6 @@
 # OpenXR eyepiece camera for Meta Quest via WiVRn (head-locked stereo of main_camera).
 # Requires: WiVRn running + Quest connected, and
-#   ~/ros_ambf_ws/src/ambf_openxr_eyepiece/build/libambf_openxr_eyepiece.so
+#   plugin/ambf_openxr_eyepiece/build/libambf_openxr_eyepiece.so (bash scripts/build_openxr_eyepiece.sh)
 # See docs/QUEST_OPENXR_EYEPIECE.md
 bodies: []
 joints: []
@@ -26,7 +26,7 @@ openxr_eyepiece:
   plugins: [
     {
       name: openxr_eyepiece_plugin,
-      path: ../../ambf_openxr_eyepiece/build/,
+      path: ../plugin/ambf_openxr_eyepiece/build/,
       filename: libambf_openxr_eyepiece.so
     }
   ]

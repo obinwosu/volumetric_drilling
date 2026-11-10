@@ -148,7 +148,7 @@ The path-traced RTX view can replace AMBF's own rendering in the headset.
 
 **Not shown in RTX mode:** the AMBF HUD and pause menu are drawn by AMBF, so they don't appear while the headset shows the RTX eyes.
 
-**Rebuilding the plugin:** `bash scripts/build_openxr_eyepiece.sh`. A copy of the plugin source from before this change is in `~/plugin_backups/ambf_openxr_eyepiece_2026-11-02`, because that folder has no git.
+**Rebuilding the plugin:** `bash scripts/build_openxr_eyepiece.sh`. The plugin source is in this repo at `plugin/ambf_openxr_eyepiece/` (it was a separate folder without git before 2026-11-10). The script builds it there and links the old `~/ros_ambf_ws/src/ambf_openxr_eyepiece` path to it for older branches.
 
 **Sheared picture with sawtooth lines from the first drill contact (fixed).** CHAI's partial voxel-texture updates leave OpenGL's unpack row length and skips set, and the plugin used to upload the RTX eyes with them. The plugin now uploads with packed rows and restores AMBF's settings.
 

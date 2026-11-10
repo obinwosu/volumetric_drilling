@@ -26,10 +26,12 @@ CLIP_MM = {1: 134.0, 2: 124.0, 4: 74.0, 6: 44.0}
 
 ROOT = Path(__file__).resolve().parents[2]
 MESH_DIR = ROOT / "ADF" / "meshes" / "high_res"
+# Supplied cannulas, before install_meshes() lifts them off the shaft into MESH_DIR.
+SOURCE_DIR = ROOT / "ADF" / "meshes" / "cannula_sources"
 _SOURCE = {
-    1: Path("/home/obihome/Downloads/long_irrigation_cannulas_1mm_2mm/irrigation_cannula_1mm_corrected.obj"),
-    2: Path("/home/obihome/Downloads/long_irrigation_cannulas_1mm_2mm/irrigation_cannula_2mm_corrected.obj"),
-    6: Path("/home/obihome/Downloads/irrigation_cannulas/irrigation_cannula_6mm_short.obj"),
+    1: SOURCE_DIR / "irrigation_cannula_1mm_corrected.obj",
+    2: SOURCE_DIR / "irrigation_cannula_2mm_corrected.obj",
+    6: SOURCE_DIR / "irrigation_cannula_6mm_short.obj",
 }
 
 

@@ -1616,7 +1616,7 @@ void afVolmetricDrillingPlugin::updateButtons(){
     }
     if (m_openxrEyepieceCamera){
         linkClutch(m_openxrSetCamClutch, "ambf_openxr_set_cam_clutch", "libambf_openxr_eyepiece.so",
-                   home + "/ros_ambf_ws/src/ambf_openxr_eyepiece/build/libambf_openxr_eyepiece.so");
+                   home + "/ros_ambf_ws/src/volumetric_drilling/plugin/ambf_openxr_eyepiece/build/libambf_openxr_eyepiece.so");
         if (m_openxrSetCamClutch){
             m_openxrSetCamClutch(m_drillManager.m_camClutch ? 1 : 0);
         }
@@ -1629,7 +1629,7 @@ void afVolmetricDrillingPlugin::ensureOpenxrPlacementFns(){
         return;
     }
     const string home = getenv("HOME") ? getenv("HOME") : "";
-    const string absSo = home + "/ros_ambf_ws/src/ambf_openxr_eyepiece/build/libambf_openxr_eyepiece.so";
+    const string absSo = home + "/ros_ambf_ws/src/volumetric_drilling/plugin/ambf_openxr_eyepiece/build/libambf_openxr_eyepiece.so";
     auto resolve = [&](const char* symbol) -> void* {
         void* sym = dlsym(RTLD_DEFAULT, symbol);
         if (sym){
