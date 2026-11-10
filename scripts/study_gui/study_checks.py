@@ -174,7 +174,8 @@ def _device_checks(checks, usb, footpedal_path, sim_running):
 
     venv = REPO / "middle_ear_newton" / ".venv" / "bin" / "python"
     checks.append(Check("RTX renderer", OK if venv.is_file() else FAIL,
-                        "installed" if venv.is_file() else f"missing {venv}"))
+                        "installed" if venv.is_file() else
+                        "missing; run: bash scripts/setup_rtx_env.sh"))
     edt = edt_problem()
     checks.append(Check("Feedback distance maps (EDT)", FAIL if edt else OK, edt or "in place",
                         required=False))

@@ -45,6 +45,14 @@ colcon build
 
 After a successful build, remember to source the ROS workspace. Here is an [example](https://github.com/WPI-AIM/ambf/wiki/Installing-AMBF#step-4-optional-but-recommended)
  from AMBF on how to source the ROS workspace
+
+### 2.3 RTX view and headset (FIVRS study rig)
+The RTX microscope view runs in its own Python environment, `middle_ear_newton/.venv`, which is not in git. Build it once (about 5 GB from PyPI, pinned in `scripts/rtx_view/requirements.txt`; needs an RTX GPU, and `sudo apt install python3.12-venv` or `python3-pip`):
+``` bash
+bash scripts/setup_rtx_env.sh
+```
+The first RTX launch on a new machine compiles shaders and kernels for a few minutes. For the Quest headset, build the eyepiece plugin with `bash scripts/build_openxr_eyepiece.sh` (see `docs/QUEST_OPENXR_EYEPIECE.md`).
+
 ## 3 Running FIVRS with an intuitive GUI
 Navigate to the scripts folder
 

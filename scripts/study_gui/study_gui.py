@@ -832,7 +832,8 @@ class Ui(QtWidgets.QWidget):
         script = pathlib.Path(repo_root) / "scripts" / "rtx_view" / "fivrs_rtx_view.py"
         if not venv_python.is_file() or not script.is_file():
             self.print_info(
-                "ERROR! RTX bone view needs middle_ear_newton/.venv and scripts/rtx_view/fivrs_rtx_view.py"
+                "ERROR! RTX bone view needs middle_ear_newton/.venv (run: bash scripts/setup_rtx_env.sh) "
+                "and scripts/rtx_view/fivrs_rtx_view.py"
             )
             return
         if self._rtx_process.state() != QProcess.NotRunning:
