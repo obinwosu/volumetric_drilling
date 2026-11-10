@@ -25,7 +25,7 @@ log "Checking NVIDIA driver"
 if ! command -v nvidia-smi >/dev/null 2>&1; then
   die "nvidia-smi not found. Install Ubuntu 24.04 proprietary NVIDIA drivers for the RTX 5090, reboot, then re-run."
 fi
-nvidia-smi | head -n 15
+nvidia-smi | head -n 15 || true
 
 need_sudo
 
@@ -94,7 +94,7 @@ set -e
 
 log "colcon build (Release)"
 cd "${WS_ROOT}"
-colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
+colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release -DPython3_EXECUTABLE=/usr/bin/python3 -DPYTHON_EXECUTABLE=/usr/bin/python3
 
 set +u
 # shellcheck disable=SC1091
