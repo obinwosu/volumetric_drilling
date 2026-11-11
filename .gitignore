@@ -61,5 +61,6 @@ cmake-build-*/
 CMakeFiles/
 scripts/fluid/_build/
 
-# Regenerable canal skin sheets (scripts/soft_tissue/canal_skin.py)
+# Soft tissue work lives on feature/soft-tissue, not this branch
+scripts/soft_tissue/
 resources/soft_tissue/
