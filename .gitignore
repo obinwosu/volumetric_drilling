@@ -63,3 +63,6 @@ scripts/fluid/_build/
 
 # Regenerable canal skin sheets (scripts/soft_tissue/canal_skin.py)
 resources/soft_tissue/
+
+# Compiled fast soft-tissue solver (scripts/soft_tissue/fast_solver.py builds it)
+scripts/soft_tissue/fast/_build/

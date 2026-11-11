@@ -9,7 +9,15 @@ Units: mm, N, MPa (N/mm^2). Energy in N*mm. Adhesion energy in N/mm
 Energy terms
   membrane  St Venant-Kirchhoff on each triangle, plane stress, times thickness
   bending   discrete hinge on each interior edge, scaled so a cylinder of
-            curvature k stores D/2 k^2 per area, D = E h^3 / (12 (1 - nu^2))
+            curvature k stores D/2 k^2 per area, D = E h^3 / (12 (1 - nu^2)).
+            A curved rest shape (``curved=True``: a shell, e.g. cartilage) bends
+            from its rest angle, k (theta - theta0)^2, and stretches from its rest
+            triangles in their own planes.
+            ``bending="shell"`` replaces the hinges by a shell with the plate's
+            Poisson ratio (cartilage): each triangle's shape operator from its three
+            edges' bend angles (Grinspun et al. 2006), S = sum_i c_i dtheta_i t_i t_i^T,
+            energy area D/2 ((1 - nu) tr(S^2) + nu tr(S)^2). Hinges alone charge only
+            the mean curvature, so a strip curls into a saddle almost for free.
   bonds     one per bonded vertex, to its rest point on the surface. Bilinear
             traction-separation: stiff rise to Tmax at delta0, softening to zero
             at delta_c. The area under it is the adhesion energy G. Damage is
@@ -26,6 +34,10 @@ from dataclasses import dataclass, field
 import numpy as np
 
 
+SHELL_C = 1.0  # shell scale on a curved mesh with no flat layout (set from the flat calibration below)
+BEND_C = 0.513  # hinge stiffness / (D * |e|^2 / (A1 + A2)) that bends a regular mesh like a plate (flat calibration)
+
+
 @dataclass
 class SkinParams:
     E_mpa: float = 1.0  # skin modulus, placeholder
@@ -36,7 +48,8 @@ class SkinParams:
     delta_c_mm: float = 0.4  # separation at full release
     contact_n_per_mm3: float = 200.0
     # Collagen recruitment (J-shaped curve): extra stress k1 E exp(k2 E^2) along
-    # each rest axis in tension. Off when k1 = 0.
+    # each rest axis in tension. Off when k1 = 0. Past k2 E^2 = COLLAGEN_CAP (far
+    # beyond rupture) the curve continues as a smooth quadratic (see ``collagen``).
     k1_mpa: float = 0.0
     k2: float = 0.0
 
@@ -60,16 +73,32 @@ class Sheet:
     bonded: np.ndarray  # (b,) vertex ids with a bond
     params: SkinParams
     floor_z: float = 0.0  # contact plane height for this sheet's mid-surface
+    curved: bool = False  # the rest shape is a curved shell (not a flat sheet on z = 0)
+    calib_rest: np.ndarray | None = None  # with ``curved``: the same mesh laid flat, to calibrate bending (else BEND_C)
+    bending: str = "hinge"  # "hinge" (skin) or "shell" (plate with its Poisson ratio: cartilage)
     dm_inv: np.ndarray = field(init=False)
     area: np.ndarray = field(init=False)
     vert_area: np.ndarray = field(init=False)
     hinges: np.ndarray = field(init=False)  # (h, 4): opposite a, opposite b, edge v3, edge v4
     hinge_k: np.ndarray = field(init=False)
+    hinge_rest: np.ndarray = field(init=False)  # rest bend angle per hinge (0 for a flat sheet)
+    shell_K: np.ndarray | None = field(init=False, default=None)  # (T, 3, 3) shell bending, with bending="shell"
+    tri_hinge: np.ndarray | None = field(init=False, default=None)
+    shell_stencil: np.ndarray | None = field(init=False, default=None)
 
     def __post_init__(self):
         rest, tris = self.rest, self.tris
-        d1 = rest[tris[:, 1], :2] - rest[tris[:, 0], :2]
-        d2 = rest[tris[:, 2], :2] - rest[tris[:, 0], :2]
+        if self.curved:  # each rest triangle in its own plane: edges in a local 2D frame (always positive)
+            e1_ = rest[tris[:, 1]] - rest[tris[:, 0]]
+            e2_ = rest[tris[:, 2]] - rest[tris[:, 0]]
+            ax = e1_ / np.linalg.norm(e1_, axis=1, keepdims=True)
+            nrm = np.cross(e1_, e2_)
+            ay = np.cross(nrm / np.linalg.norm(nrm, axis=1, keepdims=True), ax)
+            d1 = np.stack([np.einsum("ij,ij->i", e1_, ax), np.einsum("ij,ij->i", e1_, ay)], axis=1)
+            d2 = np.stack([np.einsum("ij,ij->i", e2_, ax), np.einsum("ij,ij->i", e2_, ay)], axis=1)
+        else:
+            d1 = rest[tris[:, 1], :2] - rest[tris[:, 0], :2]
+            d2 = rest[tris[:, 2], :2] - rest[tris[:, 0], :2]
         dm = np.stack([d1, d2], axis=2)  # (m, 2, 2), columns are edges
         det = np.linalg.det(dm)
         flip = det < 0
@@ -84,10 +113,22 @@ class Sheet:
         for corner in range(3):
             np.add.at(self.vert_area, tris[:, corner], self.area / 3.0)
         self.hinges = _hinges(tris)
+        self.hinge_rest = _dihedral(rest, self.hinges)[0] if (self.curved and len(self.hinges)) else np.zeros(len(self.hinges))
         self.hinge_k = np.zeros(len(self.hinges))
         self.hinge_k = self._calibrated_hinge_k()
+        if self.bending == "shell":
+            self._setup_shell()
+            # a shell element couples its triangle with the vertices across its three edges
+            st = np.concatenate([self.tris, self.tris], axis=1).copy()  # (T, 6); a missing one repeats a corner
+            for i in range(3):
+                hk = self.tri_hinge[:, i]
+                ok = hk >= 0
+                a_, b_ = self.hinges[hk[ok], 0], self.hinges[hk[ok], 1]
+                a_in = (a_[:, None] == self.tris[ok]).any(axis=1)
+                st[ok, 3 + i] = np.where(a_in, b_, a_)
+            self.shell_stencil = st
         self.history = np.zeros(len(self.bonded))  # largest separation reached per bond
-        self.color_groups = _colors(len(rest), [self.tris, self.hinges])
+        self.color_groups = _colors(len(rest), [self.tris, self.hinges] + ([self.shell_stencil] if self.bending == "shell" else []))
 
     # -- bending calibration -------------------------------------------------
     def _hinge_weight(self):
@@ -97,9 +138,16 @@ class Sheet:
         return e**2 / tri_area
 
     def _calibrated_hinge_k(self):
-        """Scale hinges so a cylinder about y stores D/2 k^2 per area."""
+        """Scale hinges so a cylinder about y stores D/2 k^2 per area. A curved shell is
+        calibrated on its flat layout (``calib_rest``) when given, else with ``BEND_C``."""
         if len(self.hinges) == 0:
             return np.zeros(0)
+        if self.curved:
+            if self.calib_rest is not None:
+                flat = Sheet(np.asarray(self.calib_rest, float), self.tris, np.zeros(0, np.int64), self.params)
+                c = flat.hinge_k / np.maximum(self.params.bending_D * flat._hinge_weight(), 1e-300)
+                return self.params.bending_D * float(np.median(c)) * self._hinge_weight()
+            return self.params.bending_D * BEND_C * self._hinge_weight()
         radius = 50.0 * max(np.ptp(self.rest[:, 0]), 1.0)
         rolled = roll_about_y(self.rest, radius)
         theta = _dihedral(rolled, self.hinges)[0]
@@ -109,6 +157,75 @@ class Sheet:
             return np.zeros(len(self.hinges))
         target = 0.5 * (1.0 / radius) ** 2 * float(self.area.sum())
         return self.params.bending_D * (target / discrete) * weight
+
+    # -- shell bending (plate with Poisson ratio) ------------------------------
+    def _setup_shell(self):
+        """Per triangle: its three edges' hinges (-1 on the boundary) and the constant 3x3
+        matrix K with energy dtheta^T K dtheta (see the module doc)."""
+        rest, tris, h = self.rest, self.tris, self.hinges
+        edge_h = {}
+        for k, (_a, _b, u, v) in enumerate(h):
+            edge_h[(min(u, v), max(u, v))] = k
+        th = -np.ones((len(tris), 3), np.int64)
+        for t, (a, b, c) in enumerate(tris):
+            for i, (u, v) in enumerate(((b, c), (c, a), (a, b))):  # edge opposite corner i
+                th[t, i] = edge_h.get((min(u, v), max(u, v)), -1)
+        self.tri_hinge = th
+        # each hinge's angle measured against the mesh's own normal: +1 when the triangle holding
+        # the hinge's first opposite vertex runs (opp, v3, v4) in its winding, else -1
+        sign = np.ones(len(h))
+        tri_of = {}
+        for t, tri in enumerate(tris):
+            tri_of[frozenset(int(q) for q in tri)] = t
+        for k, (a, _b, u, v) in enumerate(h):
+            tri = tris[tri_of[frozenset((int(a), int(u), int(v)))]]
+            i = int(np.nonzero(tri == a)[0][0])
+            sign[k] = 1.0 if (tri[(i + 1) % 3] == u and tri[(i + 2) % 3] == v) else -1.0
+        self.hinge_sign = sign
+        # rest geometry: edge lengths, in-plane edge normals t_i
+        P = [rest[tris[:, k]] for k in range(3)]
+        n = np.cross(P[1] - P[0], P[2] - P[0])
+        area = 0.5 * np.linalg.norm(n, axis=1)
+        nh = n / np.maximum(2 * area, 1e-300)[:, None]
+        tv, ln = [], []
+        for i in range(3):
+            e = P[(i + 2) % 3] - P[(i + 1) % 3]
+            ln.append(np.linalg.norm(e, axis=1))
+            t = np.cross(e, nh)
+            tv.append(t / np.maximum(np.linalg.norm(t, axis=1), 1e-300)[:, None])
+        cvec = np.stack([ln[i] / (2.0 * area) for i in range(3)], axis=1)  # (T, 3)
+        dots = np.stack([np.stack([np.einsum("ij,ij->i", tv[i], tv[j]) for j in range(3)], axis=1) for i in range(3)], axis=1)
+        nu = self.params.nu
+        G = (1.0 - nu) * dots**2 + nu  # (T, 3, 3)
+        K = 0.5 * self.params.bending_D * area[:, None, None] * cvec[:, :, None] * cvec[:, None, :] * G
+        K[th < 0, :] = 0.0
+        K[np.repeat((th < 0)[:, None, :], 3, axis=1)] = 0.0
+        self.shell_K = K
+        self.shell_K = K * self._shell_scale()
+
+    def _shell_scale(self):
+        """Scale so a cylinder stores D/2 k^2 per area (as the hinges are calibrated)."""
+        if not len(self.hinges):
+            return 1.0
+        if self.curved:
+            if self.calib_rest is None:
+                return SHELL_C
+            flat = Sheet(np.asarray(self.calib_rest, float), self.tris, np.zeros(0, np.int64), self.params, bending="shell")
+            return flat._shell_scale_flat()
+        return self._shell_scale_flat()
+
+    def _shell_scale_flat(self):
+        radius = 50.0 * max(np.ptp(self.rest[:, 0]), 1.0)
+        rolled = roll_about_y(self.rest, radius)
+        theta = _dihedral(rolled, self.hinges)[0]
+        e = self._shell_energy_of(theta)
+        if e <= 0.0:
+            return 1.0
+        return 0.5 * (1.0 / radius) ** 2 * float(self.area.sum()) * self.params.bending_D / e * (1.0 if self.shell_K is None else 1.0)
+
+    def _shell_energy_of(self, theta):
+        d = np.where(self.tri_hinge >= 0, (self.hinge_sign * _wrap(theta - self.hinge_rest))[np.maximum(self.tri_hinge, 0)], 0.0)
+        return float(np.einsum("ti,tij,tj->", d, self.shell_K, d))
 
     # -- energy ---------------------------------------------------------------
     def energy(self, x, parts=False):
@@ -138,17 +255,29 @@ class Sheet:
         if p.k1_mpa > 0.0 and p.k2 > 0.0:
             for a in range(2):
                 ea = np.maximum(Eg[:, a, a], 0.0)
-                grow = np.exp(p.k2 * ea**2)
-                energy = energy + vol * p.k1_mpa / (2.0 * p.k2) * (grow - 1.0)
-                S[:, a, a] += p.k1_mpa * ea * grow
+                w, dw, _d2w = collagen(ea, p.k1_mpa, p.k2)
+                energy = energy + vol * w
+                S[:, a, a] += dw
         H = vol[:, None, None] * (F @ S @ np.transpose(self.dm_inv, (0, 2, 1)))
         grad = _scatter(len(x), (t[:, 1], H[:, :, 0]), (t[:, 2], H[:, :, 1]), (t[:, 0], -H[:, :, 0] - H[:, :, 1]))
         return float(energy.sum()), grad
 
     def _bending(self, x):
         theta, u = _dihedral(x, self.hinges, with_grad=True)
-        energy = self.hinge_k * theta**2
-        coef = 2.0 * self.hinge_k * theta
+        dth = _wrap(theta - self.hinge_rest)
+        if self.bending == "shell":
+            valid = self.tri_hinge >= 0
+            sd = self.hinge_sign * dth
+            d = np.where(valid, sd[np.maximum(self.tri_hinge, 0)], 0.0)
+            kd = np.einsum("tij,tj->ti", self.shell_K, d)
+            energy = np.einsum("ti,ti->t", d, kd)
+            coef = np.zeros(len(self.hinges))
+            np.add.at(coef, self.tri_hinge[valid], 2.0 * kd[valid])
+            coef *= self.hinge_sign
+            grad = _scatter(len(x), *((self.hinges[:, slot], coef[:, None] * u[slot]) for slot in range(4)))
+            return float(energy.sum()), grad
+        energy = self.hinge_k * dth**2
+        coef = 2.0 * self.hinge_k * dth
         grad = _scatter(len(x), *((self.hinges[:, slot], coef[:, None] * u[slot]) for slot in range(4)))
         return float(energy.sum()), grad
 
@@ -326,6 +455,28 @@ class BondLaw:
         return self.T_max / self.delta0_mm
 
 
+COLLAGEN_CAP = 8.0  # k2 e^2 where the exponential hands over to a quadratic
+
+
+def collagen(e, k1, k2):
+    """Collagen energy density W(e) = k1/(2 k2) (exp(k2 e^2) - 1) for e >= 0, and W', W''.
+
+    Past e_c (k2 e_c^2 = COLLAGEN_CAP, about three times any rupture strain) W
+    continues as its second-order Taylor expansion at e_c, so a wildly
+    overstretched element (a fast hand, one solver frame) has a finite energy
+    the solver can recover from. Identical in fast/soft_fast.cpp.
+    """
+    e = np.maximum(np.asarray(e, dtype=np.float64), 0.0)
+    ec = np.sqrt(COLLAGEN_CAP / k2)
+    m = np.minimum(e, ec)
+    grow = np.exp(k2 * m * m)
+    w = k1 / (2.0 * k2) * (grow - 1.0)
+    dw = k1 * m * grow
+    d2w = k1 * grow * (1.0 + 2.0 * k2 * m * m)
+    d = e - m  # > 0 only past the cap
+    return w + dw * d + 0.5 * d2w * d * d, dw + d2w * d, np.where(e > 0, d2w, 0.0)
+
+
 def traction(delta, p: SkinParams):
     delta = np.asarray(delta, dtype=np.float64)
     rise = p.k_bond * delta
@@ -349,6 +500,11 @@ def roll_about_y(rest, radius):
     out[:, 0] = radius * np.sin(phi)
     out[:, 2] = radius * (1.0 - np.cos(phi))
     return out
+
+
+def _wrap(a):
+    """Angle into (-pi, pi]."""
+    return (a + np.pi) % (2.0 * np.pi) - np.pi
 
 
 def _hinges(tris):

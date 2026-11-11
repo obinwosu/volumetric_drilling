@@ -76,8 +76,9 @@ def split_vertices(rest, tris, verts, upper_side):
 class Plate:
     """A gripped sheet with an incision along y = 0 between x0 and x1."""
 
-    def __init__(self, params: pm.SkinParams, size_mm=16.0, edge_mm=0.25):
+    def __init__(self, params: pm.SkinParams, size_mm=16.0, edge_mm=0.25, solve=None):
         self.params = params
+        self.solve = solve or pm.solve  # any solver with pm.solve's signature (e.g. fast_solver.static_solve)
         self.size = size_mm
         self.edge = edge_mm
         self.base_rest, self.base_tris, _idx = plate_mesh(size_mm, edge_mm)
@@ -123,7 +124,7 @@ class Plate:
         fixed[self.top, 1] = fixed[self.bottom, 1] = True
         anchor = self.bottom[np.argmin(np.abs(self.rest[self.bottom, 0]))]
         fixed[anchor, 0] = True  # no sideways drift
-        x, result = pm.solve(self.sheet, x, fixed, gtol=1e-10)
+        x, result = self.solve(self.sheet, x, fixed, gtol=1e-10)
         e, g = self.sheet.energy(x)
         force = float(g[self.top, 1].sum())
         return x, force, float(e), result
@@ -143,8 +144,8 @@ def griffith_G(stress, a, E, W):
     return math.pi * stress**2 * a / E * width_factor(a, W)
 
 
-def run_incision(params, half_len=2.0, strain=0.02, size_mm=16.0, edge_mm=0.25):
-    plate = Plate(params, size_mm, edge_mm)
+def run_incision(params, half_len=2.0, strain=0.02, size_mm=16.0, edge_mm=0.25, solve=None):
+    plate = Plate(params, size_mm, edge_mm, solve)
     x_u, f_u, e_u, _ = plate.stretch(strain)
     stress = f_u / (size_mm * params.thickness_mm)
     x_c = plate.make_cut(-half_len, half_len, x_u)

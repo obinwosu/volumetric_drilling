@@ -63,6 +63,8 @@ def run_peel(
     step_mm=0.1,
     snapshot_every=20,
     verbose=True,
+    stop_margin_mm=2.0,
+    solve=None,
 ):
     rest, tris, idx = pm.strip_mesh(length_mm, width_mm, edge_mm)
     bonded = np.flatnonzero(rest[:, 0] >= tab_mm - 1e-9)
@@ -78,7 +80,7 @@ def run_peel(
     started = time.perf_counter()
     for step, lift in enumerate(lifts):
         x[grip, 2] = lift
-        x, result = pm.solve(sheet, x, fixed)
+        x, result = (solve or pm.solve)(sheet, x, fixed)
         _e, grad, parts = sheet.energy(x, parts=True)
         sheet.commit(x)
         force = float(grad[grip, 2].sum())
@@ -111,7 +113,7 @@ def run_peel(
                 f"{time.perf_counter() - started:5.1f} s",
                 flush=True,
             )
-        if front >= length_mm - 2.0:
+        if front >= length_mm - stop_margin_mm:
             break
     return rows, snapshots, sheet
 

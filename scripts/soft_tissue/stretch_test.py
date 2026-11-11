@@ -56,8 +56,7 @@ def exact_force(p: pm.SkinParams, stretch, width_mm):
     e = green(stretch)
     s = p.E_mpa * e
     if p.k1_mpa > 0 and p.k2 > 0:
-        ep = np.maximum(e, 0.0)
-        s = s + p.k1_mpa * ep * np.exp(p.k2 * ep**2)
+        s = s + pm.collagen(e, p.k1_mpa, p.k2)[1]
     return width_mm * p.thickness_mm * np.asarray(stretch) * s
 
 
@@ -65,8 +64,7 @@ def exact_energy_density(p: pm.SkinParams, stretch):
     e = green(stretch)
     w = 0.5 * p.E_mpa * e**2
     if p.k1_mpa > 0 and p.k2 > 0:
-        ep = np.maximum(e, 0.0)
-        w = w + p.k1_mpa / (2.0 * p.k2) * (np.exp(p.k2 * ep**2) - 1.0)
+        w = w + pm.collagen(e, p.k1_mpa, p.k2)[0]
     return w
 
 
@@ -89,8 +87,9 @@ def fibre_strain(sheet: pm.Sheet, x):
 
 
 class Strip:
-    def __init__(self, params, length_mm=10.0, width_mm=2.0, edge_mm=0.25, fail_strain=0.35, weak=0.99):
+    def __init__(self, params, length_mm=10.0, width_mm=2.0, edge_mm=0.25, fail_strain=0.35, weak=0.99, solve=None):
         self.params = params
+        self.solve_fn = solve or pm.solve  # any solver with pm.solve's signature
         self.length, self.width = length_mm, width_mm
         self.rest, self.all_tris, _idx = pm.strip_mesh(length_mm, width_mm, edge_mm)
         cent = self.rest[self.all_tris].mean(axis=1)
@@ -119,7 +118,7 @@ class Strip:
         fixed[self.left, 0] = fixed[self.right, 0] = True
         anchor = self.left[np.argmin(np.abs(self.rest[self.left, 1] - 0.5 * self.width))]
         fixed[anchor, 1] = True  # no sideways drift
-        x, _res = pm.solve(self.sheet, x, fixed, gtol=1e-9)
+        x, _res = self.solve_fn(self.sheet, x, fixed, gtol=1e-9)
         e, g = self.sheet.energy(x)
         return x, float(g[self.right, 0].sum()), float(e)
 
