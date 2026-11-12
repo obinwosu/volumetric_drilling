@@ -97,7 +97,9 @@ TUTORIAL = [
     Step("zoom", "Zooming in and out",
          ["To zoom in, press the button on the microscope AND press the left foot pedal. To zoom "
           "out, press the button on the microscope AND press the right foot pedal.",
-          "Zoom in, then zoom out."],
+          "Zoom in, then zoom out.",
+          "Keep the microscope button held while zooming: tapping the left pedal on its own "
+          "moves on to the next step."],
          [{"device": "scope", "marks": {"button": "Hold"}},
           {"device": "pedals", "marks": {"left": "Zoom in", "right": "Zoom out"}}]),
     Step("drill", "Activating the drill",
