@@ -260,9 +260,25 @@ class Progress:
 
 
 class StudySession:
+    """One timed trial, optionally after the tutorial.
+
+    The graphics study (scripts/study/graphics_study.py) runs one of these per
+    graphics arm: the first with the tutorial, the second starting at "ready".
+    tutorial      False: start at "ready" (the tutorial was done in an earlier arm)
+    rtx_reload    False: no RTX window, so the reset is done once AMBF restores the bone
+    text          optional headset wording: briefing_title, briefing_lines, ready_title,
+                  ready_lines, ready_advance, armed_lines
+    """
+
     def __init__(self, io, study_id: str, recording_dir: pathlib.Path, metadata: dict,
-                 trial_seconds: float = TRIAL_SECONDS):
+                 trial_seconds: float = TRIAL_SECONDS, tutorial: bool = True,
+                 rtx_reload: bool = True, text: dict | None = None):
         self.io = io
+        self.tutorial = bool(tutorial)
+        self.rtx_reload = bool(rtx_reload)
+        self.text = dict(text or {})
+        self.ended_by = None
+        self.incus_drilling_s = None
         self.study_id = study_id
         self.recording_dir = pathlib.Path(recording_dir)
         self.metadata = dict(metadata)
@@ -281,7 +297,12 @@ class StudySession:
         self.status = ""
         self.error = None
         self.io.set_drill_lock(False)
-        self._log("tutorial_started")
+        if self.tutorial:
+            self._log("tutorial_started")
+        else:
+            self.phase = "ready"
+            self.step = len(TUTORIAL) - 1
+            self._log("ready_without_tutorial")
 
     # ---- proctor actions ----
     def skip_step(self):
@@ -320,7 +341,16 @@ class StudySession:
     def end_early(self):
         """Proctor: stop the trial now (for example, a hardware fault)."""
         if self.phase in ("armed", "running"):
+            self.ended_by = "proctor"
             self._log("trial_ended_by_proctor")
+            self._finish()
+
+    def incus_identified(self):
+        """Proctor: the participant has identified the incus short process. Ends the trial."""
+        if self.phase == "running":
+            self.ended_by = "incus_identified"
+            self.incus_drilling_s = self.drilling_elapsed
+            self._log("incus_identified", drilling_s=round(self.drilling_elapsed, 3))
             self._finish()
 
     # ---- main loop ----
@@ -463,10 +493,12 @@ class StudySession:
             return
         if not self._reload_sent:
             if self.io.restore_done():
-                self.io.request_reload()
+                if self.rtx_reload:
+                    self.io.request_reload()
                 self._reload_sent = True
             return
-        if self._recorder_started is None and self.io.restore_reload_wall() >= self._reset_started:
+        reloaded = (not self.rtx_reload) or self.io.restore_reload_wall() >= self._reset_started
+        if self._recorder_started is None and reloaded:
             self._log("bone_reset")
             self.io.start_recorder(self.recording_dir)
             self._recorder_started = now
@@ -498,6 +530,7 @@ class StudySession:
         else:
             self.drilling_elapsed += dt
         if self.drilling_elapsed >= self.trial_seconds:
+            self.ended_by = "time_up"
             self._log("time_up")
             self._finish()
 
@@ -536,24 +569,29 @@ class StudySession:
                 panel["look"] = {"target": p.look_target, "radius": LOOK_RADIUS}
             return {"panel": panel, "timer": None, "banner": None}
         if self.phase == "ready":
-            lines = ["You have completed the tutorial. You may keep practicing."]
+            lines = list(self.text.get("ready_lines") or
+                         ["You have completed the tutorial. You may keep practicing."])
             if self.error:
                 lines = [self.error, "Please tell the proctor."]
-            return {"panel": {"title": "Tutorial complete", "lines": lines, "done": True,
-                              "advance": None if self.error else "Press the left foot pedal to begin your study session"},
+            advance = self.text.get("ready_advance") or "Press the left foot pedal to begin your study session"
+            return {"panel": {"title": self.text.get("ready_title") or "Tutorial complete", "lines": lines,
+                              "done": True, "advance": None if self.error else advance},
                     "timer": None, "banner": None}
         if self.phase == "briefing":
             footer = BRIEFING_FOOTER
             if self._briefing_ack and not self._reset_ready:
                 footer = "Thank you. Preparing the bone..."
-            return {"panel": {"title": BRIEFING_TITLE, "lines": BRIEFING_LINES, "footer": footer, "cover": True},
+            return {"panel": {"title": self.text.get("briefing_title") or BRIEFING_TITLE,
+                              "lines": list(self.text.get("briefing_lines") or BRIEFING_LINES),
+                              "footer": footer, "cover": True},
                     "timer": None, "banner": None}
         timer = {"remaining_s": self.remaining(), "running": False, "written_wall": now}
         if self.phase == "armed":
             return {
                 "panel": {"title": "Timed trial",
-                          "lines": ["Begin drilling when ready.",
-                                    "The 10-minute timer starts when the drill first removes bone."]},
+                          "lines": list(self.text.get("armed_lines") or
+                                        ["Begin drilling when ready.",
+                                         "The 10-minute timer starts when the drill first removes bone."])},
                 "timer": timer, "banner": None,
             }
         if self.phase == "running":
@@ -576,7 +614,11 @@ class StudySession:
                 "first_bone_contact_wall": self.first_contact_wall,
                 "finished_wall": self.finished_wall,
                 "ended_early": self.drilling_elapsed < self.trial_seconds - 1e-6,
+                "ended_by": self.ended_by,
+                "incus_identified_drilling_s": (None if self.incus_drilling_s is None
+                                                else round(self.incus_drilling_s, 3)),
             },
+            "tutorial_run": self.tutorial,
             "tutorial_steps_done": sorted(k for k, v in self.progress.done.items() if v),
             "events": self.events,
         })

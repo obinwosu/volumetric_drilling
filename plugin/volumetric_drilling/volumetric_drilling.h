@@ -251,6 +251,8 @@ private:
     double m_spotFocus = 2.0;
     // Room gray in 5% steps. 3 = 15%, the surreal simulator room (0.14–0.15).
     int m_roomGrayStep = 3;
+    /// FIVRS_LOOK=upstream (graphics study): AMBF's look before the FIVRS changes.
+    bool m_upstreamLook = false;
     std::vector<cBackground*> m_roomBackdrops;
 
     cLabel* m_volumeSmoothingLabel;

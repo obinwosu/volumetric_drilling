@@ -94,6 +94,7 @@ protected:
         bool abandoned = false; // close() ran first: the thread destroys the instance
         XrInstance instance = XR_NULL_HANDLE;
         XrSystemId system = XR_NULL_SYSTEM_ID;
+        bool handTracking = false;  // XR_EXT_hand_tracking was enabled
     };
     std::shared_ptr<XrConnect> m_connect;
     double m_connectStartSec = 0.0;
@@ -144,7 +145,8 @@ protected:
     // black until the first RTX frame, then the latest RTX frame even if one is late.
     bool rtxPoll();
     void rtxUnmap();
-    bool rtxSubmitEye(int eyeIndex);
+    /// Copy an eyepiece image into the headset. source 0 = the RTX eye texture.
+    bool rtxSubmitEye(int eyeIndex, GLuint source = 0);
     void rtxEyepieceFov(int eyeIndex, XrFovf& fov) const;
     bool m_rtxAllowed = true;
     bool m_rtxOnly = false;
@@ -171,6 +173,53 @@ protected:
     double m_rtxEyepieceDeg = 65.0;
     /// Distance (m) at which the two eyepiece images fuse.
     double m_rtxFuseM = 1.5;
+
+    // ---- CHAI3D microscope eyes (graphics study) -----------------------------
+    // AMBF_OPENXR_CHAI_EYES=1: AMBF renders the microscope the way the RTX window
+    // does (two eyes a stereo base apart, toed in to the bone, main_camera's field
+    // of view, same image size) and the eyes go through the same eyepiece as the
+    // RTX ones, so only the renderer differs. The study text comes from
+    // /dev/shm/fivrs_hud_overlay (scripts/rtx_view/hud_overlay.py), drawn on top.
+    bool chaiRenderEyes();
+    bool hudPoll();
+    void hudUnmap();
+    void hudDraw(int32_t width, int32_t height);
+    bool m_chaiEyes = false;
+    cFrameBufferPtr m_chaiFbo[2];
+    uint32_t m_chaiW = 1152;
+    uint32_t m_chaiH = 864;
+    double m_chaiBaseUnits = 23.0 * 0.01007;  // rtx_eyes.BASE_MM * MM_TO_SIM
+    cWorld* m_chaiFront = nullptr;            // empty: AMBF's own panels are not shown
+    bool m_chaiAnnounced = false;
+    int m_hudFd = -1;
+    void* m_hudMap = nullptr;
+    size_t m_hudMapSize = 0;
+    unsigned long m_hudInode = 0;
+    double m_hudLastStatSec = -1.0e9;
+    uint64_t m_hudSeq = 0;
+    bool m_hudVisible = false;
+    std::vector<uint8_t> m_hudPixels;
+    GLuint m_hudTex = 0;
+    uint32_t m_hudTexW = 0;
+    uint32_t m_hudTexH = 0;
+
+    // ---- Tracked hands for the RTX window -----------------------------------
+    // XR_EXT_hand_tracking joints (LOCAL space) and the head pose go to
+    // /dev/shm/fivrs_hands each headset frame; fivrs_rtx_view.py draws them.
+    // FIVRS_HANDS=0 turns this off.
+    void handsInit();
+    void handsUpdate(const XrSpaceLocation& hmdLoc);
+    void handsShutdown();
+    bool m_handsAllowed = true;
+    bool m_handExtension = false;
+    bool m_handsAnnounced = false;
+    XrHandTrackerEXT m_handTracker[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
+    PFN_xrDestroyHandTrackerEXT m_xrDestroyHandTracker = nullptr;
+    PFN_xrLocateHandJointsEXT m_xrLocateHandJoints = nullptr;
+    int m_handsFd = -1;
+    void* m_handsMap = nullptr;
+    uint64_t m_handsSeq = 0;
+    bool m_handActivePrev[2] = {false, false};
 };
 
 AF_REGISTER_OBJECT_PLUGIN(afOpenXREyepiece)

@@ -278,9 +278,25 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
 
 
 
+    // Graphics study: FIVRS_LOOK=upstream shows AMBF's look from before the FIVRS
+    // changes (no gray room backdrop, the original wide spotlight). The volume ADF
+    // picks the original volume shader. Geometry, haptics and controls are unchanged.
+    if (const char* look = std::getenv("FIVRS_LOOK")){
+        m_upstreamLook = std::string(look) == "upstream";
+    }
+    if (m_upstreamLook){
+        m_spotCutoffRad = 0.5;  // upstream world.yaml light1 cutoff angle
+        if (afLightPtr light = m_worldPtr->getLight("light1", true)){
+            // Upstream: 0.025 above the camera at a 0.3 working distance. Same angle at today's distance.
+            light->setLocalPos(cVector3d(0.0, 0.0, 0.025 / 0.3 * 7.54));
+            light->setCutOffAngle(m_spotCutoffRad);
+        }
+        cerr << "INFO! Graphics study: upstream AMBF look (no room backdrop, 0.5 rad spotlight)" << endl;
+    }
+
     // Dull gray room behind the microscope beam (same idea as the surreal sim).
     auto addRoomBackdrop = [this](afCameraPtr cam){
-        if (!cam){
+        if (!cam || m_upstreamLook){
             return;
         }
         cBackground* background = new cBackground();
@@ -2994,6 +3010,9 @@ void afVolmetricDrillingPlugin::mousePosUpdate(GLFWwindow *a_window, double x_po
 
 void afVolmetricDrillingPlugin::applyRoomGray()
 {
+    if (m_upstreamLook){
+        return;  // upstream AMBF had no room gray
+    }
     const float g = static_cast<float>(m_roomGrayStep) / 20.0f;
     const cColorf room(g, g, g);
     if (m_worldPtr && m_worldPtr->getChaiWorld()){
