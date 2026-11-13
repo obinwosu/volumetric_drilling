@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import sys
 import tempfile
@@ -67,7 +68,12 @@ def test_pause_menu_only_while_simulator_reports_paused():
         (tmp / "drill_state.json").write_text(json.dumps({"paused": False}))
         hud = headset_hud.HeadsetHud()
         assert hud.layers(W, H) == []  # stale file from a resumed session
-        (tmp / "drill_state.json").write_text(json.dumps({"paused": True}))
+        state = tmp / "drill_state.json"
+        state.write_text(json.dumps({"paused": True}))
+        # The HUD re-reads on an mtime change; two writes this close can share one
+        # coarse filesystem timestamp, so move it on explicitly.
+        stamp = state.stat().st_mtime_ns + 10_000_000
+        os.utime(state, ns=(stamp, stamp))
         hud._state_checked = 0.0
         layers = hud.layers(W, H)
         assert len(layers) == 1
