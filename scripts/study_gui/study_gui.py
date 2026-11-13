@@ -638,11 +638,13 @@ class Ui(QtWidgets.QWidget):
         self.combo_render_preset.blockSignals(False)
 
     def _launch_options(self):
-        """Options for this launch. Study mode always runs without irrigation or suction."""
+        """Options for this launch. Study mode always runs without irrigation or suction,
+        and at DLSS ultra performance for the headset frame rate."""
         options = dict(self.gui_configuration.sim_options)
         if self.study_mode:
             options["irrigation"] = False
             options["suction"] = False
+            options["dlss"] = "ultra_performance"
         return options
 
     def save_configuration(self):
