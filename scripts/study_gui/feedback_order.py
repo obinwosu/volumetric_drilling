@@ -1,6 +1,6 @@
 """Which feedback view a resident sees first, balanced over completed sessions.
 
-The two views (event-based and summary) are counterbalanced across residents who
+The two views (Video-Based Feedback, key "event-based"; Metric-Based Feedback, key "summary") are counterbalanced across residents who
 finish the feedback, not across Study IDs, so aborted or crashed sessions do not
 skew the groups. A session counts as completed when it is in
 feedback_order_log.csv (written when the resident presses "Return to the
