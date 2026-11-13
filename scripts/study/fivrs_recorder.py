@@ -144,6 +144,7 @@ class Recorder:
         self._lock = threading.Lock()
         self._latest = {}
         self._last_pose_stamp = {}
+        self._last_frame_stamp = None
         self._writes = queue.Queue()
         self._writer = threading.Thread(target=self._write_loop, name="fivrs-recorder-write", daemon=True)
         self._writer.start()
@@ -204,6 +205,11 @@ class Recorder:
             if drill is None:
                 # The analysis needs a drill pose on every frame.
                 return
+            # Frames rendered while paused carry the frozen sim time; the analysis
+            # rejects non-increasing frame times (also across chunks), so skip them.
+            if self._last_frame_stamp is not None and float(stamp) <= self._last_frame_stamp:
+                return
+            self._last_frame_stamp = float(stamp)
             self.frames.append(
                 {
                     "time": float(stamp),
