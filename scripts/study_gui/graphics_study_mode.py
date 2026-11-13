@@ -42,6 +42,7 @@ import study_checks  # noqa: E402
 import study_mode  # noqa: E402
 import study_rehearsal  # noqa: E402
 import study_session  # noqa: E402
+import proctor_pause  # noqa: E402
 
 NAME_FORMAT = re.compile(r"^[A-Za-z][A-Za-z' -]*_[A-Za-z][A-Za-z' -]*$")
 
@@ -631,6 +632,8 @@ class GraphicsStudyPanel(QtWidgets.QWidget):
         self.begin_button.clicked.connect(self.begin_trial)
         self.end_button = QtWidgets.QPushButton("End session early")
         self.end_button.clicked.connect(self.end_early)
+        self.pause_button = QtWidgets.QPushButton("Open pause menu")
+        self.pause_button.clicked.connect(lambda: proctor_pause.send("open"))
         self.next_button = QtWidgets.QPushButton("Start session 2")
         self.next_button.clicked.connect(self.start_next_arm)
         self.retry_button = QtWidgets.QPushButton("Restart this session")
@@ -642,6 +645,7 @@ class GraphicsStudyPanel(QtWidgets.QWidget):
                                 "Ends this session and records the time."),
             (self.skip_button, "Tutorial (session 1 only): move the participant past a stuck step."),
             (self.begin_button, "Normally the participant does this with the left pedal."),
+            (self.pause_button, "Pause the simulator; change burr, view or end trial from the pop-up."),
             (self.end_button, "Stop the session now (hardware fault, or the participant stops)."),
             (self.tlx_button, "Open the current questionnaire (NASA-TLX, background, comparison or "
                               "Post Sim Reflection) again if it was closed without saving."),
@@ -705,6 +709,7 @@ class GraphicsStudyPanel(QtWidgets.QWidget):
         self.skip_button.setEnabled(in_session and phase == "tutorial")
         self.begin_button.setEnabled(in_session and phase in ("tutorial", "ready", "briefing"))
         self.end_button.setEnabled(in_session and phase in ("armed", "running"))
+        self.pause_button.setEnabled(in_session and not self.rehearsing)
         self.tlx_button.setEnabled(self.stage in ("tlx", "background", "preferences", "reflection"))
         self.next_button.setEnabled(self.stage == "between")
         self.retry_button.setEnabled(self.stage == "session" and phase != "done" and not self.rehearsing

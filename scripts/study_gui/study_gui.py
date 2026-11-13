@@ -10,6 +10,7 @@ from user_profiles import UserProfileStore, DEFAULT_BURR_MM, VALID_BURR_SIZES
 import study_mode
 import graphics_study_mode
 import study_chooser
+import proctor_pause
 
 import datetime
 from enum import Enum
@@ -418,6 +419,9 @@ class Ui(QtWidgets.QWidget):
                 save=lambda key: self.gui_configuration.save_value(study_chooser.SETTING, key))
             tabs.addTab(self.study_chooser, "Study")
 
+        # Pops up while the participant's pause menu is open (proctor_pause.py).
+        self.proctor_pause = proctor_pause.ProctorPauseWindow(self)
+
         self.place_on_pc_monitor(0)
         self.show()
 
@@ -641,7 +645,7 @@ class Ui(QtWidgets.QWidget):
         """Options for this launch. Study mode always runs without irrigation or suction,
         with the fastest headset render that keeps the look (Nov 12 measurements, both
         eyes 1152x864: 21 fps before, about 50 after): DLSS ultra performance, no bloom,
-        4 bounces (2 flattens the shaft's reflections), exposure 1.3 to make up the
+        2 bounces, exposure 1.3 to make up the
         brightness bloom and the bounces gave, and the headset eyes read back while the
         next frame renders."""
         options = dict(self.gui_configuration.sim_options)
@@ -649,7 +653,7 @@ class Ui(QtWidgets.QWidget):
             options["irrigation"] = False
             options["suction"] = False
             options["dlss"] = "ultra_performance"
-            options["bounces"] = 4
+            options["bounces"] = 2
             options["bloom"] = False
             options["exposure"] = 1.3
             options["eye_pipeline"] = True

@@ -53,6 +53,14 @@ Menu rows: **Saved camera views** · **Burr type** (cutting / diamond) · **Burr
 · **End trial** (only during the timed trial) · **Resume**. *End trial* asks to confirm,
 with **No** highlighted, so a stray tap cannot end the trial.
 
+**Proctor pause window.** While the participant's pause menu is open, a
+**Participant pause menu** window pops up on the monitor. It shows what the participant
+sees in the headset, with buttons for **Burr type**, **Burr size**, **Saved camera
+views**, **End trial** (only during the timed trial; asks to confirm) and **Resume**.
+The headset menu follows your choice. You can use the buttons instead of talking the
+participant through the pedals. The window closes when the menu closes To pause the participant yourself,
+press **Open pause menu** on the study panel.
+
 ---
 
 ## 3. Resident study

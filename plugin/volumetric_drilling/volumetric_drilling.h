@@ -153,6 +153,12 @@ protected:
     // Pause menu text for the RTX headset view (/tmp/fivrs-rtx/pause_hud.txt); empty removes it.
     void writeRtxPauseHud(const string& text);
     string m_rtxPauseHudText;
+    // Proctor pause window (study GUI): the menu's options while it is open
+    // (/tmp/fivrs-rtx/pause_options.json) and one-shot commands back
+    // (/tmp/fivrs-rtx/proctor_menu.txt).
+    void writeProctorPauseOptions(const string& menuText);
+    string m_proctorPauseOptions;
+    void serviceProctorPauseCommand();
     string controlHelpText(bool paused) const;
     void cyclePauseViewHighlight(int delta);
     // Pause menu: views, then Burr type and Burr size, each opening a list.

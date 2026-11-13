@@ -343,6 +343,12 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
     m_originalCameraTransform = m_mainCamera->getLocalTransform();
     m_volumeLookAt = m_volumeObject->getLocalTransform().getLocalPos();
     m_cameraHomeUp = m_mainCamera->getUpVector();
+    {
+        // A proctor window from an earlier run must not see a menu, or act on an old command.
+        std::error_code staleError;
+        std::filesystem::remove("/tmp/fivrs-rtx/pause_options.json", staleError);
+        std::filesystem::remove("/tmp/fivrs-rtx/proctor_menu.txt", staleError);
+    }
     loadCanonicalViews();
     applyStartupView();
     if (m_mainCamera && m_mainCamera->getInternalCamera()){
@@ -1542,6 +1548,7 @@ void afVolmetricDrillingPlugin::updateButtons(){
                 }
                 cerr << "INFO! Study camera reset to the start-up view" << endl;
             }
+            serviceProctorPauseCommand();
         }
     }
 
@@ -2994,6 +3001,7 @@ void afVolmetricDrillingPlugin::refreshVrHudText()
                : "Resume               Select Resume\n")
             + "Close menu           Hold left pedal\n";
     writeRtxPauseHud(status + menuList + "\n" + hints);
+    writeProctorPauseOptions(menuList);
     m_vrHudLabel->setText(text);
     m_panelManager.setText(m_vrHudLabel, text);
 }
@@ -3124,6 +3132,133 @@ void afVolmetricDrillingPlugin::serviceRtxPauseMenu()
     }
 }
 
+void afVolmetricDrillingPlugin::writeProctorPauseOptions(const string& menuText)
+{
+    // Empty text removes the file: the menu is closed.
+    namespace fs = std::filesystem;
+    const fs::path dir = "/tmp/fivrs-rtx";
+    const fs::path path = dir / "pause_options.json";
+    std::error_code error;
+    if (menuText.empty()){
+        fs::remove(path, error);
+        m_proctorPauseOptions.clear();
+        return;
+    }
+    std::ostringstream json;
+    json << "{\"open\":true"
+         << ",\"trial_active\":" << (m_studyTrialActive ? "true" : "false")
+         << ",\"style\":\"" << (m_drillManager.m_burrStyle == BurrStyle::DIAMOND ? "diamond" : "cutting") << "\""
+         << ",\"sizes\":[";
+    vector<int> order = burrSizeOrder();
+    int sizeIndex = -1;
+    for (int k = 0; k < static_cast<int>(order.size()); k++){
+        json << (k ? "," : "") << "\"" << jsonEscape(m_drillManager.m_drills[order[k]]->m_name) << "\"";
+        if (order[k] == m_drillManager.m_activeDrillIdx){
+            sizeIndex = k;
+        }
+    }
+    json << "],\"size_index\":" << sizeIndex << ",\"views\":[";
+    vector<PauseViewEntry> views = buildPauseViewList();
+    for (int k = 0; k < static_cast<int>(views.size()); k++){
+        json << (k ? "," : "") << "{\"id\":\"" << jsonEscape(views[k].id) << "\",\"label\":\""
+             << jsonEscape(views[k].label) << "\",\"valid\":" << (views[k].valid ? "true" : "false") << "}";
+    }
+    // The menu text keeps its lines (jsonEscape turns newlines into spaces).
+    string menu;
+    for (char ch : menuText){
+        if (ch == '\n'){
+            menu += "\\n";
+        }
+        else{
+            menu += jsonEscape(string(1, ch));
+        }
+    }
+    json << "],\"menu\":\"" << menu << "\"}\n";
+    const string text = json.str();
+    if (text == m_proctorPauseOptions && fs::exists(path, error)){
+        return;
+    }
+    fs::create_directories(dir, error);
+    const fs::path partial = dir / "pause_options.json.part";
+    {
+        std::ofstream out(partial, std::ios::trunc);
+        if (!out){
+            return;
+        }
+        out << text;
+    }
+    fs::rename(partial, path, error);
+    m_proctorPauseOptions = text;
+}
+
+void afVolmetricDrillingPlugin::serviceProctorPauseCommand()
+{
+    // One command per file, removed once read: "open", "resume", "burr_type cutting|diamond",
+    // "burr_size <k, smallest first>", "view <id>", "end_trial".
+    namespace fs = std::filesystem;
+    const fs::path path = "/tmp/fivrs-rtx/proctor_menu.txt";
+    std::error_code error;
+    if (!fs::exists(path, error)){
+        return;
+    }
+    string verb, arg;
+    {
+        std::ifstream in(path);
+        in >> verb >> arg;
+    }
+    fs::remove(path, error);
+    if (verb == "open"){
+        if (!m_vrHudVisible){
+            setVrHudVisible(true);
+        }
+        return;
+    }
+    if (!m_vrHudVisible){
+        return;  // everything else acts on an open menu only
+    }
+    cerr << "INFO! Proctor pause window: " << verb << (arg.empty() ? "" : " " + arg) << endl;
+    // The headset menu goes back to its top list, so it matches what changed.
+    m_pauseSubmenu = PauseSubmenu::NONE;
+    m_pauseConfirmClose = false;
+    m_pauseConfirmEnd = false;
+    if (verb == "resume"){
+        setVrHudVisible(false);
+        return;
+    }
+    if (verb == "end_trial"){
+        if (m_studyTrialActive){
+            m_endTrialCount += 1;
+            cerr << "INFO! End trial selected by the proctor" << endl;
+            setVrHudVisible(false);
+        }
+        return;
+    }
+    if (verb == "burr_type" && (arg == "cutting" || arg == "diamond")){
+        m_drillManager.setBurrStyle(arg == "diamond" ? BurrStyle::DIAMOND : BurrStyle::CUTTING);
+        showNotice("Burr: " + m_drillManager.burrStyleName());
+    }
+    else if (verb == "burr_size" && !arg.empty() && arg.size() < 4
+             && std::all_of(arg.begin(), arg.end(), [](char ch){ return ch >= '0' && ch <= '9'; })){
+        vector<int> order = burrSizeOrder();
+        const int k = std::stoi(arg);
+        if (k < static_cast<int>(order.size())){
+            m_drillManager.setActiveDrillIndex(order[k]);
+            if (m_drillManager.m_activeDrill){
+                showNotice("Burr size: " + m_drillManager.m_activeDrill->m_name);
+            }
+        }
+    }
+    else if (verb == "view" && !arg.empty()){
+        for (const PauseViewEntry& e : buildPauseViewList()){
+            if (e.id == arg){
+                applyNamedView(e.id);
+                showNotice("View: " + e.label);
+            }
+        }
+    }
+    refreshVrHudText();
+}
+
 void afVolmetricDrillingPlugin::writeRtxPauseHud(const string& text)
 {
     namespace fs = std::filesystem;
@@ -3164,6 +3299,7 @@ void afVolmetricDrillingPlugin::setVrHudVisible(bool visible)
     applySimPause(visible);
     if (!visible){
         writeRtxPauseHud("");
+        writeProctorPauseOptions("");
     }
 
     ensurePauseMenuLabel();

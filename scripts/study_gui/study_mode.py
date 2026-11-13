@@ -30,6 +30,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 sys.path.insert(0, str(REPO / "scripts" / "study"))
 import study_session  # noqa: E402
+import proctor_pause  # noqa: E402
 import study_rehearsal  # noqa: E402
 import study_checks  # noqa: E402
 import feedback_order  # noqa: E402
@@ -248,6 +249,8 @@ class StudyPanel(QtWidgets.QWidget):
         self.begin_button.clicked.connect(self.begin_trial)
         self.end_button = QtWidgets.QPushButton("End trial early")
         self.end_button.clicked.connect(self.end_early)
+        self.pause_button = QtWidgets.QPushButton("Open pause menu")
+        self.pause_button.clicked.connect(lambda: proctor_pause.send("open"))
         self.recenter_button = QtWidgets.QPushButton("Recenter headset view")
         self.recenter_button.clicked.connect(lambda: self.session and self.session.recenter_headset())
         # Tilt of the headset view below the resident's look direction. Remembered by
@@ -270,6 +273,7 @@ class StudyPanel(QtWidgets.QWidget):
             (self.begin_button, "Normally the resident does this with the left pedal. Shows the study "
                                 "introduction while the bone resets and the recording starts; pressed "
                                 "during the introduction, starts the trial without waiting for their pedal."),
+            (self.pause_button, "Pause the simulator; change burr, view or end trial from the pop-up."),
             (self.end_button, "During the trial: stop it now (hardware fault, or the resident stops)."),
             (self.recenter_button, "Place the headset view again from where the resident's head is now "
                                    "(ahead and a little down)."),
@@ -326,6 +330,7 @@ class StudyPanel(QtWidgets.QWidget):
         self.skip_button.setEnabled(phase == "tutorial")
         self.begin_button.setEnabled(phase in ("tutorial", "ready", "briefing"))
         self.end_button.setEnabled(phase in ("armed", "running"))
+        self.pause_button.setEnabled(not idle and not self.rehearsing)
         self.recenter_button.setEnabled(not idle)
         if hasattr(self, "feedback_button"):
             self.feedback_button.setEnabled(
