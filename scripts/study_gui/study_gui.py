@@ -639,12 +639,20 @@ class Ui(QtWidgets.QWidget):
 
     def _launch_options(self):
         """Options for this launch. Study mode always runs without irrigation or suction,
-        and at DLSS ultra performance for the headset frame rate."""
+        with the fastest headset render that keeps the look (Nov 12 measurements, both
+        eyes 1152x864: 21 fps before, about 50 after): DLSS ultra performance, no bloom,
+        4 bounces (2 flattens the shaft's reflections), exposure 1.3 to make up the
+        brightness bloom and the bounces gave, and the headset eyes read back while the
+        next frame renders."""
         options = dict(self.gui_configuration.sim_options)
         if self.study_mode:
             options["irrigation"] = False
             options["suction"] = False
             options["dlss"] = "ultra_performance"
+            options["bounces"] = 4
+            options["bloom"] = False
+            options["exposure"] = 1.3
+            options["eye_pipeline"] = True
         return options
 
     def save_configuration(self):
@@ -924,6 +932,9 @@ class Ui(QtWidgets.QWidget):
             + f"export FIVRS_SPP={int(options['samples'])} && "
             + (f"export FIVRS_MAX_BOUNCES={int(options['bounces'])} && " if options["bounces"] else "")
             + f"export FIVRS_BONE_DUST={1 if options['bone_dust'] else 0} && "
+            + ("export FIVRS_BLOOM=0 && " if options.get("bloom") is False else "")
+            + (f"export FIVRS_EXPOSURE={float(options['exposure']):.2f} && " if options.get("exposure") else "")
+            + ("export FIVRS_EYE_PIPELINE=1 && " if options.get("eye_pipeline") else "")
             + f"exec \"{venv_python}\" \"{script}\" --anatomy-adf \"{self.active_volume_adf}\""
             + (" --headset" if headset else "")
             + (" --no-stream" if self.study_mode else "")

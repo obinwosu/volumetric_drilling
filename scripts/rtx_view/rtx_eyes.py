@@ -34,6 +34,10 @@ HEADER = 64
 # A surgical microscope's two optical paths are about 22-25 mm apart.
 BASE_MM = 23.0
 MM_TO_SIM = 0.01007
+# FIVRS_EYE_PIPELINE=1: read the eyes back on a CUDA stream while the next frame
+# renders, instead of blocking until the right eye finishes (21 -> 41 fps at the
+# Nov 12 study settings). The headset is one RTX frame behind the window.
+PIPELINE = os.environ.get("FIVRS_EYE_PIPELINE", "") == "1"
 
 
 def eye_matrices(position, right, up, forward, base_units: float, focus_units: float):
@@ -194,6 +198,11 @@ class Eyes:
         self.overlay = None
         # Mean ms per step over recent frames, for summary.json.
         self.timing = {}
+        # Pipelined readback (FIVRS_EYE_PIPELINE=1): two pinned host slots per eye.
+        self._stream = None
+        self._slots = [{}, {}]
+        self._slot = 0
+        self._pending = None
         original = viewer._add_camera_lights_and_render_product
 
         def author():
@@ -270,6 +279,9 @@ class Eyes:
         self.timing[name] = 0.9 * self.timing.get(name, ms) + 0.1 * ms
 
     def _share(self, products):
+        if PIPELINE:
+            self._share_pipelined(products)
+            return
         from ovrtx import Device
 
         t0 = time.perf_counter()
@@ -284,11 +296,68 @@ class Eyes:
         left = images.get(self.viewer._render_product_path)
         right = images.get(self.eye_product)
         if left is None or right is None:
-            if not self.failed:
-                print(f"Headset eyes: missing a render ({sorted(images)})", flush=True)
-                self.failed = True
+            self._missing(images)
             return
         self._time("readback", t0)
+        self._publish(left, right)
+
+    def _missing(self, images):
+        if not self.failed:
+            print(f"Headset eyes: missing a render ({sorted(images)})", flush=True)
+            self.failed = True
+
+    def _share_pipelined(self, products):
+        """Queue this frame's GPU-to-host copies and publish the previous frame's.
+
+        The copies wait for the render on a CUDA stream, so the CPU never blocks
+        on the right eye and the next render is submitted at once. The headset
+        shows each frame one RTX frame later than the window does.
+        """
+        import warp as wp
+        from ovrtx import Device
+
+        t0 = time.perf_counter()
+        if self._stream is None:
+            self._stream = wp.Stream(wp.get_cuda_device())
+            self._slots = [{}, {}]
+        pending = self._pending
+        self._pending = None
+        slot = self._slots[self._slot]
+        queued = []
+        for name, product in products.items():
+            for frame in product.frames:
+                for var in frame.render_vars.values():
+                    mapping = var.map(device=Device.CUDA, sync_stream=self._stream.cuda_stream)
+                    pixels = wp.from_dlpack(mapping, dtype=wp.vec4ub)
+                    host = slot.get(name)
+                    if host is None or host.shape != pixels.shape:
+                        host = wp.empty(pixels.shape, dtype=wp.vec4ub, device="cpu", pinned=True)
+                        slot[name] = host
+                    wp.copy(host, pixels, stream=self._stream)
+                    mapping.unmap(stream=self._stream.cuda_stream)
+                    queued.append(name)
+                    break
+                break
+        if queued:
+            self._pending = (self._slot, self._stream.record_event())
+            self._slot ^= 1
+        self._time("queue", t0)
+        if pending is None:
+            return
+        t0 = time.perf_counter()
+        index, event = pending
+        wp.synchronize_event(event)
+        self._time("readback", t0)
+        images = {name: host.numpy().view(np.uint8).reshape(host.shape[0], host.shape[1], 4)
+                  for name, host in self._slots[index].items()}
+        left = images.get(self.viewer._render_product_path)
+        right = images.get(self.eye_product)
+        if left is None or right is None:
+            self._missing(images)
+            return
+        self._publish(left, right)
+
+    def _publish(self, left, right):
         fov = float(np.radians(getattr(self.viewer.camera, "fov", 10.29)))
         t0 = time.perf_counter()
         if self.overlay is not None:
