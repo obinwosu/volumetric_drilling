@@ -128,6 +128,19 @@ DLSS_LEVELS = {
 }
 
 
+def launch_float(name: str, default: float, low: float, high: float) -> float:
+    """A decimal launch option from the study GUI (FIVRS_EXPOSURE)."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return float(default)
+    try:
+        value = float(raw)
+    except ValueError:
+        print(f"{name}={raw!r} is not a number; using {default}", flush=True)
+        return float(default)
+    return min(high, max(low, value))
+
+
 def launch_int(name: str, default: int, low: int, high: int) -> int:
     """A whole-number launch option from the study GUI (FIVRS_SPP, FIVRS_MAX_BOUNCES)."""
     raw = os.environ.get(name, "").strip()
@@ -583,7 +596,9 @@ def _author_lights(viewer):
     shaping.CreateShapingConeAngleAttr(viewer._cone_angle)
     shaping.CreateShapingConeSoftnessAttr(viewer._cone_softness)
     shaping.CreateShapingFocusAttr(CONE_FOCUS)
-    viewer._exposure = 1.0
+    # FIVRS_EXPOSURE (study): starting exposure; the backslash key returns to it.
+    viewer._exposure_start = launch_float("FIVRS_EXPOSURE", 1.0, EXPOSURE_MIN, EXPOSURE_MAX)
+    viewer._exposure = viewer._exposure_start
     viewer._exposure_dirty = True
     viewer._beam_on = False
     viewer._cone_distance = CONE_REFERENCE_DISTANCE
@@ -1185,7 +1200,7 @@ def _bind_exposure_keys(viewer):
         elif symbol == key.BRACKETRIGHT:
             _set_exposure(viewer, viewer._exposure * 1.25)
         elif symbol == key.BACKSLASH:
-            _set_exposure(viewer, 1.0)
+            _set_exposure(viewer, getattr(viewer, "_exposure_start", 1.0))
         elif symbol == key.L and not (modifiers & (key.MOD_CTRL | key.MOD_ALT | key.MOD_SHIFT)):
             viewer._beam_on = not getattr(viewer, "_beam_on", False)
             viewer._exposure_dirty = True
@@ -2752,6 +2767,8 @@ def main():
             # Opacity on the water sheet. Authored before the render product exists.
             "omni:rtx:rt:fractionalOpacity": ("bool", True),
             **or_room.render_settings(_tuner_lights_from_file()[0]),
+            # FIVRS_BLOOM=0 (study): no bloom, about 5 ms a frame with both headset eyes.
+            **({"omni:rtx:post:bloom:enabled": ("bool", False)} if os.environ.get("FIVRS_BLOOM") == "0" else {}),
             **_startup_render_overrides(),
         },
     )
