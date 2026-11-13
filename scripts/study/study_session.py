@@ -399,19 +399,15 @@ class StudySession:
 
     # ---- headset placement ----
     def placement(self) -> str:
-        """The study introduction (text only) follows the head, centred. Every other
-        screen, drilling included, is placed ahead of the head and a little down."""
-        return "follow" if self.phase == "briefing" else "look"
+        """Every screen, drilling included, sits ahead of the head, tilted down by
+        the proctor's Tilt setting."""
+        return "look"
 
     def _place_moment(self) -> str | None:
-        """The view is placed from the head when the welcome page opens, while the
-        introduction is up (it follows), and once more when the trial starts."""
+        """Placed from the head once, when the welcome page opens. After that only
+        the proctor moves it (Recenter headset view, Tilt)."""
         if self.phase == "tutorial" and TUTORIAL[self.step].key == "welcome":
             return "welcome"
-        if self.phase == "briefing":
-            return "briefing"
-        if self.phase in ("armed", "running"):
-            return "trial"
         return None
 
     def set_headset_tilt(self, degrees: float):
@@ -440,8 +436,7 @@ class StudySession:
         # Rewritten every 2 s with the same number: the eyepiece ignores files older
         # than itself, so a simulator started after this request still sees it.
         if self._place_written is None or now - self._place_written >= 2.0:
-            tilt = 0.0 if kind == "follow" else self.headset_tilt
-            self.io.write_headset_place(self._place_seq, kind, tilt)
+            self.io.write_headset_place(self._place_seq, kind, self.headset_tilt)
             self._place_written = now
 
     # ---- tutorial ----
@@ -641,6 +636,8 @@ class StudySession:
                 panel["progress"] = []
             if step.key == "camera" and p.look_target is not None and not p.step_done:
                 panel["look"] = {"target": p.look_target, "radius": LOOK_RADIUS}
+            if step.key == "welcome":
+                panel["compact"] = True  # a long read: smaller text fits the view
             return {"panel": panel, "timer": None, "banner": None, "menu_help": MENU_HELP}
         if self.phase == "ready":
             lines = ["You have completed the tutorial. You may keep practicing."]
@@ -653,7 +650,8 @@ class StudySession:
             footer = BRIEFING_FOOTER
             if self._briefing_ack and not self._reset_ready:
                 footer = "Thank you. Preparing the bone..."
-            return {"panel": {"title": BRIEFING_TITLE, "lines": BRIEFING_LINES, "footer": footer, "cover": True},
+            return {"panel": {"title": BRIEFING_TITLE, "lines": BRIEFING_LINES, "footer": footer, "cover": True,
+                              "compact": True},
                     "timer": None, "banner": None}
         timer = {"remaining_s": self.remaining(), "running": False, "written_wall": now}
         if self.phase == "armed":

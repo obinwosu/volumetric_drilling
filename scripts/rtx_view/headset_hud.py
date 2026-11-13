@@ -444,7 +444,9 @@ class HeadsetHud:
                 pct = int(max(0.0, min(1.0, float(self.loading[1]))) * 100)
                 lines.append((f"Preparing the bone {pct}%", DIM, False))
             key = ("cover", json.dumps(panel, sort_keys=True), len(lines), lines[-1][0], width, height)
-            rgba = self._cached(key, lambda: render_panel(lines, int(width * 0.62), font_px))
+            # Long reads ("compact") are drawn smaller so the whole card fits the view.
+            cover_px = max(12, int(font_px * 0.8)) if panel.get("compact") else font_px
+            rgba = self._cached(key, lambda: render_panel(lines, int(width * 0.62), cover_px))
             return [(rgba, (width - rgba.shape[1]) // 2, (height - rgba.shape[0]) // 2)]
         # The bone fills the middle of the view, so the study text sits in a band
         # along the top and the timer in the top-right corner.
@@ -469,11 +471,12 @@ class HeadsetHud:
             out.append((rgba, (width - rgba.shape[1]) // 2, (height - rgba.shape[0]) // 2))
         panel = study.get("panel")
         if panel:
-            shown = {k: v for k, v in panel.items() if k not in ("look", "advance")}
-            key = ("panel", json.dumps(shown, sort_keys=True), width, height)
+            shown = {k: v for k, v in panel.items() if k not in ("look", "advance", "compact")}
+            key = ("panel", json.dumps(shown, sort_keys=True), panel.get("compact"), width, height)
             # Wide and a little smaller than the timer, so it takes few lines of the top band.
-            rgba = self._cached(key, lambda: render_study_panel(shown, int(width * 0.86),
-                                                                max(12, int(font_px * 0.85))))
+            # Long reads ("compact") are drawn smaller again so they fit the view.
+            panel_px = max(12, int(font_px * (0.68 if panel.get("compact") else 0.85)))
+            rgba = self._cached(key, lambda: render_study_panel(shown, int(width * 0.86), panel_px))
             out.append((rgba, (width - rgba.shape[1]) // 2, top))
             top += rgba.shape[0] + int(font_px * 0.5)
             if panel.get("advance"):

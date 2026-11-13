@@ -316,17 +316,15 @@ def test_headset_view_is_placed_at_the_welcome_page_and_the_introduction():
         session.skip_step()
     session.begin_trial()
     run(session, io, 0.2)
-    assert session.phase == "briefing" and io.place == (2, "follow") and io.tilt == 0.0
+    assert session.phase == "briefing" and io.place == (1, "look")  # not moved on its own
+    assert io.hud["panel"]["compact"]
     session.begin_trial()
     run(session, io, 0.5)
-    assert session.phase == "armed" and io.place == (3, "look")  # placed once for the trial
+    assert session.phase == "armed" and io.place == (1, "look")
     assert io.tilt is None
-    run(session, io, 0.1, removed_voxels=600)
-    run(session, io, 3.0)
-    assert session.phase == "running" and io.place == (3, "look")  # then left alone
     session.set_headset_tilt(22)
     run(session, io, 0.1)
-    assert io.place == (4, "look") and io.tilt == 22.0
+    assert io.place == (2, "look") and io.tilt == 22.0
     session.set_headset_tilt(90)
     assert session.headset_tilt == 60.0
 
