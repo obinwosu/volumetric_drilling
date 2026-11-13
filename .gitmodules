@@ -1,4 +1,4 @@
 [submodule "feedback_system"]
 	path = feedback_system
-	url = https://github.com/obinwosu/Mastoid-fb-system.git
+	url = https://github.com/xzjiu/Mastoid-fb-system.git
 	branch = main
