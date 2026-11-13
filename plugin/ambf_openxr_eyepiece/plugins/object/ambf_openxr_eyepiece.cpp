@@ -13,6 +13,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <cstdio>
+#include <algorithm>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <iostream>
@@ -815,9 +817,20 @@ void afOpenXREyepiece::graphicsUpdate(){
         m_mainCamera = m_camera->m_afWorld->getCamera("main_camera");
     }
 
+    reportStats();
+    const double frameStart = steadySeconds();
+    const double waitBefore = m_statWaitMs;
     if (!beginXRFrame()){
         return;
     }
+    m_statXrFrames++;
+    // Work on this headset frame, without the wait for the headset (counted separately).
+    struct WorkTimer {
+        afOpenXREyepiece* self; double start; double waitBefore;
+        ~WorkTimer(){
+            self->m_statWorkMs += (steadySeconds() - start) * 1e3 - (self->m_statWaitMs - waitBefore);
+        }
+    } workTimer{this, frameStart, waitBefore};
 
     // Cam-clutch: VIEW pose in LOCAL → AMBF axes → main_camera only while held.
     XrSpaceLocation hmdLoc{XR_TYPE_SPACE_LOCATION};
@@ -911,7 +924,10 @@ bool afOpenXREyepiece::beginXRFrame(){
     m_frameStarted = false;
     m_frameState = XrFrameState{XR_TYPE_FRAME_STATE};
     XrFrameWaitInfo wi{XR_TYPE_FRAME_WAIT_INFO};
-    if (!xrCheck(xrWaitFrame(m_session, &wi, &m_frameState), "xrWaitFrame")){
+    const double waitStart = steadySeconds();
+    const XrResult waited = xrWaitFrame(m_session, &wi, &m_frameState);
+    m_statWaitMs += (steadySeconds() - waitStart) * 1e3;
+    if (!xrCheck(waited, "xrWaitFrame")){
         return false;
     }
     XrFrameBeginInfo bi{XR_TYPE_FRAME_BEGIN_INFO};
@@ -1123,60 +1139,112 @@ bool afOpenXREyepiece::rtxPoll(){
     const uint64_t seq = loadSeq(base);
     if ((seq & 1u) == 0 && seq != m_rtxSeq){
         // Even = complete. Copy, then check nothing was written meanwhile.
-        m_rtxPixels.resize(2 * eyeBytes);
-        std::memcpy(m_rtxPixels.data(), base + kRtxHeader, 2 * eyeBytes);
-        if (loadSeq(base) == seq){
+        const size_t bytes = 2 * eyeBytes;
+        if (m_rtxTexW != width || m_rtxTexH != height || m_rtxTex[0] == 0){
+            if (m_rtxTex[0] != 0){
+                glDeleteTextures(2, m_rtxTex);
+            }
+            glGenTextures(2, m_rtxTex);
+            GLint pboAtCreate = 0;
+            glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &pboAtCreate);
+            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+            GLint texAtCreate = 0;
+            glGetIntegerv(GL_TEXTURE_BINDING_2D, &texAtCreate);
+            for (int eye = 0; eye < 2; ++eye){
+                glBindTexture(GL_TEXTURE_2D, m_rtxTex[eye]);
+                // Same format as the headset images, so the copy is raw bytes.
+                glTexImage2D(GL_TEXTURE_2D, 0, (GLint)m_swapchains[eye].format, (GLsizei)width, (GLsizei)height,
+                             0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            }
+            glBindTexture(GL_TEXTURE_2D, (GLuint)texAtCreate);
+            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, (GLuint)pboAtCreate);
+            m_rtxTexW = width;
+            m_rtxTexH = height;
+        }
+        // CHAI's partial voxel-texture updates (from the first drill contact on)
+        // leave the unpack row length and skips set. Upload with tightly packed
+        // rows, then put AMBF's settings back.
+        const GLenum keys[] = {GL_UNPACK_ALIGNMENT, GL_UNPACK_ROW_LENGTH, GL_UNPACK_SKIP_PIXELS,
+                               GL_UNPACK_SKIP_ROWS, GL_UNPACK_IMAGE_HEIGHT, GL_UNPACK_SKIP_IMAGES};
+        const GLint packed[] = {4, 0, 0, 0, 0, 0};
+        GLint saved[6] = {4, 0, 0, 0, 0, 0};
+        GLint savedPbo = 0;
+        glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &savedPbo);
+        GLint savedTex = 0;
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &savedTex);
+
+        // One copy, from shared memory straight into a GL pixel buffer; the texture
+        // upload from it then runs on the GPU without stalling AMBF's thread. Two
+        // buffers alternate so a frame never waits on the previous frame's upload.
+        const uint8_t* pixels = nullptr;  // client-memory fallback
+        bool complete = false;
+        const double copyStart = steadySeconds();
+        if (!m_rtxPboFailed){
+            if (m_rtxPbo[0] == 0 || m_rtxPboBytes != bytes){
+                if (m_rtxPbo[0] == 0){
+                    glGenBuffers(2, m_rtxPbo);
+                }
+                for (int k = 0; k < 2; ++k){
+                    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, m_rtxPbo[k]);
+                    glBufferData(GL_PIXEL_UNPACK_BUFFER, (GLsizeiptr)bytes, nullptr, GL_STREAM_DRAW);
+                }
+                m_rtxPboBytes = bytes;
+            }
+            const int k = m_rtxPboNext;
+            m_rtxPboNext ^= 1;
+            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, m_rtxPbo[k]);
+            void* dst = glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, (GLsizeiptr)bytes,
+                                         GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT);
+            if (dst){
+                std::memcpy(dst, base + kRtxHeader, bytes);
+                const bool unmapped = glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER) == GL_TRUE;
+                complete = unmapped && loadSeq(base) == seq;
+            }
+            else{
+                m_rtxPboFailed = true;
+                glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+                std::cerr << "WARNING! OpenXR eyepiece: pixel buffer map failed; uploading from memory." << std::endl;
+            }
+        }
+        if (m_rtxPboFailed){
+            m_rtxPixels.resize(bytes);
+            std::memcpy(m_rtxPixels.data(), base + kRtxHeader, bytes);
+            complete = loadSeq(base) == seq;
+            pixels = m_rtxPixels.data();
+        }
+        m_statCopyMs += (steadySeconds() - copyStart) * 1e3;
+
+        if (complete){
+            const double uploadStart = steadySeconds();
+            m_statRtxNew++;
+            if (m_rtxSeq != 0 && seq > m_rtxSeq + 2){
+                m_statRtxSkipped += (int)((seq - m_rtxSeq) / 2 - 1);
+            }
             m_rtxSeq = seq;
             m_rtxW = width;
             m_rtxH = height;
             m_rtxLastNewSec = now;
-            if (m_rtxTexW != width || m_rtxTexH != height || m_rtxTex[0] == 0){
-                if (m_rtxTex[0] != 0){
-                    glDeleteTextures(2, m_rtxTex);
-                }
-                glGenTextures(2, m_rtxTex);
-                GLint pboAtCreate = 0;
-                glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &pboAtCreate);
-                glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-                for (int eye = 0; eye < 2; ++eye){
-                    glBindTexture(GL_TEXTURE_2D, m_rtxTex[eye]);
-                    // Same format as the headset images, so the copy is raw bytes.
-                    glTexImage2D(GL_TEXTURE_2D, 0, (GLint)m_swapchains[eye].format, (GLsizei)width, (GLsizei)height,
-                                 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                }
-                glBindBuffer(GL_PIXEL_UNPACK_BUFFER, (GLuint)pboAtCreate);
-                m_rtxTexW = width;
-                m_rtxTexH = height;
-            }
-            // CHAI's partial voxel-texture updates (from the first drill contact on)
-            // leave the unpack row length and skips set. Upload with tightly packed
-            // rows, then put AMBF's settings back.
-            const GLenum keys[] = {GL_UNPACK_ALIGNMENT, GL_UNPACK_ROW_LENGTH, GL_UNPACK_SKIP_PIXELS,
-                                   GL_UNPACK_SKIP_ROWS, GL_UNPACK_IMAGE_HEIGHT, GL_UNPACK_SKIP_IMAGES};
-            const GLint packed[] = {4, 0, 0, 0, 0, 0};
-            GLint saved[6] = {4, 0, 0, 0, 0, 0};
             for (int k = 0; k < 6; ++k){
                 glGetIntegerv(keys[k], &saved[k]);
                 glPixelStorei(keys[k], packed[k]);
             }
-            GLint savedPbo = 0;
-            glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &savedPbo);
-            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-            GLint savedTex = 0;
-            glGetIntegerv(GL_TEXTURE_BINDING_2D, &savedTex);
             for (int eye = 0; eye < 2; ++eye){
                 glBindTexture(GL_TEXTURE_2D, m_rtxTex[eye]);
+                // With a pixel buffer bound the last argument is an offset into it.
+                const void* source = pixels ? (const void*)(pixels + eye * eyeBytes)
+                                            : (const void*)(uintptr_t)(eye * eyeBytes);
                 glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (GLsizei)width, (GLsizei)height, GL_RGBA, GL_UNSIGNED_BYTE,
-                                m_rtxPixels.data() + eye * eyeBytes);
+                                source);
             }
-            glBindTexture(GL_TEXTURE_2D, (GLuint)savedTex);
-            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, (GLuint)savedPbo);
             for (int k = 0; k < 6; ++k){
                 glPixelStorei(keys[k], saved[k]);
             }
+            m_statUploadMs += (steadySeconds() - uploadStart) * 1e3;
         }
+        glBindTexture(GL_TEXTURE_2D, (GLuint)savedTex);
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, (GLuint)savedPbo);
     }
     // RTX only keeps the last frame through a late one; otherwise fall back to AMBF.
     const bool active = m_rtxTex[0] != 0 && (m_rtxOnly || (now - m_rtxLastNewSec) <= kRtxStaleSec);
@@ -1187,6 +1255,32 @@ bool afOpenXREyepiece::rtxPoll(){
     }
     m_rtxActive = active;
     return active;
+}
+
+void afOpenXREyepiece::reportStats(){
+    // Every 5 s: how often the headset gets a new RTX image, and where the time goes.
+    const double now = steadySeconds();
+    if (m_statStartSec < 0.0){
+        m_statStartSec = now;
+        return;
+    }
+    const double span = now - m_statStartSec;
+    if (span < 5.0){
+        return;
+    }
+    const int frames = std::max(m_statXrFrames, 1);
+    const int fresh = std::max(m_statRtxNew, 1);
+    char line[400];
+    std::snprintf(line, sizeof(line),
+                  "INFO! OpenXR eyepiece: headset %.1f fps, new RTX images %.1f/s (%d replaced before shown), "
+                  "per headset frame wait %.1f ms + work %.1f ms, per RTX image copy %.1f ms + upload %.1f ms",
+                  m_statXrFrames / span, m_statRtxNew / span, m_statRtxSkipped,
+                  m_statWaitMs / frames, m_statWorkMs / frames,
+                  m_statRtxNew ? m_statCopyMs / fresh : 0.0, m_statRtxNew ? m_statUploadMs / fresh : 0.0);
+    std::cout << line << std::endl;
+    m_statStartSec = now;
+    m_statXrFrames = m_statRtxNew = m_statRtxSkipped = 0;
+    m_statWaitMs = m_statCopyMs = m_statUploadMs = m_statWorkMs = 0.0;
 }
 
 void afOpenXREyepiece::rtxUnmap(){

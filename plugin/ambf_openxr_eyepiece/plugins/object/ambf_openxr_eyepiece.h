@@ -144,6 +144,7 @@ protected:
     // black until the first RTX frame, then the latest RTX frame even if one is late.
     bool rtxPoll();
     void rtxUnmap();
+    void reportStats();
     bool rtxSubmitEye(int eyeIndex);
     void rtxEyepieceFov(int eyeIndex, XrFovf& fov) const;
     bool m_rtxAllowed = true;
@@ -162,7 +163,11 @@ protected:
     uint32_t m_rtxW = 0;
     uint32_t m_rtxH = 0;
     double m_rtxLastNewSec = -1.0e9;
-    std::vector<uint8_t> m_rtxPixels;
+    std::vector<uint8_t> m_rtxPixels;  ///< only if the pixel buffers cannot be mapped
+    GLuint m_rtxPbo[2] = {0, 0};       ///< alternating upload buffers for the RTX eyes
+    size_t m_rtxPboBytes = 0;
+    int m_rtxPboNext = 0;
+    bool m_rtxPboFailed = false;
     GLuint m_rtxTex[2] = {0, 0};
     uint32_t m_rtxTexW = 0;
     uint32_t m_rtxTexH = 0;
@@ -171,6 +176,16 @@ protected:
     double m_rtxEyepieceDeg = 65.0;
     /// Distance (m) at which the two eyepiece images fuse.
     double m_rtxFuseM = 1.5;
+
+    /// Headset frame-rate counter, printed every few seconds (see reportStats).
+    double m_statStartSec = -1.0;
+    int m_statXrFrames = 0;       ///< headset frames submitted
+    int m_statRtxNew = 0;         ///< new RTX frames uploaded and shown
+    int m_statRtxSkipped = 0;     ///< RTX frames written but replaced before the headset took one
+    double m_statWaitMs = 0.0;    ///< xrWaitFrame: waiting for the headset's next frame
+    double m_statCopyMs = 0.0;    ///< shared memory -> buffer copy, new RTX frames only
+    double m_statUploadMs = 0.0;  ///< buffer -> GL textures, new RTX frames only
+    double m_statWorkMs = 0.0;    ///< rest of graphicsUpdate on headset frames
 };
 
 AF_REGISTER_OBJECT_PLUGIN(afOpenXREyepiece)
