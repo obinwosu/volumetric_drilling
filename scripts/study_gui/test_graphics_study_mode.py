@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import csv
+import itertools
 import json
 import os
 import pathlib
@@ -36,7 +37,8 @@ def _warning(_parent, title, text, *rest):
 
 
 QtWidgets.QMessageBox.warning = staticmethod(_warning)
-TLX_SCORES = iter([[10, 20, 30, 40, 50, 60], [70, 70, 70, 70, 70, 70]])
+# Cycled: each test that runs both sessions answers the questionnaire twice.
+TLX_SCORES = itertools.cycle([[10, 20, 30, 40, 50, 60], [70, 70, 70, 70, 70, 70]])
 
 
 def fill_tlx(dialog):
@@ -207,6 +209,5 @@ def test_rehearsal_runs_without_files():
 
 if __name__ == "__main__":
     test_full_study_with_files()
-    TLX_SCORES = iter([[10, 20, 30, 40, 50, 60], [70, 70, 70, 70, 70, 70]])
     test_rehearsal_runs_without_files()
     print("ok")
