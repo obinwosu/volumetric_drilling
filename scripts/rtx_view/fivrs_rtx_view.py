@@ -35,7 +35,6 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import air_labels
 import bone_debris
 import cortex_masks
-import hands
 import markings
 import nerves
 import or_room
@@ -2868,14 +2867,6 @@ def main():
         print(f"Suction {french} Fr {len(suction_tris)} tris, satin stainless", flush=True)
     viewer._instrument_meshes = instrument
     _bind_instrument(viewer)
-    # Quest hands from the OpenXR eyepiece plugin (headset mode). Nothing is
-    # drawn until /dev/shm/fivrs_hands has fresh joints.
-    viewer._hands = None
-    if hands.enabled():
-        try:
-            viewer._hands = hands.Hands(viewer)
-        except Exception as exc:
-            print(f"hands: not added to RTX ({exc})", flush=True)
     stream = None
     if not args.no_stream:
         irrigation = load_irrigation(IRRIGATION_PATH)
@@ -3194,16 +3185,6 @@ def main():
         if bridge.drill is not None:
             _log_instrument(viewer, bridge)
         _log_suction(viewer)
-        if viewer._hands is not None:
-            try:
-                viewer._hands.update(viewer, _read_drill_state())
-            except Exception as exc:
-                print(f"hands: turned off after an error ({exc})", flush=True)
-                try:
-                    viewer._hands.renderer.hide(viewer)
-                except Exception:
-                    pass
-                viewer._hands = None
         dt = min(frame_ms[-1] * 1e-3, 0.05) if frame_ms else 0.0
         t_water = time.perf_counter()
         watered = _draw_live_irrigation(viewer, worker, dt)

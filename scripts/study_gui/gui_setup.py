@@ -60,11 +60,7 @@ PRESETS = {
     "balanced": {"dlss": "performance", "samples": 1, "bounces": 0, "irrigation": True, "bone_dust": False},
     "beautiful": {"dlss": "quality", "samples": 2, "bounces": 8, "irrigation": True, "bone_dust": True},
 }
-# Quest hands in the RTX view (headset only). Not part of the presets either.
-HANDS_MODES = ("off", "head", "touch")
-SIM_OPTION_DEFAULTS = {
-    "preset": "balanced", **PRESETS["balanced"], "suction": True, "hands": "head", "hands_always": False,
-}
+SIM_OPTION_DEFAULTS = {"preset": "balanced", **PRESETS["balanced"], "suction": True}
 
 
 def matching_preset(options):
@@ -85,9 +81,7 @@ def _sim_options(raw):
         options["samples"] = raw["samples"]
     if raw.get("bounces") in BOUNCE_CHOICES:
         options["bounces"] = raw["bounces"]
-    if raw.get("hands") in HANDS_MODES:
-        options["hands"] = raw["hands"]
-    for key in ("irrigation", "bone_dust", "suction", "hands_always"):
+    for key in ("irrigation", "bone_dust", "suction"):
         if isinstance(raw.get(key), bool):
             options[key] = raw[key]
     options["preset"] = matching_preset(options)

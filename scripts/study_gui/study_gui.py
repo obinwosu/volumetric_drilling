@@ -573,14 +573,6 @@ class Ui(QtWidgets.QWidget):
         self.check_bone_dust.setToolTip("Dust from drilling in the RTX view. Costs frame time while drilling.")
         self.check_suction = QtWidgets.QCheckBox("Suction (second Touch)", box)
         self.check_suction.setToolTip("Off: the second Touch is not used and the suction stays parked.")
-        self.combo_hands = combo(
-            (("off", "Off"), ("head", "Head (fit to view)"), ("touch", "Touch (life size)")),
-            "Quest hand tracking drawn in the RTX view, headset mode only. Shown while the stylus "
-            "is in its inkwell. Head: placed as if the scope looked at your lap, scaled to fit the view. "
-            "Touch: life size and tied to the drill, learned while you hold the stylus.",
-        )
-        self.check_hands_always = QtWidgets.QCheckBox("Keep hands when the stylus is lifted", box)
-        self.check_hands_always.setToolTip("Normally the hands go away once the stylus leaves its inkwell.")
 
         grid.addWidget(QtWidgets.QLabel("Preset:", box), 0, 0)
         grid.addWidget(self.combo_render_preset, 0, 1)
@@ -593,10 +585,7 @@ class Ui(QtWidgets.QWidget):
         grid.addWidget(self.check_irrigation, 1, 1)
         grid.addWidget(self.check_bone_dust, 1, 3)
         grid.addWidget(self.check_suction, 1, 5, 1, 2)
-        grid.addWidget(QtWidgets.QLabel("Quest hands:", box), 2, 0)
-        grid.addWidget(self.combo_hands, 2, 1)
-        grid.addWidget(self.check_hands_always, 2, 3, 1, 4)
-        grid.addWidget(QtWidgets.QLabel("Applies at the next Start Simulation.", box), 3, 0, 1, 8)
+        grid.addWidget(QtWidgets.QLabel("Applies at the next Start Simulation.", box), 2, 0, 1, 8)
         grid.setColumnStretch(8, 1)
 
         sim_box = self.findChild(QtWidgets.QGroupBox, "groupBox_sim_controls")
@@ -604,29 +593,25 @@ class Ui(QtWidgets.QWidget):
         layout.insertWidget(layout.indexOf(sim_box) + 1, box)
         self._show_sim_options()
         self.combo_render_preset.currentIndexChanged.connect(self._render_preset_chosen)
-        for widget in (self.combo_dlss, self.combo_samples, self.combo_bounces, self.combo_hands):
+        for widget in (self.combo_dlss, self.combo_samples, self.combo_bounces):
             widget.currentIndexChanged.connect(self._sim_options_changed)
-        for widget in (self.check_irrigation, self.check_bone_dust, self.check_suction, self.check_hands_always):
+        for widget in (self.check_irrigation, self.check_bone_dust, self.check_suction):
             widget.toggled.connect(self._sim_options_changed)
 
     def _sim_option_widgets(self):
         return (self.combo_render_preset, self.combo_dlss, self.combo_samples, self.combo_bounces,
-                self.check_irrigation, self.check_bone_dust, self.check_suction,
-                self.combo_hands, self.check_hands_always)
+                self.check_irrigation, self.check_bone_dust, self.check_suction)
 
     def _show_sim_options(self):
         options = self.gui_configuration.sim_options
         for widget in self._sim_option_widgets():
             widget.blockSignals(True)
         for widget, key in ((self.combo_render_preset, "preset"), (self.combo_dlss, "dlss"),
-                            (self.combo_samples, "samples"), (self.combo_bounces, "bounces"),
-                            (self.combo_hands, "hands")):
+                            (self.combo_samples, "samples"), (self.combo_bounces, "bounces")):
             widget.setCurrentIndex(max(0, widget.findData(options[key])))
         self.check_irrigation.setChecked(options["irrigation"])
         self.check_bone_dust.setChecked(options["bone_dust"])
         self.check_suction.setChecked(options["suction"])
-        self.check_hands_always.setChecked(options["hands_always"])
-        self.check_hands_always.setEnabled(options["hands"] != "off")
         for widget in self._sim_option_widgets():
             widget.blockSignals(False)
 
@@ -645,10 +630,7 @@ class Ui(QtWidgets.QWidget):
             "irrigation": self.check_irrigation.isChecked(),
             "bone_dust": self.check_bone_dust.isChecked(),
             "suction": self.check_suction.isChecked(),
-            "hands": self.combo_hands.currentData(),
-            "hands_always": self.check_hands_always.isChecked(),
         }
-        self.check_hands_always.setEnabled(options["hands"] != "off")
         options["preset"] = gui_setup.matching_preset(options)
         self.gui_configuration.sim_options = options
         self.combo_render_preset.blockSignals(True)
@@ -656,12 +638,11 @@ class Ui(QtWidgets.QWidget):
         self.combo_render_preset.blockSignals(False)
 
     def _launch_options(self):
-        """Options for this launch. Study mode always runs without irrigation, suction, or hands."""
+        """Options for this launch. Study mode always runs without irrigation or suction."""
         options = dict(self.gui_configuration.sim_options)
         if self.study_mode:
             options["irrigation"] = False
             options["suction"] = False
-            options["hands"] = "off"
         return options
 
     def save_configuration(self):
@@ -777,8 +758,6 @@ class Ui(QtWidgets.QWidget):
                 env.insert("FIVRS_SUCTION_DEVICE", "0")
             if not options["irrigation"]:
                 env.insert("FIVRS_IRRIGATION", "0")
-            # The OpenXR eyepiece plugin only turns on hand tracking when hands are wanted.
-            env.insert("FIVRS_HANDS", "0" if options["hands"] == "off" else "1")
             if not env.value("GTDD_HOME"):
                 env.insert("GTDD_HOME", "/usr/share/3DSystems")
             if not env.value("OH_SDK_BASE"):
@@ -936,9 +915,6 @@ class Ui(QtWidgets.QWidget):
             + f"export FIVRS_SPP={int(options['samples'])} && "
             + (f"export FIVRS_MAX_BOUNCES={int(options['bounces'])} && " if options["bounces"] else "")
             + f"export FIVRS_BONE_DUST={1 if options['bone_dust'] else 0} && "
-            + ("export FIVRS_HANDS=0 && " if options["hands"] == "off" else
-               f"export FIVRS_HANDS=1 FIVRS_HANDS_MODE={shlex.quote(options['hands'])} "
-               f"FIVRS_HANDS_ALWAYS={1 if options['hands_always'] else 0} && ")
             + f"exec \"{venv_python}\" \"{script}\" --anatomy-adf \"{self.active_volume_adf}\""
             + (" --headset" if headset else "")
             + (" --no-stream" if self.study_mode else "")

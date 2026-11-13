@@ -94,7 +94,6 @@ protected:
         bool abandoned = false; // close() ran first: the thread destroys the instance
         XrInstance instance = XR_NULL_HANDLE;
         XrSystemId system = XR_NULL_SYSTEM_ID;
-        bool handTracking = false;  // XR_EXT_hand_tracking was enabled
     };
     std::shared_ptr<XrConnect> m_connect;
     double m_connectStartSec = 0.0;
@@ -202,24 +201,6 @@ protected:
     GLuint m_hudTex = 0;
     uint32_t m_hudTexW = 0;
     uint32_t m_hudTexH = 0;
-
-    // ---- Tracked hands for the RTX window -----------------------------------
-    // XR_EXT_hand_tracking joints (LOCAL space) and the head pose go to
-    // /dev/shm/fivrs_hands each headset frame; fivrs_rtx_view.py draws them.
-    // FIVRS_HANDS=0 turns this off.
-    void handsInit();
-    void handsUpdate(const XrSpaceLocation& hmdLoc);
-    void handsShutdown();
-    bool m_handsAllowed = true;
-    bool m_handExtension = false;
-    bool m_handsAnnounced = false;
-    XrHandTrackerEXT m_handTracker[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
-    PFN_xrDestroyHandTrackerEXT m_xrDestroyHandTracker = nullptr;
-    PFN_xrLocateHandJointsEXT m_xrLocateHandJoints = nullptr;
-    int m_handsFd = -1;
-    void* m_handsMap = nullptr;
-    uint64_t m_handsSeq = 0;
-    bool m_handActivePrev[2] = {false, false};
 };
 
 AF_REGISTER_OBJECT_PLUGIN(afOpenXREyepiece)
