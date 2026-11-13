@@ -161,6 +161,10 @@ public:
     // Second Geomagic, when it was connected at launch. Device 0 stays the drill.
     cGenericHapticDevicePtr m_suctionDevice;
     bool m_suctionTracked = false;
+    // Study mode (FIVRS_SUCTION_DEVICE=0): one instrument, so the suction is not drawn.
+    bool m_suctionHidden = false;
+    // Study mode (FIVRS_IRRIGATION=0): the irrigation tube on the drill is not drawn.
+    bool m_irrigationHidden = false;
 
     int suctionSizeFr() const { return m_suctionSizeFr; }
     cTransform suctionShownPose() const { return m_T_s; }

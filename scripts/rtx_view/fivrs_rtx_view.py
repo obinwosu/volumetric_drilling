@@ -20,6 +20,7 @@ import json
 import os
 import pathlib
 import queue
+import signal
 import struct
 import sys
 import threading
@@ -89,10 +90,31 @@ RUNTIME = pathlib.Path("/tmp/fivrs-rtx")
 # main_camera zoom. The camera State message has no field of view, so the plugin writes it here.
 FOV_PATH = RUNTIME / "camera_fov.txt"
 FOV_RANGE_RAD = (0.035, 0.60)
+# SIGTERM / SIGINT (the study GUI's close, pkill, Ctrl+C) set STOP; the render
+# loop then closes the window. rclpy used to take these signals and only shut ROS
+# down, so the window kept running (and holding ~7 GB) after AMBF closed.
+STOP = threading.Event()
+STOP_GRACE_S = 8.0
+_render_loop_running = False
+
+
+def _stop_signal(signum, _frame):
+    if STOP.is_set():
+        os._exit(1)  # a second signal: leave now
+    STOP.set()
+    print(f"Signal {signum}: the RTX view is exiting", flush=True)
+    # If closing hangs (for example in a GPU call), leave anyway.
+    timer = threading.Timer(STOP_GRACE_S, os._exit, args=(1,))
+    timer.daemon = True
+    timer.start()
+    if not _render_loop_running:
+        raise SystemExit(0)  # still starting up: nothing to close cleanly
 # Bone dust costs frame time while drilling. FIVRS_BONE_DUST=1 turns it back on.
 BONE_DUST = os.environ.get("FIVRS_BONE_DUST", "0") == "1"
 # Study mode runs without irrigation (FIVRS_IRRIGATION=0) to keep the frame rate up.
 IRRIGATION_ON = os.environ.get("FIVRS_IRRIGATION", "1") != "0"
+# Study mode uses one instrument (FIVRS_SUCTION_DEVICE=0): no suction is drawn.
+SUCTION_ON = os.environ.get("FIVRS_SUCTION_DEVICE", "1") != "0"
 # DLSS level from the study GUI's Advanced tab (FIVRS_DLSS). ovrtx has no
 # ultra-performance token, so that level is manual scaling at a third per axis.
 DLSS_LEVELS = {
@@ -721,7 +743,10 @@ class Bridge:
         from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
         from volumetric_drilling_msgs.msg import DrillSize, VolumeInfo, Voxels
 
-        rclpy.init()
+        from rclpy.signals import SignalHandlerOptions
+
+        # The view handles SIGTERM / SIGINT itself (_stop_signal).
+        rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
         self._rclpy = rclpy
         self.node = rclpy.create_node("fivrs_rtx_view")
         latched = QoSProfile(
@@ -2129,6 +2154,8 @@ def _log_static_mesh(viewer, name, points, tris, normals, color, roughness, meta
 
 
 def _read_suction_state():
+    if not SUCTION_ON:
+        return None
     try:
         return json.loads((RUNTIME / "suction_state.json").read_text())
     except (OSError, json.JSONDecodeError):
@@ -2605,6 +2632,9 @@ def _log_instrument(viewer, bridge):
 
 
 def main():
+    global _render_loop_running
+    signal.signal(signal.SIGTERM, _stop_signal)
+    signal.signal(signal.SIGINT, _stop_signal)
     parser = argparse.ArgumentParser()
     parser.add_argument("--anatomy-adf", required=True)
     parser.add_argument("--width", type=int, default=None, help="Default 1280, or 1152 with --headset.")
@@ -2817,7 +2847,8 @@ def main():
         instrument["shaft_faces"][size] = ranges
         tip = f", tucked {tucked_tip} tip verts inside the burr" if tucked_tip else ""
         print(f"Shaft {size} mm {', '.join(counts)} tris, one mesh{tip}", flush=True)
-    for size in CANNULA_SIZES:
+    # Study mode (no irrigation): the drill has no irrigation tube, so none is loaded or drawn.
+    for size in CANNULA_SIZES if IRRIGATION_ON else ():
         try:
             cannula_points, cannula_tris = load_cannula_obj(cannula_mesh_path(size))
         except (OSError, ValueError) as exc:
@@ -2994,7 +3025,8 @@ def main():
     RUNTIME.mkdir(parents=True, exist_ok=True)
     watchdog = LoopWatchdog()
 
-    while viewer.is_running():
+    _render_loop_running = True
+    while viewer.is_running() and not STOP.is_set():
         watchdog.beat()
         batches, missing = bridge.take_batches()
         now = time.perf_counter()

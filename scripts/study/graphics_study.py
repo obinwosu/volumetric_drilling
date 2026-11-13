@@ -108,7 +108,7 @@ def briefing(arm_number: int, trial_seconds: float = TRIAL_SECONDS) -> dict:
     return {"briefing_title": "Session 2 of 2", "briefing_lines": lines,
             "ready_title": "Session 2 of 2",
             "ready_lines": ["You may move the drill and the microscope to get used to this display."],
-            "ready_advance": "Press the left foot pedal when you are ready",
+            "ready_advance": "Tap the left foot pedal when you are ready",
             "armed_lines": ["Begin drilling when ready.",
                             f"The {minutes}-minute timer starts when the drill first removes bone."]}
 

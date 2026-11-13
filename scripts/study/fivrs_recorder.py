@@ -143,6 +143,8 @@ class Recorder:
         self.voxel_batches_total = 0
         self._lock = threading.Lock()
         self._latest = {}
+        self._last_pose_stamp = {}
+        self._last_frame_stamp = None
         self._writes = queue.Queue()
         self._writer = threading.Thread(target=self._write_loop, name="fivrs-recorder-write", daemon=True)
         self._writer.start()
@@ -166,6 +168,13 @@ class Recorder:
         with self._lock:
             self._latest[name] = pose
             if name in self.poses:
+                # While paused the simulator keeps publishing poses with a frozen sim time;
+                # the feedback analysis rejects non-increasing timestamps (also across
+                # chunks), so keep only samples newer than the last one recorded.
+                last = self._last_pose_stamp.get(name)
+                if last is not None and float(stamp) <= last:
+                    return
+                self._last_pose_stamp[name] = float(stamp)
                 self.poses[name][0].append(float(stamp))
                 self.poses[name][1].append(pose)
 
@@ -196,6 +205,11 @@ class Recorder:
             if drill is None:
                 # The analysis needs a drill pose on every frame.
                 return
+            # Frames rendered while paused carry the frozen sim time; the analysis
+            # rejects non-increasing frame times (also across chunks), so skip them.
+            if self._last_frame_stamp is not None and float(stamp) <= self._last_frame_stamp:
+                return
+            self._last_frame_stamp = float(stamp)
             self.frames.append(
                 {
                     "time": float(stamp),

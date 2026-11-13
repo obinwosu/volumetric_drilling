@@ -302,13 +302,14 @@ void JoyStick::poll()
             }
             int button_index = -1;
             // Ikkegol factory map: left=a, middle=b, right=c.
-            if (m_keyboard_event.code == KEY_A) {
+            // PCsensor FootSwitch on this rig: left=F17, middle=F18, right=F19.
+            if (m_keyboard_event.code == KEY_A || m_keyboard_event.code == KEY_F17) {
                 button_index = static_cast<int>(3); // FootPedalKeyboardMap::BURR_STYLE
             }
-            else if (m_keyboard_event.code == KEY_B) {
+            else if (m_keyboard_event.code == KEY_B || m_keyboard_event.code == KEY_F18) {
                 button_index = static_cast<int>(4); // FootPedalKeyboardMap::DRILL_ON
             }
-            else if (m_keyboard_event.code == KEY_C) {
+            else if (m_keyboard_event.code == KEY_C || m_keyboard_event.code == KEY_F19) {
                 button_index = static_cast<int>(5); // FootPedalKeyboardMap::CHANGE_BURR_SIZE
             }
             if (button_index != -1 && button_index < (int)m_state.m_buttons.size()) {

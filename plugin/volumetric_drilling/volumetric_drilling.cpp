@@ -230,6 +230,17 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
     }
     else{
         m_voxelObj = m_volumeObject->getInternalVolume();
+        // With the RTX view on, nobody looks at AMBF's own ray-marched bone, and drawing
+        // it costs most of the GPU the path tracer needs. Hide only the drawing: haptics,
+        // drilling, voxel removal and everything sent to RTX are unchanged (chai3d keeps
+        // show and haptic flags separate). FIVRS_AMBF_BONE=1 draws it again.
+        {
+            const char* drawBone = getenv("FIVRS_AMBF_BONE");
+            if (m_rtxView && !(drawBone && string(drawBone) == "1")){
+                m_voxelObj->setShowEnabled(false);
+                cout << "INFO! RTX view on: AMBF does not draw its own bone (FIVRS_AMBF_BONE=1 draws it)." << endl;
+            }
+        }
 
         m_maxVolCorner = m_voxelObj->m_maxCorner;
         m_minVolCorner = m_voxelObj->m_minCorner;
@@ -317,13 +328,13 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
 
     if (m_footpedal.init(footpedal_fd) != -1){
         cerr << "INFO! FOUND FOOTPEDAL INTERFACE " << footpedal_fd << endl;
-        cerr << "INFO! Pedal map (Ikkegol a/b/c): a=style, b=hold-to-run drill, c=size" << endl;
+        cerr << "INFO! Pedal map (a/b/c or F17/F18/F19): left=tap next / hold pause menu / tap down in menu / hold to close menu, middle=select in menu / zoom out with microscope button, right=hold-to-run drill" << endl;
     }
     else{
         cerr << "WARNING! NO FOOTPEDAL /dev/input DEVICE OPEN "
              << "(using keyboard a/b/c, + key 1 cam-clutch)\n";
     }
-    cerr << "INFO! Ikkegol pedals: hold b=drill; key 1 (microscope) + a/c = zoom in/out; Ctrl + Stylus 2 = orbit; in the pause menu a=select, b=back, Stylus 2/1 = down/up; key 1=cam clutch" << endl;
+    cerr << "INFO! Pedals: hold right=drill; hold left=pause menu; key 1 (microscope) + left/middle = zoom in/out; Ctrl + stylus action button = orbit; in the pause menu tap left=down, hold left=close (Yes/No), middle=select (each list ends in Back); key 1=cam clutch" << endl;
 
     m_gazeMarkerController.init(m_worldPtr, &m_panelManager);
     cerr << "INFO! GAZE MARKER INITIALIZED \n";
@@ -525,6 +536,11 @@ void afVolmetricDrillingPlugin::publishSuctionVisualState()
     namespace fs = std::filesystem;
     const fs::path dir = "/tmp/fivrs-rtx";
     std::error_code mkdirError;
+    if (m_drillManager.m_suctionHidden){
+        // Study mode: no suction in the RTX view either, including one left by an earlier run.
+        fs::remove(dir / "suction_state.json", mkdirError);
+        return;
+    }
     fs::create_directories(dir, mkdirError);
     cVector3d tip(0.0, 0.0, 0.0);
     cQuaternion tipRot;
@@ -1111,6 +1127,7 @@ void afVolmetricDrillingPlugin::physicsUpdate(double dt){
         if (m_drillManager.m_toolCursorList.size() > 0 && m_drillManager.m_toolCursorList[0]){
             m_drillManager.m_toolCursorList[0]->setDeviceLocalForce(0.0, 0.0, 0.0);
         }
+        m_hapticSafety.reset();
         if (m_drillManager.m_suctionDevice){
             m_drillManager.m_suctionDevice->setForce(cVector3d(0.0, 0.0, 0.0));
         }
@@ -1236,6 +1253,13 @@ void afVolmetricDrillingPlugin::physicsUpdate(double dt){
         }
     }
 
+    // Every drill force passes the safety guard. What is published and heard is what was sent.
+    force = m_hapticSafety.filter(force, dt);
+    if (m_hapticSafety.takeJustTripped()){
+        cerr << "WARNING! HAPTIC SAFETY: unstable bone contact, drill force faded to zero (trip "
+             << m_hapticSafety.trips() << "). It returns once the drill is out of contact for "
+             << HapticSafety::kRearmSeconds << " s." << endl;
+    }
     m_drillManager.m_toolCursorList[0]->setDeviceLocalForce(force);
     if (m_drillManager.m_suctionTracked && m_drillManager.m_suctionDevice && m_mainCamera){
         // Same proxy-force path as the drill: world force, then into the stylus frame.
@@ -1378,39 +1402,84 @@ void afVolmetricDrillingPlugin::updateButtons(){
 
     // Ikkegol footpedal workaround: left/middle/right emit keyboard a/b/c.
     // Poll via X11 so this works even when /dev/input is not readable.
-    const bool xStyleHeld = isLetterKeyHeld(GLFW_KEY_A);
-    const bool xDrillHeld = isLetterKeyHeld(GLFW_KEY_B);
-    const bool xSizeHeld  = isLetterKeyHeld(GLFW_KEY_C);
+    // PCsensor FootSwitch: F17/F18/F19 for the same three pedals.
+    const bool xStyleHeld = isLetterKeyHeld(GLFW_KEY_A) || isLetterKeyHeld(GLFW_KEY_F17);
+    const bool xDrillHeld = isLetterKeyHeld(GLFW_KEY_B) || isLetterKeyHeld(GLFW_KEY_F18);
+    const bool xSizeHeld  = isLetterKeyHeld(GLFW_KEY_C) || isLetterKeyHeld(GLFW_KEY_F19);
 
     // The pedal can arrive both as an input device and as X11 keys; combine
     // them so one press counts once.
+    // Left = pause menu / next (down in the menu), middle = select in the menu or
+    // zoom out with the microscope button, right = hold-to-run drill.
     const bool pedalLeftHeld = m_footpedal.isStyleHeld() || xStyleHeld;
+    const bool pedalMiddleHeld = m_footpedal.isDrillOn() || xDrillHeld;
     const bool pedalRightHeld = m_footpedal.isSizeHeld() || xSizeHeld;
-    const bool pedalDrillHeld = m_footpedal.isDrillOn() || xDrillHeld;
     const bool leftEdge = (!m_xFootStylePrev && pedalLeftHeld);
-    const bool rightEdge = (!m_xFootSizePrev && pedalRightHeld);
-    const bool drillEdge = (!m_pedalDrillPrev && pedalDrillHeld);
+    const bool leftRelease = (m_xFootStylePrev && !pedalLeftHeld);
+    const bool middleEdge = (!m_pedalDrillPrev && pedalMiddleHeld);
     m_xFootStylePrev = pedalLeftHeld;
     m_xFootSizePrev = pedalRightHeld;
-    m_pedalDrillPrev = pedalDrillHeld;
+    m_pedalDrillPrev = pedalMiddleHeld;
     // The microscope rig button (SayoDevice key "1").
     const bool scopeHeld = isDigit1Held();
+    const double pedalNow = glfwGetTime();
 
-    // Microscope button + left pedal zooms in, + right pedal zooms out. Zoom
+    // Microscope button + left pedal zooms in, + middle pedal zooms out. Zoom
     // narrows the field of view, as microscope optics do; hold for continuous zoom.
     if (scopeHeld && !m_vrHudVisible){
         const double zoomRate = 1.015;
-        if (pedalLeftHeld && !pedalRightHeld){
+        if (pedalLeftHeld && !pedalMiddleHeld){
             zoomCamera(1.0 / zoomRate);
         }
-        if (pedalRightHeld && !pedalLeftHeld){
+        if (pedalMiddleHeld && !pedalLeftHeld){
             zoomCamera(zoomRate);
         }
     }
-    // A left-pedal tap on its own does nothing in the simulator; the study
-    // tutorial reads this count to advance a step.
-    if (leftEdge && !scopeHeld && !m_vrHudVisible){
-        m_pedalAdvanceCount += 1;
+    // Left pedal: a tap acts on release, a hold acts after longPressSec.
+    //   Outside the menu: tap moves the study tutorial on, hold opens the pause menu.
+    //   In the menu: tap moves the highlight down (lists wrap), hold asks
+    //   "Close pause menu and return to simulator?". In that question a tap
+    //   toggles Yes / No. With the microscope button held it only zooms (above).
+    const double longPressSec = 0.6;
+    if (leftEdge){
+        m_leftPedalDownTime = pedalNow;
+        m_leftPedalLongFired = false;
+        m_leftPedalZoomed = scopeHeld;
+    }
+    if (pedalLeftHeld){
+        m_leftPedalZoomed = m_leftPedalZoomed || scopeHeld;
+        if (!m_leftPedalLongFired && !m_leftPedalZoomed
+            && m_leftPedalDownTime >= 0.0 && pedalNow - m_leftPedalDownTime >= longPressSec){
+            m_leftPedalLongFired = true;  // this press is used up
+            if (!m_vrHudVisible){
+                setVrHudVisible(true);
+            }
+            else if (!m_pauseConfirmClose){
+                m_pauseConfirmClose = true;
+                m_pauseConfirmYes = true;
+                refreshVrHudText();
+            }
+        }
+    }
+    if (leftRelease){
+        if (!m_leftPedalLongFired && !m_leftPedalZoomed){
+            if (m_vrHudVisible){
+                cyclePauseViewHighlight(1);  // toggles Yes / No in the close question
+                refreshVrHudText();
+            }
+            else{
+                // The study tutorial reads this count to advance a step.
+                m_pedalAdvanceCount += 1;
+            }
+        }
+        m_leftPedalDownTime = -1.0;
+    }
+    // Middle pedal in the pause menu: select (Back and Resume are rows of the menu).
+    if (middleEdge && m_vrHudVisible){
+        pauseMenuSelect();
+        if (m_vrHudVisible){
+            refreshVrHudText();
+        }
     }
     // Right arrow (any window): the study tutorial moves on even if the step is not done.
     // In the pause menu the arrows move the highlight instead.
@@ -1419,27 +1488,6 @@ void afVolmetricDrillingPlugin::updateButtons(){
         m_tutorialSkipCount += 1;
     }
     m_rightArrowPrev = rightArrowHeld;
-
-    // Pause menu: left pedal = select, middle pedal = back (leaves the menu at the
-    // top). The stylus buttons move the highlight (below). The right pedal does nothing.
-    (void)rightEdge;
-    if (m_vrHudVisible){
-        if (leftEdge){
-            pauseMenuSelect();
-            if (m_vrHudVisible){
-                refreshVrHudText();
-            }
-        }
-        else if (drillEdge){
-            // The middle pedal is also hold-to-drill: if this closes the menu, the
-            // drill stays off until the pedal is let go.
-            m_pedalDrillSuppress = true;
-            pauseMenuBack();
-            if (m_vrHudVisible){
-                refreshVrHudText();
-            }
-        }
-    }
 
     // Study mode lock: polled a few times a second, not every frame.
     {
@@ -1467,10 +1515,15 @@ void afVolmetricDrillingPlugin::updateButtons(){
         }
     }
 
-    // Hold-to-run drill: device pedal or keyboard 'b'.
-    // In the pause menu the middle pedal means Back, not drill.
+    // Hold-to-run drill: right pedal (keyboard 'c' / F19). It stays off while the
+    // pause menu is open; if the pedal is still down when the menu closes, wait
+    // for its release.
+    const bool pedalDrillHeld = pedalRightHeld;
     if (!pedalDrillHeld){
         m_pedalDrillSuppress = false;
+    }
+    else if (m_vrHudVisible){
+        m_pedalDrillSuppress = true;
     }
     m_drillManager.m_isOn = pedalDrillHeld && !m_pedalDrillSuppress && !m_studyDrillLock && !m_vrHudVisible;
     m_drillManager.updateBurrLabel();
@@ -1481,7 +1534,7 @@ void afVolmetricDrillingPlugin::updateButtons(){
     m_drillManager.m_suctionClutch = false;
     if (m_drillManager.m_suctionTracked && m_drillManager.m_suctionDevice
         && m_drillManager.m_suctionDevice->isDeviceAvailable()){
-        // Same as the drill: stylus button 2 (switch index 0) double-tap
+        // Same as the drill: action button (switch index 0) double-tap
         // recenters the suction, and holding it clutches.
         bool suctionBtn2 = false;
         m_drillManager.m_suctionDevice->getUserSwitch(0, suctionBtn2);
@@ -1521,12 +1574,13 @@ void afVolmetricDrillingPlugin::updateButtons(){
     }
 
     if (m_drillManager.m_hapticDevice->isDeviceAvailable()){
-        bool btn1 = false; // stylus button 1 (cam-clutch switch index 1)
-        bool btn2 = false; // stylus button 2 (device-clutch switch index 0)
-        m_drillManager.m_hapticDevice->getUserSwitch(1, btn1);
+        // Only the stylus "action button" (switch index 0: the upper button, nearer the
+        // back of the stylus) is used. The button nearer the tip is broken on this rig's
+        // Touch. The camera clutch is the microscope button.
+        bool btn2 = false;
         m_drillManager.m_hapticDevice->getUserSwitch(0, btn2);
 
-        // Orbit around the burr: Ctrl (or Shift) + hold Stylus 2. Zoom is on the
+        // Orbit around the burr: Ctrl (or Shift) + hold the action button. Zoom is on the
         // microscope button + pedals (above).
         const bool ctrlHeld = isCtrlHeld();
         const bool shiftHeld = isShiftHeld();
@@ -1536,41 +1590,18 @@ void afVolmetricDrillingPlugin::updateButtons(){
 
             if ((ctrlHeld || shiftHeld) && !m_vrHudVisible){
                 m_drillManager.m_camOrbitBurr |= btn2;
-                m_btn1Prev = btn1;
                 m_btn2Prev = btn2;
-                m_btn1LastClickTime = -1.0;
                 m_btn2LastClickTime = -1.0;
             }
             else{
                 if (m_vrHudVisible){
-                    // Pause menu: tap Stylus 2 = down, tap Stylus 1 = up. Select and
-                    // back are on the pedals (above), so no double-taps here.
-                    if (btn2 && !m_btn2Prev){
-                        cyclePauseViewHighlight(1);
-                        refreshVrHudText();
-                    }
-                    if (btn1 && !m_btn1Prev){
-                        cyclePauseViewHighlight(-1);
-                        refreshVrHudText();
-                    }
-                    m_btn1Prev = btn1;
+                    // The pause menu is driven by the pedals only (left = down,
+                    // middle = select); the stylus does nothing there.
                     m_btn2Prev = btn2;
-                    m_btn1LastClickTime = -1.0;
                     m_btn2LastClickTime = -1.0;
                 }
                 else{
-                    if (btn1 && !m_btn1Prev){
-                        if (m_btn1LastClickTime >= 0.0 && (now - m_btn1LastClickTime) <= doubleClickSec){
-                            setVrHudVisible(true);
-                            m_btn1LastClickTime = -1.0;
-                            m_btn2LastClickTime = -1.0;
-                        }
-                        else{
-                            m_btn1LastClickTime = now;
-                        }
-                    }
-                    m_btn1Prev = btn1;
-                    // Double-tap button 2: snap drill burr into main_camera view.
+                    // Double-tap the action button: snap drill burr into main_camera view.
                     bool btn2DoubleTapped = false;
                     if (btn2 && !m_btn2Prev){
                         if (m_btn2LastClickTime >= 0.0 && (now - m_btn2LastClickTime) <= doubleClickSec){
@@ -1583,7 +1614,6 @@ void afVolmetricDrillingPlugin::updateButtons(){
                         }
                     }
                     m_btn2Prev = btn2;
-                    m_drillManager.m_camClutch |= btn1;
                     // Hold btn2 = device clutch; skip the double-tap edge so it does not
                     // briefly clutch while recentering.
                     if (btn2 && !btn2DoubleTapped){
@@ -1858,6 +1888,9 @@ bool afVolmetricDrillingPlugin::isLetterKeyHeld(int glfwKey) const
         case GLFW_KEY_A: sym = XK_a; break;
         case GLFW_KEY_B: sym = XK_b; break;
         case GLFW_KEY_C: sym = XK_c; break;
+        case GLFW_KEY_F17: sym = XK_F17; break;
+        case GLFW_KEY_F18: sym = XK_F18; break;
+        case GLFW_KEY_F19: sym = XK_F19; break;
         case GLFW_KEY_RIGHT: sym = XK_Right; break;
         default: return false;
     }
@@ -2401,8 +2434,8 @@ int afVolmetricDrillingPlugin::pauseViewCount()
 
 int afVolmetricDrillingPlugin::pauseRowCount()
 {
-    // Saved camera views (a list), Burr type, Burr size.
-    return 3;
+    // Saved camera views (a list), Burr type, Burr size, Resume.
+    return 4;
 }
 
 vector<int> afVolmetricDrillingPlugin::burrSizeOrder() const
@@ -2420,14 +2453,15 @@ vector<int> afVolmetricDrillingPlugin::burrSizeOrder() const
 
 int afVolmetricDrillingPlugin::pauseSubmenuCount() const
 {
+    // Each list's options, then a Back item (the last row).
     if (m_pauseSubmenu == PauseSubmenu::BURR_TYPE){
-        return 2;
+        return 2 + 1;
     }
     if (m_pauseSubmenu == PauseSubmenu::BURR_SIZE){
-        return static_cast<int>(m_drillManager.m_drills.size());
+        return static_cast<int>(m_drillManager.m_drills.size()) + 1;
     }
     if (m_pauseSubmenu == PauseSubmenu::VIEWS){
-        return static_cast<int>(const_cast<afVolmetricDrillingPlugin*>(this)->buildPauseViewList().size());
+        return static_cast<int>(const_cast<afVolmetricDrillingPlugin*>(this)->buildPauseViewList().size()) + 1;
     }
     return 0;
 }
@@ -2442,6 +2476,10 @@ void afVolmetricDrillingPlugin::clampPauseIndex()
 
 void afVolmetricDrillingPlugin::cyclePauseViewHighlight(int delta)
 {
+    if (m_pauseConfirmClose){
+        m_pauseConfirmYes = !m_pauseConfirmYes;  // two answers: any move toggles
+        return;
+    }
     if (m_pauseSubmenu != PauseSubmenu::NONE){
         const int n = pauseSubmenuCount();
         if (n > 0){
@@ -2459,6 +2497,19 @@ void afVolmetricDrillingPlugin::cyclePauseViewHighlight(int delta)
 
 void afVolmetricDrillingPlugin::pauseMenuSelect()
 {
+    if (m_pauseConfirmClose){
+        // Yes closes the menu and resumes; No goes back to the menu.
+        m_pauseConfirmClose = false;
+        if (m_pauseConfirmYes){
+            setVrHudVisible(false);
+        }
+        return;
+    }
+    // The last row of every list is Back.
+    if (m_pauseSubmenu != PauseSubmenu::NONE && m_pauseSubIndex == pauseSubmenuCount() - 1){
+        m_pauseSubmenu = PauseSubmenu::NONE;
+        return;
+    }
     if (m_pauseSubmenu == PauseSubmenu::BURR_TYPE){
         m_drillManager.setBurrStyle(m_pauseSubIndex == 1 ? BurrStyle::DIAMOND : BurrStyle::CUTTING);
         showNotice("Burr: " + m_drillManager.burrStyleName());
@@ -2490,6 +2541,10 @@ void afVolmetricDrillingPlugin::pauseMenuSelect()
         m_pauseSubmenu = PauseSubmenu::BURR_TYPE;
         m_pauseSubIndex = (m_drillManager.m_burrStyle == BurrStyle::DIAMOND) ? 1 : 0;
     }
+    else if (m_pauseViewIndex == 3){
+        // Resume: leave the menu.
+        setVrHudVisible(false);
+    }
     else{
         m_pauseSubmenu = PauseSubmenu::BURR_SIZE;
         vector<int> order = burrSizeOrder();
@@ -2505,6 +2560,10 @@ void afVolmetricDrillingPlugin::pauseMenuSelect()
 void afVolmetricDrillingPlugin::pauseMenuBack()
 {
     // Back out of a list; at the top of the menu, leave the menu and resume.
+    if (m_pauseConfirmClose){
+        m_pauseConfirmClose = false;
+        return;
+    }
     if (m_pauseSubmenu != PauseSubmenu::NONE){
         m_pauseSubmenu = PauseSubmenu::NONE;
         return;
@@ -2515,6 +2574,10 @@ void afVolmetricDrillingPlugin::pauseMenuBack()
 string afVolmetricDrillingPlugin::pauseMenuListText()
 {
     clampPauseIndex();
+    if (m_pauseConfirmClose){
+        return string("Close pause menu and return to simulator?\n\n")
+            + (m_pauseConfirmYes ? "  > Yes\n    No\n" : "    Yes\n  > No\n");
+    }
     const bool inSub = m_pauseSubmenu != PauseSubmenu::NONE;
     auto row = [&](int index, const string& label, const string& value){
         string name = label;
@@ -2526,6 +2589,9 @@ string afVolmetricDrillingPlugin::pauseMenuListText()
     auto option = [&](int k, const string& label){
         return string(k == m_pauseSubIndex ? "        > " : "          ") + label + "\n";
     };
+    auto backOption = [&](){
+        return option(pauseSubmenuCount() - 1, "Back");
+    };
     string text = row(0, "Saved camera views", "");
     if (m_pauseSubmenu == PauseSubmenu::VIEWS){
         vector<PauseViewEntry> items = buildPauseViewList();
@@ -2533,6 +2599,7 @@ string afVolmetricDrillingPlugin::pauseMenuListText()
             const PauseViewEntry& e = items[k];
             text += option(k, e.label + (e.isHome ? "" : (e.valid ? "  saved" : "  empty")));
         }
+        text += backOption();
     }
     text += row(1, "Burr type", m_drillManager.burrStyleName());
     if (m_pauseSubmenu == PauseSubmenu::BURR_TYPE){
@@ -2540,6 +2607,7 @@ string afVolmetricDrillingPlugin::pauseMenuListText()
         for (int k = 0; k < 2; k++){
             text += option(k, names[k]);
         }
+        text += backOption();
     }
     string current = m_drillManager.m_activeDrill ? m_drillManager.m_activeDrill->m_name : string("-");
     text += row(2, "Burr size", current);
@@ -2548,7 +2616,9 @@ string afVolmetricDrillingPlugin::pauseMenuListText()
         for (int k = 0; k < static_cast<int>(order.size()); k++){
             text += option(k, m_drillManager.m_drills[order[k]]->m_name);
         }
+        text += backOption();
     }
+    text += row(3, "Resume", "");
     return text;
 }
 
@@ -2709,12 +2779,17 @@ void afVolmetricDrillingPlugin::refreshVrHudText()
     string text = status + session + viewsHeader + menuList + "\n" + controlHelpText(true);
     // The headset shows the RTX image, not this panel, so the RTX window draws
     // a shorter copy into both eyes. Written only when it changes.
-    string hints = string("pause menu navigation\n")
-        + "Up / down            Stylus 1 / Stylus 2\n"
-        + "Select               Left pedal\n"
-        + (m_pauseSubmenu != PauseSubmenu::NONE
-           ? "Back                 Middle pedal\n"
-           : "Exit menu            Middle pedal\n");
+    string hints = m_pauseConfirmClose
+        ? string("pause menu navigation\n")
+            + "Yes / No             Left pedal\n"
+            + "Select               Middle pedal\n"
+        : string("pause menu navigation\n")
+            + "Down                 Tap left pedal\n"
+            + "Select               Middle pedal\n"
+            + (m_pauseSubmenu != PauseSubmenu::NONE
+               ? "Back                 Select Back\n"
+               : "Resume               Select Resume\n")
+            + "Close menu           Hold left pedal\n";
     writeRtxPauseHud(status + menuList + "\n" + hints);
     m_vrHudLabel->setText(text);
     m_panelManager.setText(m_vrHudLabel, text);
@@ -2729,32 +2804,33 @@ string afVolmetricDrillingPlugin::controlHelpText(bool paused) const
     if (paused){
         s +=
             "MENU\n"
-            "  Up / down              Stylus 1 / Stylus 2  or  Up / Down\n"
-            "  Select                 Left pedal  or  Enter\n"
-            "  Back / exit menu       Middle pedal  or  Backspace\n"
+            "  Down                   Tap left pedal  or  Down (Up goes up)\n"
+            "  Select                 Middle pedal  or  Enter\n"
+            "  Back / exit menu       Select Back  or  Backspace\n"
             "  Save to view slot      Shift + Enter (in Saved camera views)\n"
-            "  Resume                 Middle pedal (top of menu)  or  Ctrl + P\n"
+            "  Resume                 Select Resume  or  Ctrl + P\n"
+            "  Close menu             Hold left pedal, then Yes\n"
             "  Recenter drill         F9\n"
             "\n";
     }
     s += "CONTROLS\n";
     if (!paused){
         s += "  Hide / show this panel H\n";
-        s += "  Pause / Resume         Double-tap Stylus 1  or  Ctrl + P\n";
+        s += "  Pause / Resume         Hold left pedal  or  Ctrl + P\n";
     }
     s +=
-            "  Camera clutch          Hold 1  or  Stylus 1  or  Alt (HMD)\n"
-            "  Drill (hold-to-run)    Middle pedal (b)\n"
-            "  Burr type / size       Pause menu (double-tap Stylus 1)\n"
+            "  Camera clutch          Hold 1 (microscope)  or  Alt (HMD)\n"
+            "  Drill (hold-to-run)    Right pedal (c)\n"
+            "  Burr type / size       Pause menu (hold left pedal)\n"
             "  Suction size           F  (7 / 5 / 3 Fr)\n"
             "  Place WiVRn scene      Hold F10 (drag) / F11 lap / F12 look\n"
-            "  Device clutch          Hold Stylus 2\n"
+            "  Device clutch          Hold stylus action button\n"
             "  Look                   Arrow Keys\n"
             "  Roll                   Ctrl + Mouse Wheel\n"
-            "  Zoom in / out          Microscope button (1) + left / right pedal (a / c)\n"
-            "  Orbit around burr      Ctrl + hold Stylus 2\n"
-            "  Recenter drill         Double-tap Stylus 2  or  F9\n"
-            "  Recenter suction       Double-tap Stylus 2 on the suction device\n"
+            "  Zoom in / out          Microscope button (1) + left / middle pedal (a / b)\n"
+            "  Orbit around burr      Ctrl + hold action button\n"
+            "  Recenter drill         Double-tap action button  or  F9\n"
+            "  Recenter suction       Double-tap action button on the suction device\n"
             "  Left / Right view      F3 / F4\n"
             "  Quick roll L / R       F1 / F2\n"
             "  Specular legacy/new    F5\n"
@@ -2876,6 +2952,7 @@ void afVolmetricDrillingPlugin::setVrHudVisible(bool visible)
 {
     m_vrHudVisible = visible;
     m_pauseSubmenu = PauseSubmenu::NONE;
+    m_pauseConfirmClose = false;
     applySimPause(visible);
     if (!visible){
         writeRtxPauseHud("");
@@ -2916,7 +2993,7 @@ void afVolmetricDrillingPlugin::setVrHudVisible(bool visible)
     cerr << "INFO! Simulator " << (m_simPaused ? "PAUSED" : "RESUMED")
          << " sim=" << (m_worldPtr ? m_worldPtr->getSimulationTime() : -1.0)
          << " | Pause menu " << (visible ? "ON" : "OFF")
-         << " (Ctrl+P or dbl-click stylus button 1)" << endl;
+         << " (Ctrl+P or hold the left pedal)" << endl;
 }
 
 string afVolmetricDrillingPlugin::findAnatomyAdfPathFromArgs(int argc, char** argv) const

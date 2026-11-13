@@ -262,6 +262,12 @@ int DrillManager::init(afWorldPtr a_worldPtr, CameraPanelManager* a_panelManager
         cerr << "INFO! LOADED IRRIGATION CANNULA " << cannulaPath << endl;
     }
 
+    {
+        const char* suctionEnv = getenv("FIVRS_SUCTION_DEVICE");
+        m_suctionHidden = suctionEnv && string(suctionEnv) == "0";
+        const char* irrigationEnv = getenv("FIVRS_IRRIGATION");
+        m_irrigationHidden = irrigationEnv && string(irrigationEnv) == "0";
+    }
     m_suctionBody = a_worldPtr->getRigidBody("frazier_suction");
     if (!m_suctionBody){
         cerr << "WARNING! No frazier_suction body. Suction will not be tracked or logged." << endl;
@@ -413,7 +419,7 @@ int DrillManager::init(afWorldPtr a_worldPtr, CameraPanelManager* a_panelManager
     const char* suctionEnv = getenv("FIVRS_SUCTION_DEVICE");
     const bool suctionAllowed = !(suctionEnv && string(suctionEnv) == "0");
     if (!suctionAllowed){
-        cout << "INFO! Study mode: second haptic device not used; the suction stays parked." << endl;
+        cout << "INFO! Study mode: second haptic device not used; the suction is hidden." << endl;
     }
     if (suctionAllowed && m_deviceHandler->getNumDevices() > 1 && m_deviceHandler->getDevice(m_suctionDevice, 1) && m_suctionDevice){
         // The drill cursor calls open() on device 0. Nothing else opens device 1,
@@ -1274,7 +1280,7 @@ void DrillManager::showOnlyActive(){
         if (!m_cannulaMeshes[di]){
             continue;
         }
-        m_cannulaMeshes[di]->setShowEnabled(m_show && di == m_activeDrillIdx);
+        m_cannulaMeshes[di]->setShowEnabled(m_show && !m_irrigationHidden && di == m_activeDrillIdx);
     }
 }
 
@@ -1284,7 +1290,7 @@ void DrillManager::showActiveSuction()
         if (!m_suctionMeshes[i]){
             continue;
         }
-        const bool show = (i == m_suctionIdx);
+        const bool show = !m_suctionHidden && i == m_suctionIdx;
         m_suctionMeshes[i]->setShowEnabled(show);
         if (show){
             m_suctionMeshes[i]->setLocalTransform(m_T_s);

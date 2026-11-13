@@ -29,31 +29,52 @@ def run(session, io, clock, seconds, **state):
         session.tick()
 
 
-def test_pause_menu_stylus_moves_pedals_select_and_back():
+def test_pause_menu_left_pedal_moves_middle_selects():
     from PyQt5 import QtWidgets
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])  # noqa: F841
     io = sr.RehearsalIO()
     sim = sr.SimulatorStandIn(io)
     sim._timer.stop()
-    sim._double_tap_1()                            # open
+    sim._hold_a()                                  # hold the left pedal: open
     assert io.state["paused"] and "FIVRS Pause Menu" in io.pause_menu.text()
-    assert "Left pedal" in io.pause_menu.text() and "Middle pedal" in io.pause_menu.text()
-    sim._pedal_c()                                 # right pedal does nothing in the menu
+    assert "Tap left pedal" in io.pause_menu.text() and "Middle pedal" in io.pause_menu.text()
+    assert "Hold left pedal" in io.pause_menu.text()
+    assert "    Resume" in io.pause_menu.text()
+    sim._hold_a()                                  # hold in the menu: close? Yes / No
+    assert "Close pause menu and return to simulator?" in io.pause_menu.text()
+    assert "  > Yes" in io.pause_menu.text()
+    sim._pedal_a()                                 # tap: No
+    assert "  > No" in io.pause_menu.text()
+    sim._pedal_b()                                 # select No: back to the menu, still paused
+    assert io.state["paused"] and "Close pause menu" not in io.pause_menu.text()
     assert io.pause_menu.row == 0 and io.pause_menu.sub is None
-    sim._pedal_a()                                 # select: open Saved camera views
+    sim._hold_a(); sim._pedal_a(); sim._pedal_a()  # close? Yes (toggled twice)
+    sim._pedal_b()                                 # select Yes: menu closes, simulator resumes
+    assert not io.state["paused"]
+    sim._hold_a()                                  # open it again for the rest
+    assert io.state["paused"] and io.pause_menu.row == 0
+    sim._pedal_b()                                   # select: open Saved camera views
     assert io.pause_menu.sub == "views" and "        > Home" in io.pause_menu.text()
-    sim._pedal_b()                                 # back to the top, still paused
+    assert "          Back" in io.pause_menu.text()
+    for _ in range(3):
+        sim._pedal_a()                             # down past the three views to Back
+    assert "        > Back" in io.pause_menu.text()
+    sim._pedal_b()                                   # Back: to the top, still paused
     assert io.state["paused"] and io.pause_menu.sub is None
-    sim._tap_2(); sim._tap_2(); sim._pedal_a()     # down twice: Burr size, on the current 6mm
+    sim._pedal_a(); sim._pedal_a(); sim._pedal_b()   # down twice: Burr size, on the current 6mm
     assert "        > 6mm" in io.pause_menu.text()
-    sim._tap_2(); sim._pedal_a()                   # down wraps to 1mm
-    assert io.state["drill"] == "1mm"
-    sim._tap_1(); sim._pedal_a()                   # up from Burr size: Burr type list
+    sim._pedal_a(); sim._pedal_a(); sim._pedal_b()   # past Back, wrapping to 1mm
+    assert io.state["drill"] == "1mm" and io.pause_menu.sub is None
+    for _ in range(3):
+        sim._pedal_a()                             # Burr size -> Resume -> Saved views -> Burr type
+    sim._pedal_b()
     assert io.pause_menu.sub == "type"
-    sim._tap_2(); sim._pedal_a()                   # down to Diamond
+    sim._pedal_a(); sim._pedal_b()                   # down to Diamond
     assert io.state["style"] == "diamond"
-    sim._pedal_b()                                 # at the top: exit
+    sim._pedal_a(); sim._pedal_a()                 # Burr type -> Burr size -> Resume
+    assert "  > Resume" in io.pause_menu.text()
+    sim._pedal_b()                                   # Resume: exit
     assert not io.state["paused"]
     sim.close()
 
@@ -105,19 +126,24 @@ def test_full_rehearsal():
     held["scope_button"] = False; tick()
     advance()                                           # moving the microscope
     held["scope_button"] = True; tick()
-    sim._pedal_a(); sim._pedal_a(); sim._pedal_c(); sim._pedal_c(); tick()
+    sim._pedal_a(); sim._pedal_a(); sim._pedal_b(); sim._pedal_b(); tick()
     held["scope_button"] = False; tick()
     assert session.progress.step_done, (io.state["zoom_in"], io.state["zoom_out"])
     assert io.state["advance_count"] == 5  # the pedal presses with the microscope button zoomed instead
     advance()                                           # zooming
     io.state["removed_voxels"] = 300; tick(); advance() # drilling
-    sim._double_tap_1(); tick()                         # open the pause menu
+    sim._hold_a(); tick()                               # hold the left pedal: open the pause menu
     count = io.state["advance_count"]
-    sim._pedal_a(); tick()                              # left pedal selects in the menu ...
+    sim._pedal_a(); tick()                              # a left-pedal tap moves down in the menu ...
     assert session.phase == "tutorial" and io.state["advance_count"] == count  # ... and does not advance
-    assert io.pause_menu.sub == "views"
-    sim._pedal_b(); tick()                              # back out of the list
-    held["drilling"] = True; sim._pedal_b(); tick(1.0)  # close with the middle pedal, keep it down
+    assert io.pause_menu.row == 1
+    sim._pedal_b(); tick()                                # the middle pedal opens the Burr type list
+    assert io.pause_menu.sub == "type"
+    sim._pedal_a(); sim._pedal_a(); sim._pedal_b(); tick()  # down to Back
+    assert io.pause_menu.sub is None
+    sim._pedal_a(); sim._pedal_a(); tick()              # Burr size, then Resume
+    held["drilling"] = True; tick()                     # the right pedal is already down ...
+    sim._pedal_b(); tick(1.0)                             # ... when Resume closes the menu
     assert not io.state["paused"]
     assert io.state["removed_voxels"] == 300, "the drill waits until the pedal is released"
     held["drilling"] = False; tick()
@@ -170,7 +196,7 @@ def test_windows_build_and_preview_shows_text():
 
 
 if __name__ == "__main__":
-    test_pause_menu_stylus_moves_pedals_select_and_back()
+    test_pause_menu_left_pedal_moves_middle_selects()
     test_full_rehearsal()
     test_windows_build_and_preview_shows_text()
     print("ok")

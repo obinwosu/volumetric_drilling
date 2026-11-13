@@ -32,6 +32,7 @@ sys.path.insert(0, str(REPO / "scripts" / "study"))
 import study_session  # noqa: E402
 import study_rehearsal  # noqa: E402
 import study_checks  # noqa: E402
+import feedback_order  # noqa: E402
 
 STUDY_VOLUME = "volume_256_RT143.yaml"  # Anatomy A
 KEY_FILE = "participant_key.csv"
@@ -90,6 +91,7 @@ class StudyPanel(QtWidgets.QWidget):
         self.recording_dir = None
         self.stand_in = None
         self._done_shown = False
+        self._first_views = {}  # Study ID -> first feedback view, fixed once chosen
         self._analysis = QProcess(self)
         self._analysis.setProcessChannelMode(QProcess.MergedChannels)
         self._analysis.readyReadStandardOutput.connect(self._analysis_output)
@@ -181,12 +183,20 @@ class StudyPanel(QtWidgets.QWidget):
         self.desktop_box = QtWidgets.QCheckBox("Desktop view instead of the headset (development)")
         self.desktop_box.setToolTip(
             "Runs the real simulator with the RTX view in a normal window and the headset text drawn in it. "
-            "No Quest needed. Move the view by holding Stylus 1 and moving the stylus.")
+            "No Quest needed. Move the view by holding the microscope button (or Alt) and moving the stylus.")
         self.desktop_box.setVisible(not self.rehearsal_only)
         self.desktop_box.toggled.connect(lambda _on: self.refresh_status())
         self.desktop_box.toggled.connect(lambda _on: self._name_changed())
         self.rehearse_box.toggled.connect(lambda on: self.desktop_box.setEnabled(not on))
         layout.addWidget(self.desktop_box)
+        self.practice_box = QtWidgets.QCheckBox("Practice run in the headset, not a participant (development)")
+        self.practice_box.setToolTip(
+            "The real study setup in the headset, but saved under study_dev with its own Study IDs: "
+            "it never uses a participant Study ID or counts toward the feedback order balance.")
+        self.practice_box.setVisible(not self.rehearsal_only)
+        self.practice_box.toggled.connect(lambda _on: self._name_changed())
+        self.rehearse_box.toggled.connect(lambda on: self.practice_box.setEnabled(not on))
+        layout.addWidget(self.practice_box)
 
         # System status: what Start needs, then what the launch is doing.
         system = QtWidgets.QGroupBox("System status")
@@ -266,20 +276,26 @@ class StudyPanel(QtWidgets.QWidget):
         box = getattr(self, "desktop_box", None)
         return bool(box is not None and box.isChecked())
 
+    def _dev_run(self) -> bool:
+        """Desktop view or headset practice: saved under study_dev, never a participant."""
+        box = getattr(self, "practice_box", None)
+        return self._desktop() or bool(box is not None and box.isChecked())
+
     def _name_changed(self, *_):
         text = self.name_edit.text().strip()
-        bad = bool(text) and not self._name_ok() and not self.rehearsing and not self._desktop()
+        bad = bool(text) and not self._name_ok() and not self.rehearsing and not self._dev_run()
         self.name_hint.setStyleSheet("color: #d9534f;" if bad else "color: gray;")
         if self.session is None or self.session.phase == "done":
             self._set_buttons(None if self.session is None else "done")
 
     def _set_buttons(self, phase):
         idle = phase in (None, "done")
-        self.start_button.setEnabled(idle and (self.rehearsing or self._desktop() or self._name_ok()))
+        self.start_button.setEnabled(idle and (self.rehearsing or self._dev_run() or self._name_ok()))
         self.name_edit.setEnabled(idle)
         self.rehearse_box.setEnabled(idle and not self.rehearsal_only)
         if hasattr(self, "desktop_box"):
             self.desktop_box.setEnabled(idle and not self.rehearsing)
+            self.practice_box.setEnabled(idle and not self.rehearsing)
         self.skip_button.setEnabled(phase == "tutorial")
         self.begin_button.setEnabled(phase in ("tutorial", "ready", "briefing"))
         self.end_button.setEnabled(phase in ("armed", "running"))
@@ -379,8 +395,9 @@ class StudyPanel(QtWidgets.QWidget):
             self.start_rehearsal()
             return
         name = self.name_edit.text().strip()
-        if self._desktop() and not self._name_ok():
-            name = name or "dev_desktop"  # development run: any name, or none
+        if self._dev_run() and not self._name_ok():
+            # development run: any name, or none
+            name = name or ("dev_desktop" if self._desktop() else "dev_practice")
         elif not self._name_ok():
             QtWidgets.QMessageBox.warning(self, "Study", "Enter the name as lastname_firstname, for example smith_jane.")
             return
@@ -401,8 +418,10 @@ class StudyPanel(QtWidgets.QWidget):
                 return
         self.activity.clear()
         self.activity_line("Starting the study session...")
-        # Desktop runs are development: their own key and recordings, never real Study IDs.
-        folder = "study_dev" if self.desktop_box.isChecked() else "study"
+        # Desktop and practice runs are development: their own key, recordings and
+        # feedback order log under study_dev, never real Study IDs.
+        practice = self._dev_run()
+        folder = "study_dev" if practice else "study"
         base = pathlib.Path(str(self.ui.gui_configuration.recording_base_path.get())).expanduser() / folder
         key = base / KEY_FILE
         study_id = next_study_id(key)
@@ -435,13 +454,13 @@ class StudyPanel(QtWidgets.QWidget):
             "volume_adf": str(volume_adf),
             "volume_name": volume.volume_name,
             "starting_burr_mm": self.ui.get_starting_burr_mm(),
-            "study_mode": {"irrigation": False, "haptic_devices": 1,
+            "study_mode": {"irrigation": False, "haptic_devices": 1, "development": practice,
                            "display": "desktop RTX (development)" if desktop else "headset RTX"},
         }
         io = study_session.SessionIO(recorder_cmd=recorder_command(volume_adf))
         self.session = study_session.StudySession(io, study_id, self.recording_dir, metadata)
         self._done_shown = False
-        self.id_label.setText(f"Study ID: {study_id}")
+        self.id_label.setText(f"Study ID: {study_id}" + (" (development, saved in study_dev)" if practice else ""))
         self._timer.start()
 
     def start_rehearsal(self):
@@ -509,7 +528,7 @@ class StudyPanel(QtWidgets.QWidget):
         self.phase_label.setText(session.error or self.PHASE_TEXT.get(phase, phase))
         if phase == "tutorial":
             step = study_session.TUTORIAL[session.step]
-            status = ("done; waiting for the resident to press the left pedal"
+            status = ("done; waiting for the resident to tap the left pedal"
                       if session.progress.step_done else "in progress")
             self.step_label.setText(f"Tutorial page {session.step + 1} of {len(study_session.TUTORIAL)}: "
                                     f"{step.title} ({status})\n{' '.join(step.lines)}")
@@ -581,9 +600,17 @@ class StudyPanel(QtWidgets.QWidget):
         import socket
 
         study_id = self.session.study_id
-        number = int(re.sub(r"\D", "", study_id) or 0)
-        # The order of the two feedback views alternates by Study ID number.
-        first_view = "event-based" if number % 2 else "summary"
+        # The order of the two feedback views is balanced over completed sessions
+        # (feedback_order.py), and fixed for this resident once chosen.
+        first_view = self._first_views.get(study_id)
+        if first_view is None:
+            study_dir = self._study_dir()
+            first_view = feedback_order.first_view_for(study_dir, study_id)
+            self._first_views[study_id] = first_view
+            tally = feedback_order.counts(study_dir)
+            self.ui.print_info(
+                f"Feedback order for {study_id}: {first_view} first "
+                f"(completed so far: event-based first {tally['event-based']}, summary first {tally['summary']})")
         port = getattr(self, "_feedback_port", None)
         if port is None:
             with socket.socket() as probe:  # any free local port
@@ -593,8 +620,12 @@ class StudyPanel(QtWidgets.QWidget):
         url = f"http://127.0.0.1:{port}/?participant_id={study_id}&first_review_view={first_view}"
         return port, url, first_view
 
+    def _study_dir(self) -> pathlib.Path:
+        """The study (or study_dev) folder: participant key, order log, feedback state."""
+        return self.recording_dir.parent.parent
+
     def _feedback_state(self) -> pathlib.Path:
-        return self.recording_dir.parent.parent / "study_state.json"
+        return self._study_dir() / "study_state.json"
 
     def _start_feedback_server(self, args, log_path: pathlib.Path):
         self.stop_feedback_server()
@@ -660,6 +691,17 @@ class StudyPanel(QtWidgets.QWidget):
             window.activateWindow()
             self.phase_label.setText("Session complete: the resident finished the questionnaires and feedback.")
             self.ui.print_info("Resident finished the feedback and returned to the study window")
+            study_id = self.session.study_id
+            view = self._first_views.get(study_id)
+            if view is not None:
+                try:
+                    if feedback_order.record_completion(self._study_dir(), study_id, view, "return_to_simulator"):
+                        tally = feedback_order.counts(self._study_dir())
+                        self.ui.print_info(
+                            f"Logged {study_id} ({view} first). Completed so far: event-based first "
+                            f"{tally['event-based']}, summary first {tally['summary']}")
+                except OSError as exc:
+                    self.ui.print_info(f"ERROR! Could not update {feedback_order.ORDER_LOG}: {exc}")
         if "app ready" in text:
             intake = "intake app ready" in text
             if not self._feedback_opened:

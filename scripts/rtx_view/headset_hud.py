@@ -7,7 +7,7 @@ where the eyes already converge, so reading it needs no refocusing.
 
 Sources, all under /tmp/fivrs-rtx:
 - pause_hud.txt  written by the simulator while its pause menu is open
-                 (double-tap stylus button 1). Shown only while drill_state.json
+                 (hold the left pedal). Shown only while drill_state.json
                  also reports the simulator paused, so a stale file is ignored.
 - study_hud.json written by the study controller (scripts/study/study_session.py):
     {"panel": {"title": str, "lines": [str], "progress": [done], "checklist": [[label, done]],
@@ -16,7 +16,8 @@ Sources, all under /tmp/fivrs-rtx:
                              "marks": {region: label}}],
                "look": {"target": [x, y, z], "radius": float}} | null,
      "timer": {"remaining_s": float, "running": bool, "written_wall": float} | null,
-     "banner": str | null}
+     "banner": str | null,
+     "menu_help": panel | null}   shown above the pause menu while it is open
 
 While the RTX window is loading or restoring the bone it sets ``loading`` to
 (label, fraction); the eyes then show a plain card instead of the bone being built.
@@ -39,13 +40,12 @@ FONT_DIR = pathlib.Path("/usr/share/fonts/truetype/dejavu")
 IMAGE_DIR = pathlib.Path(__file__).resolve().parent / "hud_images"
 
 # Button regions on the photos in hud_images (pixels of the saved image).
-# Stylus: tip to the right. Which physical button the plugin calls "1" and "2"
-# is set here; swap the two entries if the rig says otherwise.
 PICTURES = {
-    # Stylus upright, tip down. Button 1 is the one nearest the tip.
+    # Stylus upright. The study uses one stylus button, the "action button" (the
+    # plugin's switch 0), nearer the stylus's active tip; the rig owner confirmed the
+    # circled button is the right one. The other button is broken on this rig's Touch.
     "stylus": {"file": "stylus.png", "regions": {
-        "2": ("ellipse", (24, 56, 95, 126)),
-        "1": ("ellipse", (24, 132, 95, 198)),
+        "action": ("ellipse", (24, 56, 95, 126)),
     }},
     "pedals": {"file": "pedals.png", "regions": {
         "left": ("rect", (15, 49, 249, 326)),
@@ -196,7 +196,7 @@ def _label_pill(draw, text, centre_x, y, font, colour=ACCENT, anchor_top=True):
 
 
 def _render_stylus(marks: dict, height: int, font):
-    """Upright stylus, button numbers on the left, what to do on the right of each marked button."""
+    """Upright stylus with what to do written to the right of each marked button."""
     from PIL import Image, ImageDraw
 
     photo = _photo("stylus")
@@ -205,7 +205,7 @@ def _render_stylus(marks: dict, height: int, font):
     body = photo.resize((max(1, int(photo.width * scale)), height), Image.LANCZOS)
     measure = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
     label_w = max([measure.textlength(str(v), font=font) for v in marks.values()] + [0])
-    left = int(font.size * 1.6)
+    left = int(font.size * 0.4)
     right = int(label_w + font.size * 3.2) if marks else 0
     image = Image.new("RGBA", (left + body.width + right, height), (0, 0, 0, 0))
     image.alpha_composite(body, (left, 0))
@@ -214,13 +214,9 @@ def _render_stylus(marks: dict, height: int, font):
     for region, (shape, box) in PICTURES["stylus"]["regions"].items():
         x0, y0, x1, y1 = (v * scale for v in box)
         cy = (y0 + y1) / 2
-        draw.text((left - font.size * 1.2, cy - font.size * 0.6), region, fill=(255, 255, 255, 255),
-                  font=font, stroke_width=2, stroke_fill=(0, 0, 0, 255))
         if region in marks:
             draw.ellipse((left + x0, y0, left + x1, y1), outline=ACCENT, width=line)
-            # Button 2's label goes up and right, button 1's down and right, so they never overlap.
-            ty = cy - font.size * 1.6 if region == "2" else cy + font.size * 1.6
-            ty = min(max(ty, font.size), height - font.size)
+            ty = min(max(cy, font.size), height - font.size)
             x = left + body.width + font.size * 1.2
             draw.line((left + x1, cy, x, ty), fill=ACCENT, width=line)
             text = str(marks[region])
@@ -251,7 +247,9 @@ def render_picture(picture: dict, height: int, font_px: int):
                 draw.ellipse(box, outline=ACCENT, width=line)
             else:
                 draw.rounded_rectangle(box, radius=line * 3, outline=ACCENT, width=line)
-            cx = (box[0] + box[2]) / 2
+            # Keep the label's pill inside the photo (the outer pedals sit at its edges).
+            half = draw.textlength(str(label), font=font) / 2 + max(3, font.size // 3) + 2
+            cx = min(max((box[0] + box[2]) / 2, half), image.width - half)
             _label_pill(draw, str(label), cx, min(box[3] - font.size * 2.2, height - font.size * 2.2), font)
         return np.asarray(image, dtype=np.uint8)
     # No photo for the microscope rig button or the headset: a labelled tile.
@@ -424,7 +422,17 @@ class HeadsetHud:
             panel_w = int(width * 0.4)
             rgba = self._cached(("pause", self._pause_text, width, height),
                                 lambda: render_panel(lines, panel_w, font_px, mono=True))
-            out.append((rgba, (width - rgba.shape[1]) // 2, (height - rgba.shape[0]) // 2))
+            y = (height - rgba.shape[0]) // 2
+            help_panel = (self._study or {}).get("menu_help")
+            if help_panel:
+                # Study tutorial: how to use the menu, in the top band, the menu below it.
+                key = ("menu_help", json.dumps(help_panel, sort_keys=True), width, height)
+                tip = self._cached(key, lambda: render_study_panel(help_panel, int(width * 0.86),
+                                                                   max(12, int(font_px * 0.85))))
+                top = int(height * 0.06)
+                out.append((tip, (width - tip.shape[1]) // 2, top))
+                y = max(y, top + tip.shape[0] + int(font_px * 0.5))
+            out.append((rgba, (width - rgba.shape[1]) // 2, y))
             return out  # the pause menu covers everything else
         study = self._study or {}
         panel = study.get("panel") or {}

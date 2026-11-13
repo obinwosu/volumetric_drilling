@@ -120,7 +120,7 @@ def test_full_session():
         advance(session, io)  # the resident's left pedal
         assert session.phase == "briefing" and io.locked is True and io.restore_requested
         assert io.state["drill"] == "6mm" and io.hud["panel"]["cover"]
-        assert io.hud["panel"]["footer"].startswith("Press the left foot pedal")
+        assert io.hud["panel"]["footer"].startswith("Tap the left foot pedal")
         run(session, io, 0.5)
         assert io.reload_requested and io.recorder == "on" and session.phase == "briefing"
         advance(session, io)  # read the introduction
@@ -223,7 +223,36 @@ def test_right_arrow_skips_steps_and_begins():
     assert session.phase == "armed"
 
 
+def test_welcome_ignores_the_last_runs_tap_count():
+    """The simulator restarts its tap count at 0; an old count must not block the welcome page."""
+    io = FakeIO()
+    io.state["advance_count"] = 37  # what the previous simulator left behind
+    session = ss.StudySession(io, "S001", pathlib.Path(tempfile.mkdtemp()), {})
+    run(session, io, 0.2)
+    assert session.progress.step_done and session.step == 0
+    io.state["advance_count"] = 0  # the new simulator starts writing
+    run(session, io, 0.2)
+    advance(session, io)
+    assert session.step == 1
+
+
+def test_state_file_from_an_earlier_simulator_is_ignored():
+    import os
+    import time
+    with tempfile.TemporaryDirectory() as folder:
+        path = pathlib.Path(folder) / "drill_state.json"
+        path.write_text(json.dumps({"advance_count": 37}))
+        old = time.time() - 600
+        os.utime(path, (old, old))
+        io = ss.SessionIO(runtime=folder)
+        assert io.read_state() is None
+        path.write_text(json.dumps({"advance_count": 0}))
+        assert io.read_state() == {"advance_count": 0}
+
+
 if __name__ == "__main__":
+    test_welcome_ignores_the_last_runs_tap_count()
+    test_state_file_from_an_earlier_simulator_is_ignored()
     test_reload_from_an_earlier_run_does_not_count_and_a_new_one_does()
     test_full_session()
     test_skip_and_reset_failure_returns_to_ready()
