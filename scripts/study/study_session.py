@@ -9,7 +9,7 @@ can replace it.
 
 Flow:
     tutorial  -> each step ticks off from the simulator's live state; left pedal advances
-    ready     -> "Press the left foot pedal to begin your study session" (or the proctor's Begin)
+    ready     -> "Tap the left foot pedal to begin your study session" (or the proctor's Begin)
     briefing  -> the study introduction covers the view while, behind it, the drill is
                  locked, the burr goes back to 6 mm cutting, the bone is restored in AMBF and
                  reloaded in RTX and the recorder starts; the left pedal (once all that is
@@ -40,7 +40,7 @@ TRIAL_SECONDS = 600.0
 WARNING_SECONDS = 60.0
 RESET_TIMEOUT_S = 45.0
 RECORDER_START_TIMEOUT_S = 30.0
-PAUSE_FOOTER = "Double-tap Stylus 1 any time for the pause menu."
+PAUSE_FOOTER = "Hold the left pedal any time for the pause menu."
 
 BRIEFING_TITLE = "The study session"
 BRIEFING_LINES = [
@@ -56,7 +56,7 @@ BRIEFING_LINES = [
     "After 10 minutes, you will be asked to complete a handful of brief questionnaires and "
     "review two forms of feedback.",
 ]
-BRIEFING_FOOTER = "Press the left foot pedal once you are ready to begin."
+BRIEFING_FOOTER = "Tap the left foot pedal once you are ready to begin."
 
 @dataclass
 class Step:
@@ -66,28 +66,28 @@ class Step:
     pictures: list = field(default_factory=list)  # headset_hud device pictures with marked buttons
 
 
-ADVANCE_TEXT = "Press the left foot pedal to advance"
+ADVANCE_TEXT = "Tap the left foot pedal to advance"
 
 # Wording shown in the headset. Each step is checked from drill_state.json in _tutorial();
 # once done it turns green, the resident may keep practising, and the left pedal advances.
 TUTORIAL = [
     Step("welcome", "Welcome",
          ["This tutorial includes steps intended to familiarize you with the drilling simulator. "
-          "After completing a tutorial step, press the left foot pedal to advance. Once you complete "
+          "After completing a tutorial step, tap the left foot pedal to advance. Once you complete "
           "all tutorial steps, you may begin the study session."],
          [{"device": "pedals", "marks": {"left": "Advance"}}]),
     Step("drill_move", "Moving the drill",
          ["Move the stylus to move the drill around the surgical field."],
          [{"device": "stylus", "marks": {}}]),
     Step("reposition", "Repositioning the haptic device",
-         ["The haptic device has a set working area. Holding stylus button 2 allows you to "
-          "reposition the device without moving the drill.",
-          "Hold button 2, move the stylus, then release."],
-         [{"device": "stylus", "marks": {"2": "Hold"}}]),
+         ["The haptic device has a set working area. Holding the stylus action button allows "
+          "you to reposition the device without moving the drill.",
+          "Hold the action button, move the stylus, then release."],
+         [{"device": "stylus", "marks": {"action": "Hold"}}]),
     Step("recenter", "Recentering the drill in view",
          ["To quickly recenter the drill and keep the haptic device in the working area, "
-          "double-tap stylus button 2."],
-         [{"device": "stylus", "marks": {"2": "Double-tap"}}]),
+          "double-tap the stylus action button."],
+         [{"device": "stylus", "marks": {"action": "Double-tap"}}]),
     Step("camera", "Moving the microscope",
          ["The view in the simulator is controlled by the position of the Quest headset. To move "
           "the camera, press and hold the button on the microscope handle and then reposition "
@@ -96,25 +96,32 @@ TUTORIAL = [
          [{"device": "scope", "marks": {"button": "Hold"}}, {"device": "headset", "marks": {}}]),
     Step("zoom", "Zooming in and out",
          ["To zoom in, press the button on the microscope AND press the left foot pedal. To zoom "
-          "out, press the button on the microscope AND press the right foot pedal.",
+          "out, press the button on the microscope AND press the middle foot pedal.",
           "Zoom in, then zoom out.",
           "Keep the microscope button held while zooming: tapping the left pedal on its own "
           "moves on to the next step."],
          [{"device": "scope", "marks": {"button": "Hold"}},
-          {"device": "pedals", "marks": {"left": "Zoom in", "right": "Zoom out"}}]),
+          {"device": "pedals", "marks": {"left": "Zoom in", "middle": "Zoom out"}}]),
     Step("drill", "Activating the drill",
-         ["To activate the drill, press the middle pedal. Practice making contact and removing bone.",
+         ["To activate the drill, press and hold the right pedal. Practice making contact and "
+          "removing bone.",
           "This practice bone is restored before the study session."],
-         [{"device": "pedals", "marks": {"middle": "Drill"}}]),
+         [{"device": "pedals", "marks": {"right": "Drill"}}]),
     Step("pause", "The pause menu",
-         ["To open the pause menu, double-tap stylus button 1. The burr size and type are "
-          "changed here.",
-          "In the menu: stylus button 2 moves down, stylus button 1 moves up, the left pedal "
-          "selects, and the middle pedal goes back or closes the menu.",
-          "Open the pause menu, then close it with the middle pedal."],
-         [{"device": "stylus", "marks": {"1": "Double-tap: open   Tap: up", "2": "Tap: down"}},
-          {"device": "pedals", "marks": {"left": "Select", "middle": "Back / close"}}]),
+         ["The pause menu pauses the simulator. The burr size and type are changed there.",
+          "To open the pause menu, press and hold the left foot pedal. Open it now."],
+         [{"device": "pedals", "marks": {"left": "Open"}}]),
 ]
+
+# Shown above the pause menu while it is open during the tutorial (headset_hud draws it
+# only while the simulator reports paused). The pause step's page covers opening only.
+MENU_HELP = {
+    "title": "Using the pause menu",
+    "lines": ["Tap the left pedal to move down, and press the middle pedal to select. "
+              "Each list ends with Back.",
+              "To close the menu, select Resume, or hold the left pedal and choose Yes."],
+    "pictures": [{"device": "pedals", "marks": {"left": "Down / Close", "middle": "Select"}}],
+}
 
 # Thresholds for each tutorial check.
 DRILL_TRAVEL_UNITS = 0.5   # simulator units of tip travel (about 25 mm)
@@ -151,13 +158,20 @@ class SessionIO:
         self.recorder_cmd = recorder_cmd
         self.recorder = None
         self._recorder_log = None
+        # drill_state.json outlives the simulator. Until the new simulator writes
+        # it, the file still holds the last run's counters (advance_count etc.).
+        # File times run on a coarser clock than time.time(), hence the margin.
+        self._since = time.time() - 2.0
 
     def now(self) -> float:
         return time.time()
 
     def read_state(self):
+        path = self.runtime / "drill_state.json"
         try:
-            return json.loads((self.runtime / "drill_state.json").read_text())
+            if path.stat().st_mtime < self._since:
+                return None  # left over from an earlier simulator run
+            return json.loads(path.read_text())
         except (OSError, json.JSONDecodeError):
             return None
 
@@ -408,6 +422,8 @@ class StudySession:
                 p.advance_base = int(state.get("advance_count") or 0)
                 self.progress.done[key] = True
                 self._log("tutorial_step_done", step=key)
+        elif int(state.get("advance_count") or 0) < p.advance_base:
+            p.advance_base = int(state.get("advance_count") or 0)  # the simulator restarted
         elif not state.get("paused") and int(state.get("advance_count") or 0) > p.advance_base:
             self._log("tutorial_step_advanced", step=key)
             self._advance_step()
@@ -536,14 +552,14 @@ class StudySession:
                 panel["progress"] = []
             if step.key == "camera" and p.look_target is not None and not p.step_done:
                 panel["look"] = {"target": p.look_target, "radius": LOOK_RADIUS}
-            return {"panel": panel, "timer": None, "banner": None}
+            return {"panel": panel, "timer": None, "banner": None, "menu_help": MENU_HELP}
         if self.phase == "ready":
             lines = ["You have completed the tutorial. You may keep practicing."]
             if self.error:
                 lines = [self.error, "Please tell the proctor."]
             return {"panel": {"title": "Tutorial complete", "lines": lines, "done": True,
-                              "advance": None if self.error else "Press the left foot pedal to begin your study session"},
-                    "timer": None, "banner": None}
+                              "advance": None if self.error else "Tap the left foot pedal to begin your study session"},
+                    "timer": None, "banner": None, "menu_help": MENU_HELP}
         if self.phase == "briefing":
             footer = BRIEFING_FOOTER
             if self._briefing_ack and not self._reset_ready:

@@ -802,6 +802,10 @@ class Ui(QtWidgets.QWidget):
             # AMBF's output also goes to a file, so a crash can be read after the window closes.
             self._ambf_log_path = pathlib.Path("/tmp/fivrs-rtx/ambf.log")
             self._ambf_log_path.parent.mkdir(parents=True, exist_ok=True)
+            # The previous run's log is kept beside it, so a problem can still be
+            # read after the simulator was reopened (2026-11-11).
+            if self._ambf_log_path.exists():
+                self._ambf_log_path.replace(self._ambf_log_path.with_name("ambf.prev.log"))
             self._ambf_log_path.write_text(f"{self.get_time_as_str()}AMBF [{mode}] {' '.join(self._current_args)}\n")
             self._ambf_process.start(ambf_bin, self._current_args)
             if use_rtx:
@@ -812,8 +816,7 @@ class Ui(QtWidgets.QWidget):
                 self._start_rtx_view(repo_root, headset=use_openxr)
             if not self._ambf_process.waitForStarted(5000):
                 self.print_info(f"ERROR! Failed to start AMBF: {ambf_bin}")
-                if self._rtx_process.state() != QProcess.NotRunning:
-                    self._rtx_process.terminate()
+                self._stop_rtx_process()
                 self.button_start_simulation.setText("Start Simulation")
                 self._set_sim_running_style(False)
                 return
@@ -837,8 +840,11 @@ class Ui(QtWidgets.QWidget):
             )
             return
         if self._rtx_process.state() != QProcess.NotRunning:
+            # The view exits within 8 s of being asked; kill it if it has not.
             self._rtx_process.terminate()
-            self._rtx_process.waitForFinished(2000)
+            if not self._rtx_process.waitForFinished(9000):
+                self._rtx_process.kill()
+                self._rtx_process.waitForFinished(2000)
         log_dir = pathlib.Path("/tmp/fivrs-rtx")
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = log_dir / "view.log"
@@ -859,6 +865,7 @@ class Ui(QtWidgets.QWidget):
             "export __GLX_VENDOR_LIBRARY_NAME=\"${__GLX_VENDOR_LIBRARY_NAME:-nvidia}\" && "
             "export VK_DRIVER_FILES=\"${VK_DRIVER_FILES:-/usr/share/vulkan/icd.d/nvidia_icd.json}\" && "
             + ("export FIVRS_IRRIGATION=0 && " if not options["irrigation"] else "")
+            + ("export FIVRS_SUCTION_DEVICE=0 && " if not options["suction"] else "")
             + f"export FIVRS_DLSS={shlex.quote(options['dlss'])} && "
             + f"export FIVRS_SPP={int(options['samples'])} && "
             + (f"export FIVRS_MAX_BOUNCES={int(options['bounces'])} && " if options["bounces"] else "")
@@ -1063,10 +1070,27 @@ class Ui(QtWidgets.QWidget):
             )
         self.button_start_simulation.setText("Start Simulation")
         self._set_sim_running_style(False)
-        if self._rtx_process.state() != QProcess.NotRunning:
-            self._rtx_process.terminate()
+        self._stop_rtx_process()
         self._close_rtx_splash()
         self._stop_fluid()
+
+    def _stop_rtx_process(self):
+        """Ask the RTX view to close, and kill it if it is still running 10 s later.
+
+        A view left running holds about 7 GB of RAM; a few of them froze the PC (2026-11-11).
+        """
+        if self._rtx_process.state() == QProcess.NotRunning:
+            return
+        pid = self._rtx_process.processId()
+        self._rtx_process.terminate()
+
+        def kill_if_still_running():
+            # Only the same run: a new RTX view may have been started since.
+            if self._rtx_process.state() != QProcess.NotRunning and self._rtx_process.processId() == pid:
+                self.print_info("RTX view did not close; killing it")
+                self._rtx_process.kill()
+
+        QTimer.singleShot(10000, kill_if_still_running)
 
     def close_simulation(self):
         """Close AMBF on purpose. QProcess reports that as a crash; this run should not."""

@@ -46,6 +46,7 @@
 #include "footpedal.h"
 #include "camera_panel_manager.h"
 #include "wave_generator.h"
+#include "haptic_safety.h"
 #include "gaze_marker_controller_jagged.h" // change bewteen gaze_marker_controller_smooth vs. gaze_marker_controller_jagged
 #include "drill_manager.h"
 #include "video_recording_controller.h"
@@ -144,7 +145,7 @@ protected:
     string findAnatomyAdfPathFromArgs(int argc, char** argv) const;
     string readLateralityFromAdf(const string& adfPath) const;
     void showNotice(const string& text, double durationSec = 4.0);
-    // Desktop + VR pause / session menu (Ctrl+P or dbl-click stylus btn 1).
+    // Desktop + VR pause / session menu (Ctrl+P or hold the left pedal).
     void applyStereoCenteredHud();
     void ensurePauseMenuLabel();
     void setVrHudVisible(bool visible);
@@ -158,6 +159,10 @@ protected:
     enum class PauseSubmenu { NONE, VIEWS, BURR_TYPE, BURR_SIZE };
     PauseSubmenu m_pauseSubmenu = PauseSubmenu::NONE;
     int m_pauseSubIndex = 0;
+    // "Close pause menu and return to simulator?" Holding the left pedal in the menu
+    // asks this; the left pedal toggles Yes / No and the middle pedal selects.
+    bool m_pauseConfirmClose = false;
+    bool m_pauseConfirmYes = true;
     int pauseViewCount();
     int pauseRowCount();
     int pauseSubmenuCount() const;
@@ -268,10 +273,13 @@ private:
     // Rising-edge trackers for X11 FootSwitch fallback (linux KEY_F17/18/19 + 8).
     bool m_xFootStylePrev = false;
     bool m_xFootSizePrev = false;
-    // Left/right pedals (a/c) also act as zoom/orbit modifiers with a stylus
-    // button. A tap still changes the burr; a hold used with the stylus does not.
+    // With the microscope button held, the left / middle pedals zoom in / out.
     bool m_pedalDrillPrev = false;
-    bool m_pedalDrillSuppress = false;  // pause menu closed by the middle pedal: wait for release
+    bool m_pedalDrillSuppress = false;  // drill pedal held through the pause menu: wait for release
+    // Left pedal: a tap moves on (tutorial) or down (pause menu); a long hold opens the menu.
+    double m_leftPedalDownTime = -1.0;
+    bool m_leftPedalLongFired = false;
+    bool m_leftPedalZoomed = false;  // the microscope button was held during this press
 
     // Study mode: /tmp/fivrs-rtx/study_drill_lock stops the drill (timed trial over).
     bool m_studyDrillLock = false;
@@ -332,8 +340,6 @@ private:
     bool m_vrHudVisible = false;
     bool m_simPaused = false;
     double m_wallTimeAtPause = -1.0;
-    bool m_btn1Prev = false;
-    double m_btn1LastClickTime = -1.0;
     bool m_btn2Prev = false;
     double m_btn2LastClickTime = -1.0;
     bool m_suctionBtn2Prev = false;
@@ -344,6 +350,8 @@ private:
     // Last contact force, held across the brief gap after a voxel is deleted.
     cVector3d m_heldHapticForce = cVector3d(0.0, 0.0, 0.0);
     double m_hapticHoldSeconds = 0.0;
+    // Rate limit + oscillation cutoff on the drill force (haptic_safety.h).
+    HapticSafety m_hapticSafety;
     cVector3d m_heldSuctionForce = cVector3d(0.0, 0.0, 0.0);
     double m_suctionHoldSeconds = 0.0;
 

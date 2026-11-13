@@ -183,7 +183,7 @@ class StudyPanel(QtWidgets.QWidget):
         self.desktop_box = QtWidgets.QCheckBox("Desktop view instead of the headset (development)")
         self.desktop_box.setToolTip(
             "Runs the real simulator with the RTX view in a normal window and the headset text drawn in it. "
-            "No Quest needed. Move the view by holding Stylus 1 and moving the stylus.")
+            "No Quest needed. Move the view by holding the microscope button (or Alt) and moving the stylus.")
         self.desktop_box.setVisible(not self.rehearsal_only)
         self.desktop_box.toggled.connect(lambda _on: self.refresh_status())
         self.desktop_box.toggled.connect(lambda _on: self._name_changed())
@@ -528,7 +528,7 @@ class StudyPanel(QtWidgets.QWidget):
         self.phase_label.setText(session.error or self.PHASE_TEXT.get(phase, phase))
         if phase == "tutorial":
             step = study_session.TUTORIAL[session.step]
-            status = ("done; waiting for the resident to press the left pedal"
+            status = ("done; waiting for the resident to tap the left pedal"
                       if session.progress.step_done else "in progress")
             self.step_label.setText(f"Tutorial page {session.step + 1} of {len(study_session.TUTORIAL)}: "
                                     f"{step.title} ({status})\n{' '.join(step.lines)}")

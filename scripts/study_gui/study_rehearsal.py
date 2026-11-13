@@ -40,35 +40,49 @@ PREVIEW_SIZE = (960, 540)
 
 class PauseMenu:
     """The plugin's pause menu (volumetric_drilling.cpp pauseMenuListText): saved camera
-    views, burr type and burr size, each opening a list. Tap Stylus 2 down, tap Stylus 1
-    up, left pedal select, middle pedal back (or exit at the top)."""
+    views, burr type and burr size, each opening a list that ends in Back, then Resume.
+    Hold the left pedal to open it; in it a left-pedal tap moves down (wrapping) and
+    the middle pedal selects. Holding the left pedal in the menu asks "Close pause
+    menu and return to simulator?": a tap toggles Yes / No, the middle pedal selects.
+    The stylus does nothing in the menu."""
 
     VIEWS = ["Home", "View 1  empty", "View 2  empty"]
+    ROWS = 4              # 0 saved views, 1 burr type, 2 burr size, 3 Resume
 
     def __init__(self, state: dict):
         self.state = state
-        self.row = 0          # 0 saved views, 1 burr type, 2 burr size
+        self.row = 0
         self.sub = None       # None, "views", "type" or "size"
         self.sub_index = 0
         self.notice = ""
+        self.confirm = None   # None, or True / False for the highlighted Yes / No
 
     def open(self):
-        self.row, self.sub, self.notice = 0, None, ""
+        self.row, self.sub, self.notice, self.confirm = 0, None, "", None
+
+    def ask_close(self):
+        if self.confirm is None:
+            self.confirm = True
 
     def options(self):
         return {"views": self.VIEWS, "type": BURR_TYPES, "size": BURR_SIZES}[self.sub]
 
     def next(self, step: int = 1):
-        if self.sub:
-            self.sub_index = (self.sub_index + step) % len(self.options())
+        if self.confirm is not None:
+            self.confirm = not self.confirm
+        elif self.sub:
+            self.sub_index = (self.sub_index + step) % (len(self.options()) + 1)  # + Back
         else:
-            self.row = (self.row + step) % 3
+            self.row = (self.row + step) % self.ROWS
 
-    def previous(self):
-        self.next(-1)
-
-    def select(self):
-        if self.sub == "views":
+    def select(self) -> bool:
+        """Choose the highlighted row. True means Resume: leave the menu."""
+        if self.confirm is not None:
+            yes, self.confirm = self.confirm, None
+            return yes
+        if self.sub and self.sub_index == len(self.options()):
+            self.sub = None                                   # Back
+        elif self.sub == "views":
             self.notice, self.sub = f"View: {self.VIEWS[self.sub_index].split()[0]}", None
         elif self.sub == "type":
             self.state["style"] = BURR_TYPES[self.sub_index].lower()
@@ -81,16 +95,12 @@ class PauseMenu:
         elif self.row == 1:
             self.sub = "type"
             self.sub_index = BURR_TYPES.index(self.state["style"].capitalize())
-        else:
+        elif self.row == 2:
             self.sub = "size"
             self.sub_index = BURR_SIZES.index(self.state["drill"])
-
-    def back(self) -> bool:
-        """Back out of a list. At the top: True, meaning leave the menu."""
-        if self.sub:
-            self.sub = None
-            return False
-        return True
+        else:
+            return True
+        return False
 
     def text(self) -> str:
         """Same layout as the plugin's pause_hud.txt."""
@@ -100,19 +110,30 @@ class PauseMenu:
         def options(name, items):
             if self.sub != name:
                 return []
+            items = list(items) + ["Back"]
             return [("        > " if k == self.sub_index else "          ") + n for k, n in enumerate(items)]
 
         lines = ["FIVRS Pause Menu", ""]
+        if self.confirm is not None:
+            lines += ["Close pause menu and return to simulator?", "",
+                      ("  > Yes" if self.confirm else "    Yes"),
+                      ("    No" if self.confirm else "  > No"),
+                      "", "pause menu navigation",
+                      "Yes / No             Left pedal",
+                      "Select               Middle pedal"]
+            return "\n".join(lines) + "\n"
         lines += [row(0, "Saved camera views")] + options("views", self.VIEWS)
         lines += [row(1, "Burr type", self.state["style"].capitalize())] + options("type", BURR_TYPES)
         lines += [row(2, "Burr size", self.state["drill"])] + options("size", BURR_SIZES)
+        lines += [row(3, "Resume")]
         if self.notice:
             lines += ["", self.notice]
         lines += ["", "pause menu navigation",
-                  "Up / down            Stylus 1 / Stylus 2",
-                  "Select               Left pedal",
-                  ("Back                 Middle pedal" if self.sub else
-                   "Exit menu            Middle pedal")]
+                  "Down                 Tap left pedal",
+                  "Select               Middle pedal",
+                  ("Back                 Select Back" if self.sub else
+                   "Resume               Select Resume"),
+                  "Close menu           Hold left pedal"]
         return "\n".join(lines) + "\n"
 
 
@@ -241,15 +262,11 @@ class SimulatorStandIn(QtWidgets.QWidget):
         stylus = QtWidgets.QGroupBox("Stylus")
         grid = QtWidgets.QGridLayout(stylus)
         self._button(grid, 0, 0, "Move the stylus", "Moves the drill about 10 mm, or only the stylus "
-                     "while Button 2 is held", click=self._move)
-        self._button(grid, 0, 1, "Hold Button 2 (reposition)", toggle="device_clutch")
-        self._button(grid, 1, 0, "Double-tap Button 2", "Recenter (not in the pause menu)",
+                     "while the action button is held", click=self._move)
+        self._button(grid, 0, 1, "Hold action button (reposition)", toggle="device_clutch")
+        self._button(grid, 1, 0, "Double-tap action button", "Recenter (not in the pause menu)",
                      click=self._double_tap_2)
-        self._button(grid, 1, 1, "Double-tap Button 1", "Open the pause menu",
-                     click=self._double_tap_1)
-        self._button(grid, 2, 0, "Tap Button 1", "In the pause menu: up", click=self._tap_1)
-        self._button(grid, 3, 0, "Tap Button 2", "In the pause menu: down", click=self._tap_2)
-        self._button(grid, 2, 1, "Hold Ctrl + Button 2 (orbit)", toggle="orbit")
+        self._button(grid, 1, 1, "Hold Ctrl + action button (orbit)", toggle="orbit")
         controls.addWidget(stylus)
 
         scope = QtWidgets.QGroupBox("Microscope and headset")
@@ -268,11 +285,13 @@ class SimulatorStandIn(QtWidgets.QWidget):
 
         feet = QtWidgets.QGroupBox("Foot pedals")
         row = QtWidgets.QHBoxLayout(feet)
-        self.pedal_a = self._button(row, None, None, "Left (a)", click=self._pedal_a)
-        self.pedal_b = self._button(row, None, None, "Middle (b): hold to drill; back in the menu",
-                                    hold="drilling")
-        self.pedal_b.pressed.connect(self._pedal_b)
-        self.pedal_c = self._button(row, None, None, "Right (c)", click=self._pedal_c)
+        self.pedal_a = self._button(row, None, None, "Left (a): tap", "Advance; down in the pause menu",
+                                    click=self._pedal_a)
+        self._button(row, None, None, "Left (a): hold", "Open the pause menu; in it, close (Yes / No)", click=self._hold_a)
+        self.pedal_b = self._button(row, None, None, "Middle (b)",
+                                    "Select in the pause menu; zoom out with the microscope button",
+                                    click=self._pedal_b)
+        self.pedal_c = self._button(row, None, None, "Right (c): hold to drill", hold="drilling")
         controls.addWidget(feet)
         self._button(controls, None, None, "Right arrow key: skip tutorial step",
                      "Moves on without doing the step; elsewhere acts like the left pedal",
@@ -283,9 +302,10 @@ class SimulatorStandIn(QtWidgets.QWidget):
         controls.addWidget(self.status)
         note = QtWidgets.QLabel(
             "\"Hold\" buttons stay down until clicked again, so they can be combined with a pedal. "
-            "Left pedal: advances the tutorial, or zooms in with the microscope button. Right pedal: "
-            "zooms out with the microscope button. In the pause menu: tap Button 1 up, tap Button 2 "
-            "down, left pedal select, middle pedal back / exit.")
+            "Left pedal: a tap advances the tutorial, a hold opens the pause menu, and with the "
+            "microscope button it zooms in. Middle pedal: zooms out with the microscope button. Right "
+            "pedal: hold to drill. In the pause menu (pedals only): left tap moves down, middle selects; "
+            "each list ends in Back and Resume closes the menu.")
         note.setWordWrap(True)
         note.setStyleSheet("color: gray;")
         controls.addWidget(note)
@@ -357,54 +377,42 @@ class SimulatorStandIn(QtWidgets.QWidget):
         if paused:
             self.io.pause_menu.open()
 
-    def _double_tap_1(self):
-        # In the menu the two taps just move up twice.
-        if not self.io.state["paused"]:
-            self._toggle_pause()
-        else:
-            self._tap_1()
-            self._tap_1()
-
     def _double_tap_2(self):
-        if self.io.state["paused"]:
-            self._tap_2()
-            self._tap_2()
-        else:
+        if not self.io.state["paused"]:  # the stylus does nothing in the pause menu
             self._recenter()
 
     def _right_arrow(self):
         if not self.io.state["paused"]:
             self.io.state["skip_count"] += 1
 
-    def _tap_1(self):
-        if self.io.state["paused"]:
-            self.io.pause_menu.previous()
-
-    def _tap_2(self):
-        if self.io.state["paused"]:
-            self.io.pause_menu.next()
-
-    def _pedal_b(self):
-        """Middle pedal pressed: Back in the pause menu. As on the rig, the drill then
-        stays off until the pedal is released."""
-        if self.io.state["paused"]:
-            self._drill_suppress = True
-            if self.io.pause_menu.back():
-                self.io.state["paused"] = False
+    def _hold_a(self):
+        """Left pedal held down: opens the pause menu, or in it asks to close it
+        (not with the microscope button)."""
+        state = self.io.state
+        if state["scope_button"]:
+            return
+        if not state["paused"]:
+            self._toggle_pause()
+        else:
+            self.io.pause_menu.ask_close()
 
     def _pedal_a(self):
+        """Left pedal tapped."""
         state = self.io.state
         if state["paused"]:
-            self.io.pause_menu.select()
+            self.io.pause_menu.next()
         elif state["scope_button"]:
             self._zoom(-0.25)
         else:
             state["advance_count"] += 1
 
-    def _pedal_c(self):
+    def _pedal_b(self):
+        """Middle pedal: select in the pause menu (Resume leaves it); with the microscope
+        button, zoom out."""
         state = self.io.state
         if state["paused"]:
-            return
+            if self.io.pause_menu.select():
+                state["paused"] = False
         elif state["scope_button"]:
             self._zoom(0.25)
 
@@ -421,6 +429,9 @@ class SimulatorStandIn(QtWidgets.QWidget):
         drilling = self._held.get("drilling")
         if not drilling:
             self._drill_suppress = False
+        elif paused:
+            # As on the rig: a right pedal held through the pause menu waits for release.
+            self._drill_suppress = True
         drilling = drilling and not getattr(self, "_drill_suppress", False)
         if drilling and not paused and not state["drill_locked"]:
             state["removed_voxels"] += int(400 * dt)  # about 400 voxels a second
