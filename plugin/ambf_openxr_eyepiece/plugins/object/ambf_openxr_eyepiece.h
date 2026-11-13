@@ -155,8 +155,9 @@ protected:
     // black until the first RTX frame, then the latest RTX frame even if one is late.
     bool rtxPoll();
     void rtxUnmap();
+    /// Copy an eyepiece image into the headset. source 0 = the RTX eye texture.
+    bool rtxSubmitEye(int eyeIndex, GLuint source = 0);
     void reportStats();
-    bool rtxSubmitEye(int eyeIndex);
     void rtxEyepieceFov(int eyeIndex, XrFovf& fov) const;
     bool m_rtxAllowed = true;
     bool m_rtxOnly = false;
@@ -187,6 +188,40 @@ protected:
     double m_rtxEyepieceDeg = 65.0;
     /// Distance (m) at which the two eyepiece images fuse.
     double m_rtxFuseM = 1.5;
+
+    // ---- CHAI3D microscope eyes (graphics study) -----------------------------
+    // AMBF_OPENXR_CHAI_EYES=1: AMBF renders the microscope the way the RTX window
+    // does (two eyes a stereo base apart, toed in to the bone, main_camera's field
+    // of view, same image size) and the eyes go through the same eyepiece as the
+    // RTX ones, so only the renderer differs. The study text comes from
+    // /dev/shm/fivrs_hud_overlay (scripts/rtx_view/hud_overlay.py), drawn on top.
+    bool chaiRenderEyes();
+    bool hudPoll();
+    void hudUnmap();
+    void hudDraw(int32_t width, int32_t height);
+    bool m_chaiEyes = false;
+    cFrameBufferPtr m_chaiFbo[2];
+    uint32_t m_chaiW = 1152;
+    uint32_t m_chaiH = 864;
+    double m_chaiBaseUnits = 23.0 * 0.01007;  // rtx_eyes.BASE_MM * MM_TO_SIM
+    cWorld* m_chaiFront = nullptr;            // empty: AMBF's own panels are not shown
+    bool m_chaiAnnounced = false;
+    int m_hudFd = -1;
+    void* m_hudMap = nullptr;
+    size_t m_hudMapSize = 0;
+    unsigned long m_hudInode = 0;
+    double m_hudLastStatSec = -1.0e9;
+    uint64_t m_hudSeq = 0;
+    bool m_hudVisible = false;
+    std::vector<uint8_t> m_hudPixels;
+    GLuint m_hudTex = 0;
+    uint32_t m_hudTexW = 0;
+    uint32_t m_hudTexH = 0;
+    // RTX only, before the RTX window's first frame: the start-up card on black.
+    bool m_hudOverWait = false;
+    GLuint m_waitTex = 0;
+    uint32_t m_waitTexW = 0;
+    uint32_t m_waitTexH = 0;
 
     /// Headset frame-rate counter, printed every few seconds (see reportStats).
     double m_statStartSec = -1.0;

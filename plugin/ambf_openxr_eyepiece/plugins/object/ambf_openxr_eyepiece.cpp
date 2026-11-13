@@ -8,7 +8,9 @@
 
 #include "ambf_openxr_eyepiece.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <ctime>
 #include <cmath>
 #include <cstdlib>
@@ -293,6 +295,23 @@ int afOpenXREyepiece::init(const afBaseObjectPtr a_afObjectPtr, const afBaseObje
         const std::string v(rtxEnv);
         m_rtxAllowed = !(v == "0" || v == "false");
         m_rtxOnly = (v == "only");
+    }
+    if (const char* chaiEnv = std::getenv("AMBF_OPENXR_CHAI_EYES")){
+        const std::string v(chaiEnv);
+        m_chaiEyes = (v == "1" || v == "true");
+    }
+    if (m_chaiEyes){
+        m_rtxAllowed = false;  // the eyepiece shows AMBF's microscope eyes, never the RTX window
+        m_rtxOnly = false;
+        if (const char* sizeEnv = std::getenv("AMBF_OPENXR_CHAI_SIZE")){
+            unsigned w = 0, h = 0;
+            if (std::sscanf(sizeEnv, "%ux%u", &w, &h) == 2 && w >= 64 && h >= 64 && w <= 4096 && h <= 4096){
+                m_chaiW = w;
+                m_chaiH = h;
+            }
+        }
+        std::cout << "INFO! OpenXR eyepiece: CHAI3D microscope eyes " << m_chaiW << "x" << m_chaiH
+                  << ", base " << m_chaiBaseUnits << " units, study text from /dev/shm/fivrs_hud_overlay" << std::endl;
     }
     m_startWall = (long)std::time(nullptr);
     if (const char* degEnv = std::getenv("AMBF_OPENXR_RTX_EYEPIECE_DEG")){
@@ -755,7 +774,8 @@ bool afOpenXREyepiece::createSwapchains(){
         // The RTX eyes arrive sRGB-encoded, as shown on the desktop. In a linear
         // swapchain the compositor would encode them again and wash them out.
         const int64_t kSrgb8Alpha8 = 0x8C43;  // GL_SRGB8_ALPHA8
-        if (m_rtxOnly){
+        if (m_rtxOnly || m_chaiEyes){
+            // CHAI's eyes are display-encoded too (what the desktop window shows).
             for (int64_t f : formats){
                 if (f == kSrgb8Alpha8){
                     format = f;
@@ -911,6 +931,20 @@ void afOpenXREyepiece::graphicsUpdate(){
     applyHmdClutchToMainCamera(hmdLoc);
     updateScenePlacement(hmdLoc);
 
+    if (m_chaiEyes){
+        hudPoll();
+        if (chaiRenderEyes()){
+            for (int eye = 0; eye < 2; ++eye){
+                rtxSubmitEye(eye, m_chaiFbo[eye]->m_imageBuffer->getTextureId());
+            }
+        }
+        else{
+            m_blankFrame = true;
+        }
+        endXRFrame();
+        m_blankFrame = false;
+        return;
+    }
     if (rtxPoll()){
         // The RTX window's path-traced eyes replace AMBF's own rendering.
         for (int eye = 0; eye < 2; ++eye){
@@ -920,7 +954,39 @@ void afOpenXREyepiece::graphicsUpdate(){
         return;
     }
     if (m_rtxOnly){
-        // RTX only: nothing to show until the RTX window's first frame. Black, not AMBF.
+        // RTX only: nothing of AMBF's until the RTX window's first frame. While the RTX
+        // view starts, the launcher's start-up card (hud_overlay.py) is shown on black,
+        // placed like the RTX eyes; without it, black.
+        hudPoll();
+        if (m_hudVisible && m_hudTex != 0){
+            if (m_rtxW == 0 || m_rtxH == 0){
+                m_rtxW = m_chaiW;  // the RTX eyes' size (fivrs_rtx_view.py --headset)
+                m_rtxH = m_chaiH;
+            }
+            if (m_waitTex == 0 || m_waitTexW != m_rtxW || m_waitTexH != m_rtxH){
+                if (m_waitTex != 0){
+                    glDeleteTextures(1, &m_waitTex);
+                }
+                std::vector<uint8_t> black((size_t)m_rtxW * m_rtxH * 4, 0);
+                glGenTextures(1, &m_waitTex);
+                glBindTexture(GL_TEXTURE_2D, m_waitTex);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)m_rtxW, (GLsizei)m_rtxH, 0,
+                             GL_RGBA, GL_UNSIGNED_BYTE, black.data());
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glBindTexture(GL_TEXTURE_2D, 0);
+                m_waitTexW = m_rtxW;
+                m_waitTexH = m_rtxH;
+            }
+            m_rtxActive = true;
+            m_hudOverWait = true;
+            for (int eye = 0; eye < 2; ++eye){
+                rtxSubmitEye(eye, m_waitTex);
+            }
+            m_hudOverWait = false;
+            endXRFrame();
+            return;
+        }
         m_blankFrame = true;
         endXRFrame();
         m_blankFrame = false;
@@ -1384,7 +1450,7 @@ void afOpenXREyepiece::rtxEyepieceFov(int eyeIndex, XrFovf& fov) const{
     fov.angleDown = (float)(-halfUp);
 }
 
-bool afOpenXREyepiece::rtxSubmitEye(int eyeIndex){
+bool afOpenXREyepiece::rtxSubmitEye(int eyeIndex, GLuint source){
     if (!m_frameState.shouldRender){
         return true;
     }
@@ -1414,11 +1480,17 @@ bool afOpenXREyepiece::rtxSubmitEye(int eyeIndex){
     glGenFramebuffers(1, &readFbo);
     glGenFramebuffers(1, &drawFbo);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, readFbo);
-    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_rtxTex[eyeIndex], 0);
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                           source != 0 ? source : m_rtxTex[eyeIndex], 0);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, drawFbo);
     glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, sc.images[imageIndex].image, 0);
     glBlitFramebuffer(0, 0, (GLint)m_rtxW, (GLint)m_rtxH, 0, 0, w, h, GL_COLOR_BUFFER_BIT,
                       (w == (int32_t)m_rtxW && h == (int32_t)m_rtxH) ? GL_NEAREST : GL_LINEAR);
+    if ((m_chaiEyes || m_hudOverWait) && m_hudVisible && m_hudTex != 0){
+        // The study text, drawn into the headset image over AMBF's eye.
+        glBindFramebuffer(GL_FRAMEBUFFER, drawFbo);
+        hudDraw(w, h);
+    }
     glBindFramebuffer(GL_FRAMEBUFFER, prevFbo);
     glDeleteFramebuffers(1, &readFbo);
     glDeleteFramebuffers(1, &drawFbo);
@@ -1429,6 +1501,259 @@ bool afOpenXREyepiece::rtxSubmitEye(int eyeIndex){
     XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
     xrReleaseSwapchainImage(sc.handle, &ri);
     return true;
+}
+
+namespace {
+// /dev/shm/fivrs_hud_overlay, written by scripts/rtx_view/hud_overlay.py. Little endian.
+//   0 u32 magic "FVHU"  4 u32 version  8 u64 seq (odd while writing)
+//  16 u32 width  20 u32 height  24 u32 flags (bit 0: something to draw)  28 pad
+//  64 RGBA8 image, straight alpha, bottom row first. Same pixels for both eyes.
+const char* kHudPath = "/dev/shm/fivrs_hud_overlay";
+const uint32_t kHudMagic = 0x55485646u;  // "FVHU"
+const size_t kHudHeader = 64;
+}  // namespace
+
+bool afOpenXREyepiece::chaiRenderEyes(){
+    if (!m_mainCamera || !m_camera || !m_frameState.shouldRender){
+        return m_chaiFbo[0] != nullptr;
+    }
+    if (!m_chaiFbo[0]){
+        for (int i = 0; i < 2; ++i){
+            m_chaiFbo[i] = cFrameBuffer::create();
+            m_chaiFbo[i]->setup(m_camera->getInternalCamera(), m_chaiW, m_chaiH, true, true, GL_RGBA);
+        }
+        m_chaiFront = new cWorld();
+    }
+    cCamera* scope = m_mainCamera->getInternalCamera();
+    // Main camera's lens, so the microscope zoom (field of view) carries over.
+    const double fovY = scope->getFieldViewAngleRad();
+    const double nearZ = scope->getNearClippingPlane();
+    const double farZ = scope->getFarClippingPlane();
+    const double aspect = (double)m_chaiW / (double)m_chaiH;
+    const double top = std::tan(0.5 * fovY) * nearZ;
+    const double right = top * aspect;
+    cTransform P;
+    P.identity();
+    const double C = -(farZ + nearZ) / (farZ - nearZ);
+    const double D = -(2.0 * farZ * nearZ) / (farZ - nearZ);
+    const double m[4][4] = {{nearZ / right, 0, 0, 0}, {0, nearZ / top, 0, 0}, {0, 0, C, D}, {0, 0, -1, 0}};
+    P.set(m[0][0], m[1][0], m[2][0], m[3][0],
+          m[0][1], m[1][1], m[2][1], m[3][1],
+          m[0][2], m[1][2], m[2][2], m[3][2],
+          m[0][3], m[1][3], m[2][3], m[3][3]);
+    // Both eyes aim at the bone, as rtx_eyes does: focus = scope to volume centre.
+    double focus = 5.0;
+    if (m_camera->m_afWorld){
+        afVolumeVec volumes = m_camera->m_afWorld->getVolumes();
+        if (!volumes.empty() && volumes[0]){
+            focus = std::max((volumes[0]->getLocalPos() - m_mainCamera->getGlobalPos()).length(), 0.5);
+        }
+    }
+
+    // The eyes are placed on the chai camera that renders, not on the AMBF camera:
+    // afBaseObject::setLocalTransform only reaches the chai camera at AMBF's next
+    // scene update, so the eyes rendered from this camera's own ADF pose (3.2 units
+    // ahead of the scope, openxr_eyepiece_camera.yaml): about 2.8x zoomed in, and the
+    // same image in both eyes. The chai camera's transform is its world pose, and
+    // renderView() recomputes its global pose from it.
+    cCamera* chaiCam = m_camera->getInternalCamera();
+    const cTransform scopePose = scope->getLocalTransform();  // where the microscope (and RTX) camera is
+    cTransform backupChai = chaiCam->getLocalTransform();
+    cTransform backupProj = chaiCam->m_projectionMatrix;
+    bool backupCustom = chaiCam->m_useCustomProjectionMatrix;
+    cWorld* backupFront = chaiCam->m_frontLayer;
+    for (int eye = 0; eye < 2; ++eye){
+        // Chai cameras look along local -X with +Y to the right, so eye offsets and the
+        // toe-in are in the scope's frame.
+        const double side = (eye == 0) ? -0.5 : 0.5;
+        const double y = side * m_chaiBaseUnits;
+        cMatrix3d R;
+        R.setAxisAngleRotationRad(cVector3d(0, 0, 1), std::atan2(y, focus));
+        cTransform eyeLocal;
+        eyeLocal.set(cVector3d(0, y, 0), R);
+        chaiCam->m_frontLayer = m_chaiFront;
+        chaiCam->m_useCustomProjectionMatrix = true;
+        chaiCam->m_projectionMatrix = P;
+        chaiCam->setLocalTransform(scopePose * eyeLocal);
+        m_chaiFbo[eye]->renderView();
+    }
+    chaiCam->m_frontLayer = backupFront;
+    chaiCam->m_projectionMatrix = backupProj;
+    chaiCam->m_useCustomProjectionMatrix = backupCustom;
+    chaiCam->setLocalTransform(backupChai);
+
+    // The eyepiece placement code works from the "RTX" image size.
+    m_rtxW = m_chaiW;
+    m_rtxH = m_chaiH;
+    m_rtxActive = true;
+    if (!m_chaiAnnounced){
+        std::cout << "INFO! OpenXR eyepiece shows the CHAI3D microscope eyes (" << m_chaiW << "x" << m_chaiH
+                  << ", fov " << fovY << " rad, focus " << focus << ")" << std::endl;
+        m_chaiAnnounced = true;
+    }
+    return true;
+}
+
+bool afOpenXREyepiece::hudPoll(){
+    const double now = steadySeconds();
+    if (m_hudMap && now - m_hudLastStatSec > 0.5){
+        m_hudLastStatSec = now;
+        struct stat st{};
+        if (::stat(kHudPath, &st) != 0 || (unsigned long)st.st_ino != m_hudInode){
+            hudUnmap();
+        }
+    }
+    if (!m_hudMap){
+        if (now - m_hudLastStatSec < 0.5){
+            return m_hudVisible;
+        }
+        m_hudLastStatSec = now;
+        m_hudVisible = false;
+        const int fd = ::open(kHudPath, O_RDONLY);
+        if (fd < 0){
+            return false;
+        }
+        struct stat st{};
+        if (fstat(fd, &st) != 0 || (size_t)st.st_size < kHudHeader){
+            ::close(fd);
+            return false;
+        }
+        void* map = mmap(nullptr, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+        if (map == MAP_FAILED){
+            ::close(fd);
+            return false;
+        }
+        m_hudFd = fd;
+        m_hudMap = map;
+        m_hudMapSize = (size_t)st.st_size;
+        m_hudInode = (unsigned long)st.st_ino;
+        m_hudSeq = 0;
+    }
+    const char* base = static_cast<const char*>(m_hudMap);
+    uint32_t magic = 0, width = 0, height = 0, flags = 0;
+    std::memcpy(&magic, base, 4);
+    std::memcpy(&width, base + 16, 4);
+    std::memcpy(&height, base + 20, 4);
+    const uint64_t seq = loadSeq(base);
+    const size_t bytes = (size_t)width * height * 4;
+    if (magic != kHudMagic || width == 0 || height == 0 || kHudHeader + bytes > m_hudMapSize){
+        hudUnmap();
+        m_hudVisible = false;
+        return false;
+    }
+    if ((seq & 1u) != 0 || seq == m_hudSeq){
+        return m_hudVisible;
+    }
+    std::memcpy(&flags, base + 24, 4);
+    m_hudPixels.resize(bytes);
+    std::memcpy(m_hudPixels.data(), base + kHudHeader, bytes);
+    if (loadSeq(base) != seq){
+        return m_hudVisible;  // written meanwhile: take the next one
+    }
+    m_hudSeq = seq;
+    m_hudVisible = (flags & 1u) != 0;
+    if (!m_hudVisible){
+        return false;
+    }
+    GLint savedTex = 0, savedPbo = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &savedTex);
+    glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &savedPbo);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    if (m_hudTex == 0 || m_hudTexW != width || m_hudTexH != height){
+        if (m_hudTex != 0){
+            glDeleteTextures(1, &m_hudTex);
+        }
+        glGenTextures(1, &m_hudTex);
+        glBindTexture(GL_TEXTURE_2D, m_hudTex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)width, (GLsizei)height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        m_hudTexW = width;
+        m_hudTexH = height;
+    }
+    // Same unpack care as the RTX upload: CHAI leaves row length / skips set.
+    const GLenum keys[] = {GL_UNPACK_ALIGNMENT, GL_UNPACK_ROW_LENGTH, GL_UNPACK_SKIP_PIXELS,
+                           GL_UNPACK_SKIP_ROWS, GL_UNPACK_IMAGE_HEIGHT, GL_UNPACK_SKIP_IMAGES};
+    const GLint packed[] = {4, 0, 0, 0, 0, 0};
+    GLint saved[6] = {4, 0, 0, 0, 0, 0};
+    for (int k = 0; k < 6; ++k){
+        glGetIntegerv(keys[k], &saved[k]);
+        glPixelStorei(keys[k], packed[k]);
+    }
+    glBindTexture(GL_TEXTURE_2D, m_hudTex);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (GLsizei)width, (GLsizei)height, GL_RGBA, GL_UNSIGNED_BYTE,
+                    m_hudPixels.data());
+    for (int k = 0; k < 6; ++k){
+        glPixelStorei(keys[k], saved[k]);
+    }
+    glBindTexture(GL_TEXTURE_2D, (GLuint)savedTex);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, (GLuint)savedPbo);
+    return true;
+}
+
+void afOpenXREyepiece::hudUnmap(){
+    if (m_hudMap){
+        munmap(m_hudMap, m_hudMapSize);
+        m_hudMap = nullptr;
+    }
+    if (m_hudFd >= 0){
+        ::close(m_hudFd);
+        m_hudFd = -1;
+    }
+    m_hudMapSize = 0;
+    m_hudInode = 0;
+}
+
+void afOpenXREyepiece::hudDraw(int32_t width, int32_t height){
+    // Fixed-function quad over the bound framebuffer; AMBF's GL state is put back after.
+    GLint viewport[4];
+    glGetIntegerv(GL_VIEWPORT, viewport);
+    GLint program = 0;
+    glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+    GLint activeTex = 0;
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &activeTex);
+    glActiveTexture(GL_TEXTURE0);
+    GLint savedTex = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &savedTex);
+    glPushAttrib(GL_ALL_ATTRIB_BITS);
+    glUseProgram(0);
+    glViewport(0, 0, width, height);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_LIGHTING);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_STENCIL_TEST);
+    glDisable(GL_ALPHA_TEST);
+    glDisable(GL_FRAMEBUFFER_SRGB);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, m_hudTex);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+    glColor4f(1.f, 1.f, 1.f, 1.f);
+    glBegin(GL_QUADS);
+    glTexCoord2f(0.f, 0.f); glVertex2f(-1.f, -1.f);
+    glTexCoord2f(1.f, 0.f); glVertex2f(1.f, -1.f);
+    glTexCoord2f(1.f, 1.f); glVertex2f(1.f, 1.f);
+    glTexCoord2f(0.f, 1.f); glVertex2f(-1.f, 1.f);
+    glEnd();
+    glPopMatrix();
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+    glPopAttrib();
+    glBindTexture(GL_TEXTURE_2D, (GLuint)savedTex);
+    glActiveTexture((GLenum)activeTex);
+    glUseProgram((GLuint)program);
+    glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
 }
 
 void afOpenXREyepiece::physicsUpdate(double){}
@@ -1445,6 +1770,7 @@ bool afOpenXREyepiece::close(){
         }
     }
     rtxUnmap();
+    hudUnmap();
     shutdownOpenXR();
     return true;
 }

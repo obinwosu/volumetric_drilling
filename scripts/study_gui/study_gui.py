@@ -8,6 +8,9 @@ import gui_setup
 from gui_setup import GUIConfiguration
 from user_profiles import UserProfileStore, DEFAULT_BURR_MM, VALID_BURR_SIZES
 import study_mode
+import graphics_study_mode
+import study_chooser
+
 import datetime
 from enum import Enum
 import json
@@ -110,6 +113,9 @@ def load_canonical_views():
         })
     return out
 
+
+# RTX view start-up status for the headset card (scripts/rtx_view/hud_overlay.py).
+RTX_LOADING_PATH = pathlib.Path("/tmp/fivrs-rtx/rtx_loading.json")
 
 MIDNIGHT_OCEAN_STYLE = """
 QWidget {
@@ -401,14 +407,16 @@ class Ui(QtWidgets.QWidget):
         # Study tab: tutorial + timed trial for the resident study (study_mode.py).
         self.study_mode = None
         self.study_panel = study_mode.StudyPanel(self)
+        # Graphics study: tutorial, then the same task with two renderers, NASA-TLX after each.
+        self.graphics_panel = graphics_study_mode.GraphicsStudyPanel(self)
         tabs = self.findChild(QtWidgets.QTabWidget, "tabWidget")
         if tabs is not None:
-            # Scrolls when the launcher window is shorter than the tab.
-            scroll = QtWidgets.QScrollArea()
-            scroll.setWidgetResizable(True)
-            scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-            scroll.setWidget(self.study_panel)
-            tabs.addTab(scroll, "Study")
+            # One "Study" tab: pick the study at the top, its own panel below (study_chooser.py).
+            self.study_chooser = study_chooser.StudyChooser(
+                self, self.study_panel, self.graphics_panel,
+                choice=self.gui_configuration.yaml_data.get(study_chooser.SETTING, "resident"),
+                save=lambda key: self.gui_configuration.save_value(study_chooser.SETTING, key))
+            tabs.addTab(self.study_chooser, "Study")
 
         self.place_on_pc_monitor(0)
         self.show()
@@ -687,6 +695,21 @@ class Ui(QtWidgets.QWidget):
             use_hmd = use_openxr or use_openvr
             use_wivrn = use_openxr
             use_rtx = bool(self.check_rtx_view is not None and self.check_rtx_view.isChecked())
+            # Graphics study arms (graphics_study_mode.py): "rtx", "chai" (today's CHAI3D
+            # look) or "upstream" (AMBF's look before the FIVRS changes). The CHAI3D arms
+            # keep the plugin's RTX bridge on (drill state, bone restore, study lock) with
+            # no RTX window, and the headset shows AMBF's own microscope eyes.
+            graphics = (self.study_mode or {}).get("graphics")
+            chai_eyes = graphics in ("chai", "upstream")
+            if chai_eyes:
+                use_rtx = False
+            volume_adf = self.active_volume_adf
+            if graphics == "upstream":
+                volume_adf = str(pathlib.Path(volume_adf).with_name(
+                    pathlib.Path(volume_adf).stem + "_upstream_look.yaml"))
+                if not pathlib.Path(volume_adf).is_file():
+                    self.print_info(f"ERROR! Missing upstream-look volume {volume_adf}")
+                    return
             # The stream cameras open hidden AMBF windows. On AMBF 3 those freeze
             # AMBF's event loop on its first frame, so nothing moves. The RTX view
             # and the headset do not use them.
@@ -703,7 +726,7 @@ class Ui(QtWidgets.QWidget):
                 "-l",
                 launch_file_adf_indices,
                 "-a",
-                self.active_volume_adf,
+                volume_adf,
                 "--nt",
                 "2",
                 "--fp",
@@ -711,7 +734,7 @@ class Ui(QtWidgets.QWidget):
                 "--sb",
                 str(self.get_starting_burr_mm()),
                 "--anatomy_adf",
-                self.active_volume_adf,
+                volume_adf,
                 "--session_user",
                 # Study mode shows the Study ID, never the name.
                 (self.study_mode or {}).get("study_id") or self.active_participant_name() or "(none)",
@@ -720,7 +743,7 @@ class Ui(QtWidgets.QWidget):
                 "--startup_view",
                 self.selected_startup_view_id(),
             ]
-            if use_rtx:
+            if use_rtx or chai_eyes:
                 args.extend(["--rtx_view", "1"])
             self._current_args = args
             spacenav = getattr(self.gui_configuration, "spacenav_plugin", "") or ""
@@ -788,10 +811,23 @@ class Ui(QtWidgets.QWidget):
                     self.print_info(
                         f"WARNING! WiVRn IPC missing ({ipc}) — is the WiVRn server running?"
                     )
+            # No headset text from an earlier run (a killed overlay leaves its file).
+            pathlib.Path("/dev/shm/fivrs_hud_overlay").unlink(missing_ok=True)
+            RTX_LOADING_PATH.unlink(missing_ok=True)
             if use_openxr and use_rtx:
-                # The headset shows only the RTX view: black while it loads, never AMBF.
+                # The headset shows only the RTX view, never AMBF: in a study, the
+                # RTX start-up card while it loads (_rtx_loading_update), else black.
                 env.insert("AMBF_OPENXR_RTX", "only")
                 pathlib.Path("/dev/shm/fivrs_rtx_eyes").unlink(missing_ok=True)
+            if chai_eyes:
+                env.insert("AMBF_OPENXR_RTX", "0")
+                # --rtx_view 1 keeps the plugin's RTX bridge, which also hides AMBF's own
+                # bone (the RTX window normally draws it). These arms show AMBF's bone.
+                env.insert("FIVRS_AMBF_BONE", "1")
+                if use_openxr:
+                    env.insert("AMBF_OPENXR_CHAI_EYES", "1")
+                if graphics == "upstream":
+                    env.insert("FIVRS_LOOK", "upstream")
             # ADF paths in launch.yaml are relative to the repo root.
             repo_root = pathlib.Path(self.gui_configuration.launch_file.get()).expanduser().resolve().parent
             self._ambf_process.setWorkingDirectory(str(repo_root))
@@ -830,6 +866,13 @@ class Ui(QtWidgets.QWidget):
                 self.button_start_simulation.setText("Start Simulation")
                 self._set_sim_running_style(False)
                 return
+            if chai_eyes and use_openxr:
+                self._start_hud_overlay(repo_root)
+            elif use_rtx and use_openxr and self.study_mode:
+                # Until the RTX view's first frame, the headset shows its start-up
+                # card (stage and log) from the overlay; stopped once RTX is ready.
+                self._rtx_loading_card = True
+                self._start_hud_overlay(repo_root)
             if use_rtx and options["irrigation"]:
                 self._start_fluid(repo_root)
             self.button_start_simulation.setText("Close Simulation")
@@ -839,6 +882,27 @@ class Ui(QtWidgets.QWidget):
                 self.print_info("Must stop logging study data first!")
             else:
                 self.close_simulation()
+
+    def _start_hud_overlay(self, repo_root):
+        """Study text for the headset when AMBF draws the eyes (scripts/rtx_view/hud_overlay.py)."""
+        python = pathlib.Path(repo_root) / "middle_ear_newton" / ".venv" / "bin" / "python"
+        script = pathlib.Path(repo_root) / "scripts" / "rtx_view" / "hud_overlay.py"
+        if getattr(self, "_hud_process", None) is None:
+            self._hud_process = QProcess(self)
+            self._hud_process.setProcessChannelMode(QProcess.MergedChannels)
+            self._hud_process.readyReadStandardOutput.connect(
+                lambda: self.print_debug(bytes(self._hud_process.readAllStandardOutput()).decode(errors="replace")))
+        if self._hud_process.state() != QProcess.NotRunning:
+            return
+        self._hud_process.start(str(python if python.is_file() else sys.executable), [str(script)])
+        self.print_info("Headset study text started (AMBF eyes)")
+
+    def _stop_hud_overlay(self):
+        process = getattr(self, "_hud_process", None)
+        if process is not None and process.state() != QProcess.NotRunning:
+            process.terminate()
+            if not process.waitForFinished(2000):
+                process.kill()
 
     def _start_rtx_view(self, repo_root, headset=False):
         venv_python = pathlib.Path(repo_root) / "middle_ear_newton" / ".venv" / "bin" / "python"
@@ -863,6 +927,9 @@ class Ui(QtWidgets.QWidget):
         if log_file.exists():
             log_file.replace(log_dir / "view.prev.log")
         self._rtx_log_file = log_file
+        self._rtx_loading = {"heading": "Initializing RTX View", "label": "Starting", "percent": 0, "lines": []}
+        self._rtx_loading_logged = None
+        self._rtx_loading_update()
         options = self._launch_options()
         command = (
             "set +u && "
@@ -1027,15 +1094,78 @@ class Ui(QtWidgets.QWidget):
                 handle.write(msg if msg.endswith("\n") else msg + "\n")
         splash = self._rtx_splash
         for line in msg.splitlines():
+            self._rtx_loading_line(line)
             if splash is not None and splash.apply_line(line):
                 self._close_rtx_splash()
                 splash = None
+                self._rtx_loading_done("ready")
                 self._raise_rtx_tries = 10
                 self._raise_rtx_window()
             if any(token in line for token in ("Traceback", "Error", "ERROR", "Exception", "did not publish")):
                 self.print_info(line)
 
+    # ---- RTX start-up progress: headset card and the study panels' log ----
+    def _rtx_loading_line(self, line):
+        """One RTX view log line while it starts: stage, bone progress, the last lines."""
+        state = getattr(self, "_rtx_loading", None)
+        if state is None:
+            return
+        text = line.strip()
+        if not text:
+            return
+        state["lines"] = (state["lines"] + [text])[-6:]
+        rtx_dir = str(pathlib.Path(__file__).resolve().parent.parent / "rtx_view")
+        if rtx_dir not in sys.path:
+            sys.path.insert(0, rtx_dir)
+        import rtx_splash
+
+        hit = rtx_splash.stage_from_line(text)
+        if hit is not None:
+            percent, label = hit
+            state["label"] = label
+            if percent is not None:
+                state["percent"] = max(int(state["percent"] or 0), int(percent))
+        fraction = rtx_splash.bone_fraction(text)
+        if fraction is not None:
+            low, high = rtx_splash.BONE_RANGE
+            state["label"] = "Loading the bone"
+            state["percent"] = max(int(state["percent"] or 0), int(low + (high - low) * fraction))
+        self._rtx_loading_update()
+
+    def _rtx_loading_update(self):
+        state = getattr(self, "_rtx_loading", None)
+        if state is None:
+            return
+        if self.study_mode:
+            # The headset card (hud_overlay.py), only while the overlay is running for it.
+            try:
+                partial = RTX_LOADING_PATH.with_suffix(".part")
+                partial.write_text(json.dumps(state))
+                partial.replace(RTX_LOADING_PATH)
+            except OSError:
+                pass
+        # The study panels' log: each stage once, the bone every 10%.
+        percent = int(state["percent"] or 0)
+        key = (state["label"], percent // 10 if state["label"] == "Loading the bone" else None)
+        if key != self._rtx_loading_logged:
+            self._rtx_loading_logged = key
+            self.print_info(f"RTX view: {state['label']} ({percent}%)")
+
+    def _rtx_loading_done(self, how):
+        state = getattr(self, "_rtx_loading", None)
+        if state is None:
+            return
+        self._rtx_loading = None
+        RTX_LOADING_PATH.unlink(missing_ok=True)
+        if how == "ready" and state.get("label") != "Ready":
+            self.print_info("RTX view: Ready (100%)")
+        if getattr(self, "_rtx_loading_card", False):
+            # The RTX view draws its own headset text from here on.
+            self._rtx_loading_card = False
+            self._stop_hud_overlay()
+
     def _rtx_finished(self, code, status):
+        self._rtx_loading_done("exited")
         self._close_rtx_splash()
         log_file = self._rtx_log_file
         if log_file is not None:
@@ -1066,7 +1196,12 @@ class Ui(QtWidgets.QWidget):
             self._closing_ambf = False
             exit_code, exit_status = 0, QProcess.NormalExit
             self.print_info("Simulator closed")
+        self._rtx_loading_done("closed")
+        self._stop_hud_overlay()
         self.study_panel.simulator_closed()
+        graphics_panel = getattr(self, "graphics_panel", None)
+        if graphics_panel is not None:
+            graphics_panel.simulator_closed()
         if self._recording_study:
             self._stop_study_logging(save_metadata=True)
             self._updating_log_checkbox = True
@@ -1274,6 +1409,7 @@ class Ui(QtWidgets.QWidget):
         if self._recording_study:
             self._stop_study_logging(save_metadata=True)
         self._stop_fluid()
+        self._stop_hud_overlay()
         self._ambf_process.close()
         self._pupil_process.close()
         self.study_manager.close()
@@ -1284,9 +1420,10 @@ class Ui(QtWidgets.QWidget):
 
     def print_info(self, msg):
         self.textEdit_info.insertPlainText(self.get_time_as_str() + msg + "\n")
-        panel = getattr(self, "study_panel", None)
-        if panel is not None:
-            panel.activity_line(self.get_time_as_str() + msg)
+        for name in ("study_panel", "graphics_panel"):
+            panel = getattr(self, name, None)
+            if panel is not None:
+                panel.activity_line(self.get_time_as_str() + msg)
 
     def print_debug(self, msg):
         self.textEdit_debug.insertPlainText(self.get_time_as_str() + msg)

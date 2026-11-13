@@ -189,6 +189,11 @@ protected:
     // True if letter key is held system-wide (Ikkegol a/b/c pedals).
     bool isLetterKeyHeld(int glfwKey) const;
     void requestDrillReposition();
+    // Start the burr just above the bone, not at the volume's bounding box (2026-11-13).
+    bool boneSolidAt(const cVector3d& pWorld);
+    bool boneAlongRay(const cVector3d& from, const cVector3d& dir, double maxDist, double& tHit);
+    bool drillClearOfBone(const cVector3d& tip);
+    bool drillTipNearBone(double depthHint, cVector3d& tipOut);
     void requestSuctionReposition();
 
 private:
@@ -261,6 +266,8 @@ private:
     double m_spotFocus = 2.0;
     // Room gray in 5% steps. 3 = 15%, the surreal simulator room (0.14–0.15).
     int m_roomGrayStep = 3;
+    /// FIVRS_LOOK=upstream (graphics study): AMBF's look before the FIVRS changes.
+    bool m_upstreamLook = false;
     std::vector<cBackground*> m_roomBackdrops;
 
     cLabel* m_volumeSmoothingLabel;
@@ -313,6 +320,7 @@ private:
     bool m_isCountdownActive; // For pulling back on the camera during recalibration
     double m_countdownTimer;
     cTransform m_originalCameraTransform;
+    double m_startFovRad = -1.0;  // field of view after start-up, restored by a study camera reset
     cVector3d m_volumeLookAt;
     cVector3d m_cameraHomeUp;
     double m_activeCameraRollDeg = 0.0;

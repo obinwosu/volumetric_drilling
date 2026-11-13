@@ -1347,6 +1347,21 @@ void DrillManager::updateSuctionPose(const cTransform& cameraWorld)
     m_T_s.setLocalRot(cameraWorld.getLocalRot() * devicePose.getLocalRot() * suctionShaftRoll());
 }
 
+void DrillManager::placeDrillTip(const cVector3d& tip)
+{
+    if (m_hapticDevice){
+        m_hapticDevice->setForce(cVector3d(0., 0., 0.));
+    }
+    m_T_d.setLocalPos(tip);
+    if (m_drillReferenceBody){
+        m_drillReferenceBody->setLocalTransform(m_T_d);
+    }
+    toolCursorsPosUpdate(m_T_d);
+    toolCursorsInitialize();
+    updatePoseFromCursors();
+    beginVolumeContactSuppression(10);
+}
+
 void DrillManager::shiftDrillHome(const cVector3d& offset)
 {
     m_T_d_init.setLocalPos(m_T_d_init.getLocalPos() + offset);

@@ -151,6 +151,24 @@ class GUIConfiguration:
         yaml.dump(self.yaml_data, self.yaml_file)
         self.yaml_file.close()
 
+    def save_value(self, key, value):
+        """Write one top-level key to the file, leaving everything else in it as is
+        (unlike save(), which also writes unsaved parameter and render changes).
+        Only that key's line changes (or one line is appended), so the rest of the file
+        keeps its order and formatting."""
+        self.yaml_data[key] = value
+        line = yaml.safe_dump({key: value}, default_flow_style=False)
+        lines = self.yaml_file_path.read_text().splitlines(keepends=True)
+        for index, text in enumerate(lines):
+            if text.startswith(f"{key}:"):
+                lines[index] = line
+                break
+        else:
+            if lines and not lines[-1].endswith("\n"):
+                lines[-1] += "\n"
+            lines.append(line)
+        self.yaml_file_path.write_text("".join(lines))
+
     def reload(self):
         self.yaml_file = open(str(self.yaml_file_path), 'r')
         self.yaml_data = yaml.safe_load(self.yaml_file)

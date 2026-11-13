@@ -171,6 +171,9 @@ public:
     int cycleSuctionSize();
     // One-time start placement. Does not change how the drill pose is solved.
     void shiftDrillHome(const cVector3d& offset);
+    // Move the burr to this point now (rotation kept), as snapToCameraView does once it
+    // has chosen a point: zero force, cursors re-initialized, brief contact suppression.
+    void placeDrillTip(const cVector3d& tip);
     void placeSuctionHome(const cVector3d& tip, const cMatrix3d& rotation);
 
     DrillingPublisher* m_drillingPub;

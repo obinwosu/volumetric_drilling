@@ -102,6 +102,7 @@ class StudyPanel(QtWidgets.QWidget):
         self._feedback_server.setProcessChannelMode(QProcess.MergedChannels)
         self._feedback_server.readyReadStandardOutput.connect(self._feedback_server_output)
         self._feedback_url = None
+        self._resident_returned = False  # the resident pressed "Return to the simulator study window"
         QtWidgets.QApplication.instance().aboutToQuit.connect(self.stop_feedback_server)
         self._timer = QTimer(self)
         self._timer.setInterval(100)
@@ -666,6 +667,7 @@ class StudyPanel(QtWidgets.QWidget):
         if getattr(self, "_feedback_log", None) is not None:
             self._feedback_log.close()
         feedback = REPO / "feedback_system"
+        self._resident_returned = False
         self._feedback_log = open(log_path, "w")
         self._feedback_server.setWorkingDirectory(str(feedback))
         self._feedback_server.start(str(feedback / ".venv" / "bin" / "python"), args)
@@ -719,6 +721,7 @@ class StudyPanel(QtWidgets.QWidget):
         self._feedback_log.flush()
         if "FIVRS_RETURN_TO_SIMULATOR" in text:
             # The resident pressed "Return to the simulator study window" on the end page.
+            self._resident_returned = True
             window = self.window()
             window.showNormal()
             window.raise_()
@@ -745,6 +748,11 @@ class StudyPanel(QtWidgets.QWidget):
             self.phase_label.setText(
                 "Background questionnaire open in the browser; the feedback follows when the analysis finishes."
                 if intake else f"Feedback open in the browser: {self._feedback_url}")
+
+    def questionnaire_pending(self) -> bool:
+        """The questionnaire or feedback is being served and the resident has not yet
+        returned from it (the master Study tab stays locked until then)."""
+        return (self._feedback_server.state() != QProcess.NotRunning) and not self._resident_returned
 
     def stop_feedback_server(self):
         if self._feedback_server.state() != QProcess.NotRunning:

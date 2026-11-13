@@ -223,6 +223,11 @@ class SessionIO:
     def request_reload(self) -> None:
         (self.runtime / "reload.request").write_text("reload\n")
 
+    def request_camera_reset(self) -> None:
+        """The plugin puts the camera back to its start-up view and zoom (volumetric_drilling.cpp)."""
+        self.runtime.mkdir(parents=True, exist_ok=True)
+        (self.runtime / "camera_reset.request").write_text("start-up view\n")
+
     def request_burr_reset(self) -> None:
         """The plugin sets the burr to 6 mm cutting (volumetric_drilling.cpp)."""
         self.runtime.mkdir(parents=True, exist_ok=True)
@@ -297,9 +302,28 @@ class Progress:
 
 
 class StudySession:
+    """One timed trial, optionally after the tutorial.
+
+    The graphics study (scripts/study/graphics_study.py) runs one of these per
+    graphics arm: the first with the tutorial, the second starting at "ready".
+    tutorial      False: start at "ready" (the tutorial was done in an earlier arm)
+    rtx_reload    False: no RTX window, so the reset is done once AMBF restores the bone
+    text          optional headset wording: briefing_title, briefing_lines, ready_title,
+                  ready_lines, ready_advance, armed_lines
+    """
+
     def __init__(self, io, study_id: str, recording_dir: pathlib.Path, metadata: dict,
-                 trial_seconds: float = TRIAL_SECONDS):
+                 trial_seconds: float = TRIAL_SECONDS, tutorial: bool = True,
+                 rtx_reload: bool = True, text: dict | None = None):
         self.io = io
+        self.tutorial = bool(tutorial)
+        self.rtx_reload = bool(rtx_reload)
+        self.text = dict(text or {})
+        # Any of the optional arguments marks a graphics-study session: only then does
+        # metadata.json gain the graphics fields. Defaults leave the resident study as is.
+        self._graphics_fields = (not self.tutorial) or (not self.rtx_reload) or bool(self.text)
+        self.ended_by = None
+        self.incus_drilling_s = None
         self.study_id = study_id
         self.recording_dir = pathlib.Path(recording_dir)
         self.metadata = dict(metadata)
@@ -323,7 +347,12 @@ class StudySession:
         self._place_seq = 0
         self._place_written = None
         self.headset_tilt = None  # degrees down; None = the eyepiece default
-        self._log("tutorial_started")
+        if self.tutorial:
+            self._log("tutorial_started")
+        else:
+            self.phase = "ready"
+            self.step = len(TUTORIAL) - 1
+            self._log("ready_without_tutorial")
 
     # ---- proctor actions ----
     def skip_step(self):
@@ -362,7 +391,16 @@ class StudySession:
     def end_early(self):
         """Proctor: stop the trial now (for example, a hardware fault)."""
         if self.phase in ("armed", "running"):
+            self.ended_by = "proctor"
             self._log("trial_ended_by_proctor")
+            self._finish()
+
+    def incus_identified(self):
+        """Proctor: the participant has identified the incus short process. Ends the trial."""
+        if self.phase == "running":
+            self.ended_by = "incus_identified"
+            self.incus_drilling_s = self.drilling_elapsed
+            self._log("incus_identified", drilling_s=round(self.drilling_elapsed, 3))
             self._finish()
 
     # ---- main loop ----
@@ -387,6 +425,7 @@ class StudySession:
         elif self.phase == "briefing":
             self._briefing(state, now)
         elif self.phase in ("armed", "running") and self._resident_ended(state):
+            self.ended_by = "resident"
             self._log("trial_ended_by_resident", phase=self.phase)
             self._finish()
         elif self.phase == "armed":
@@ -511,6 +550,10 @@ class StudySession:
             self.step = len(TUTORIAL) - 1
             self.phase = "ready"
             self._log("tutorial_complete")
+        elif TUTORIAL[self.step].key == "drill":
+            # After the microscope and zoom practice: start drilling from the start-up view.
+            self.io.request_camera_reset()
+            self._log("camera_reset", step="drill")
 
     def _right_arrow(self, state) -> bool:
         """A new Right-arrow press (the plugin's skip_count), outside the pause menu."""
@@ -555,10 +598,12 @@ class StudySession:
             return
         if not self._reload_sent:
             if self.io.restore_done():
-                self.io.request_reload()
+                if self.rtx_reload:
+                    self.io.request_reload()
                 self._reload_sent = True
             return
-        if self._recorder_started is None and self.io.restore_reload_wall() >= self._reset_started:
+        reloaded = (not self.rtx_reload) or self.io.restore_reload_wall() >= self._reset_started
+        if self._recorder_started is None and reloaded:
             self._log("bone_reset")
             self.io.start_recorder(self.recording_dir)
             self._recorder_started = now
@@ -599,6 +644,7 @@ class StudySession:
         else:
             self.drilling_elapsed += dt
         if self.drilling_elapsed >= self.trial_seconds:
+            self.ended_by = "time_up"
             self._log("time_up")
             self._finish()
 
@@ -640,26 +686,30 @@ class StudySession:
                 panel["compact"] = True  # a long read: smaller text fits the view
             return {"panel": panel, "timer": None, "banner": None, "menu_help": MENU_HELP}
         if self.phase == "ready":
-            lines = ["You have completed the tutorial. You may keep practicing."]
+            lines = list(self.text.get("ready_lines") or
+                         ["You have completed the tutorial. You may keep practicing."])
             if self.error:
                 lines = [self.error, "Please tell the proctor."]
-            return {"panel": {"title": "Tutorial complete", "lines": lines, "done": True,
-                              "advance": None if self.error else "Tap the left foot pedal to begin your study session"},
+            advance = self.text.get("ready_advance") or "Tap the left foot pedal to begin your study session"
+            return {"panel": {"title": self.text.get("ready_title") or "Tutorial complete", "lines": lines,
+                              "done": True, "advance": None if self.error else advance},
                     "timer": None, "banner": None, "menu_help": MENU_HELP}
         if self.phase == "briefing":
             footer = BRIEFING_FOOTER
             if self._briefing_ack and not self._reset_ready:
                 footer = "Thank you. Preparing the bone..."
-            return {"panel": {"title": BRIEFING_TITLE, "lines": BRIEFING_LINES, "footer": footer, "cover": True,
-                              "compact": True},
+            return {"panel": {"title": self.text.get("briefing_title") or BRIEFING_TITLE,
+                              "lines": list(self.text.get("briefing_lines") or BRIEFING_LINES),
+                              "footer": footer, "cover": True, "compact": True},
                     "timer": None, "banner": None}
         timer = {"remaining_s": self.remaining(), "running": False, "written_wall": now}
         if self.phase == "armed":
             return {
                 "panel": {"title": "Timed trial",
-                          "lines": ["Begin drilling when ready.",
-                                    "The 10-minute timer starts when the drill first removes bone.",
-                                    "If you finish early, hold the left foot pedal and select End trial."]},
+                          "lines": list(self.text.get("armed_lines") or
+                                        ["Begin drilling when ready.",
+                                         "The 10-minute timer starts when the drill first removes bone.",
+                                         "If you finish early, hold the left foot pedal and select End trial."])},
                 "timer": timer, "banner": None,
             }
         if self.phase == "running":
@@ -688,6 +738,12 @@ class StudySession:
             "tutorial_steps_done": sorted(k for k, v in self.progress.done.items() if v),
             "events": self.events,
         })
+        if self._graphics_fields:
+            # Graphics study only; the resident study's metadata.json keeps its keys.
+            meta["trial"]["ended_by"] = self.ended_by  # also incus_identified or time_up
+            meta["trial"]["incus_identified_drilling_s"] = (
+                None if self.incus_drilling_s is None else round(self.incus_drilling_s, 3))
+            meta["tutorial_run"] = self.tutorial
         self.recording_dir.mkdir(parents=True, exist_ok=True)
         (self.recording_dir / "metadata.json").write_text(json.dumps(meta, indent=2))
 

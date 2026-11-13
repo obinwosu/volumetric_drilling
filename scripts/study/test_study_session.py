@@ -36,6 +36,7 @@ class FakeIO:
     def clear_hud(self): self.hud = None
     def set_drill_lock(self, locked): self.locked = locked
     def set_trial_active(self, active): self.trial_active = active
+    def request_camera_reset(self): self.camera_resets = getattr(self, "camera_resets", 0) + 1
     def write_headset_place(self, seq, kind, tilt_deg=None): self.place, self.tilt = (seq, kind), tilt_deg
     def request_restore(self): self.restore_requested = True
     def restore_done(self): return self.restore_requested
@@ -95,7 +96,9 @@ def tutorial(session, io):
     advance(session, io)
     run(session, io, 0.1, zoom_in=1.0)
     assert not session.progress.step_done  # in only
+    assert getattr(io, "camera_resets", 0) == 0
     run(session, io, 0.1, zoom_out=0.7); advance(session, io)
+    assert ss.TUTORIAL[session.step].key == "drill" and io.camera_resets == 1  # camera back for drilling
     run(session, io, 0.1, removed_voxels=500); advance(session, io)
     assert session.hud(io.t)["panel"]["title"].endswith("The pause menu")
     run(session, io, 0.5, paused=True)

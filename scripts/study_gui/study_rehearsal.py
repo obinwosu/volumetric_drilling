@@ -173,6 +173,9 @@ class RehearsalIO:
     def set_trial_active(self, active: bool) -> None:
         self.state["trial_active"] = bool(active)
 
+    def request_camera_reset(self) -> None:
+        self.state["camera_resets"] = int(self.state.get("camera_resets") or 0) + 1
+
     def write_headset_place(self, seq: int, kind: str, tilt_deg: float | None = None) -> None:
         self.state["headset_place"] = (int(seq), kind, tilt_deg)
 

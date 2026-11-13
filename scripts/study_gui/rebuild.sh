@@ -14,7 +14,8 @@ fi
 set -u
 
 cd "${WS_ROOT}"
-colcon build --packages-select volumetric_drilling_msgs volumetric_plugin \
+# Only this checkout: the soft tissue worktree under src/ has the same package names.
+colcon build --base-paths "${REPO_ROOT}" --packages-select volumetric_drilling_msgs volumetric_plugin \
   --cmake-args -DCMAKE_BUILD_TYPE=Release
 
 # shellcheck disable=SC1091

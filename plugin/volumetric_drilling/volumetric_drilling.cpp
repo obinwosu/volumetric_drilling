@@ -289,9 +289,25 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
 
 
 
+    // Graphics study: FIVRS_LOOK=upstream shows AMBF's look from before the FIVRS
+    // changes (no gray room backdrop, the original wide spotlight). The volume ADF
+    // picks the original volume shader. Geometry, haptics and controls are unchanged.
+    if (const char* look = std::getenv("FIVRS_LOOK")){
+        m_upstreamLook = std::string(look) == "upstream";
+    }
+    if (m_upstreamLook){
+        m_spotCutoffRad = 0.5;  // upstream world.yaml light1 cutoff angle
+        if (afLightPtr light = m_worldPtr->getLight("light1", true)){
+            // Upstream: 0.025 above the camera at a 0.3 working distance. Same angle at today's distance.
+            light->setLocalPos(cVector3d(0.0, 0.0, 0.025 / 0.3 * 7.54));
+            light->setCutOffAngle(m_spotCutoffRad);
+        }
+        cerr << "INFO! Graphics study: upstream AMBF look (no room backdrop, 0.5 rad spotlight)" << endl;
+    }
+
     // Dull gray room behind the microscope beam (same idea as the surreal sim).
     auto addRoomBackdrop = [this](afCameraPtr cam){
-        if (!cam){
+        if (!cam || m_upstreamLook){
             return;
         }
         cBackground* background = new cBackground();
@@ -329,6 +345,9 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
     m_cameraHomeUp = m_mainCamera->getUpVector();
     loadCanonicalViews();
     applyStartupView();
+    if (m_mainCamera && m_mainCamera->getInternalCamera()){
+        m_startFovRad = m_mainCamera->getInternalCamera()->getFieldViewAngleRad();
+    }
     if (m_mainCamera){
         cVector3d right = m_mainCamera->getRightVector();
         cVector3d look = m_mainCamera->getLookVector();
@@ -355,7 +374,15 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
             const double halfWidth = cMax(halfHeight * aspect, 0.02);
             // Right side of this view, still inside the frame.
             const cVector3d onAxis = camPos + look * depth;
-            const cVector3d drillTip = onAxis + right * (halfWidth * 0.5);
+            cVector3d drillTip = onAxis + right * (halfWidth * 0.5);
+            // Just above the bone in this view, if there is bone on the way in.
+            cVector3d nearBone;
+            const bool atBone = drillTipNearBone(0.0, nearBone);
+            if (atBone){
+                drillTip = nearBone;
+            }
+            cerr << "INFO! Drill starts " << (atBone ? "2 mm above the bone" : "at the drill's ADF depth (no bone found in view)")
+                 << endl;
             m_drillManager.shiftDrillHome(drillTip - originalTip);
             cVector3d up = m_mainCamera->getUpVector();
             if (up.length() < 1e-6){
@@ -1502,6 +1529,19 @@ void afVolmetricDrillingPlugin::updateButtons(){
                 m_drillManager.setBurrStyle(BurrStyle::CUTTING);
                 cerr << "INFO! Study burr reset to 6mm cutting" << endl;
             }
+            // Study tutorial: back to the start-up view and zoom before the drilling step,
+            // so the resident does not have to bring the camera back after practising.
+            const std::filesystem::path cameraReset = "/tmp/fivrs-rtx/camera_reset.request";
+            if (std::filesystem::exists(cameraReset, lockError)){
+                std::filesystem::remove(cameraReset, lockError);
+                applyStartupView();
+                cCamera* internal = m_mainCamera ? m_mainCamera->getInternalCamera() : nullptr;
+                if (internal && m_startFovRad > 0.0){
+                    internal->setFieldViewAngleRad(m_startFovRad);
+                    writeRtxFov(m_startFovRad);
+                }
+                cerr << "INFO! Study camera reset to the start-up view" << endl;
+            }
         }
     }
 
@@ -1914,6 +1954,151 @@ bool afVolmetricDrillingPlugin::isLetterKeyHeld(int glfwKey) const
     return false;
 }
 
+// ---- burr start near the bone surface ----
+// The burr used to start at the drill's ADF position (startup) or outside the volume's
+// bounding box (Reposition drill). The box holds a lot of air around the bone, so the
+// burr began well short of the mastoid and had to be brought in before drilling. Both
+// now march from the scope towards the bone and stop the burr this far from it.
+static const double kBoneGapMm = 2.0;
+
+bool afVolmetricDrillingPlugin::boneSolidAt(const cVector3d& pWorld)
+{
+    if (!m_volumeObject || !m_voxelObj || !m_voxelObj->m_texture || !m_voxelObj->m_texture->m_image){
+        return false;
+    }
+    // Same mapping and threshold as chai's voxel collision (CVoxelObject.cpp).
+    const cTransform T = m_volumeObject->getLocalTransform();
+    const cVector3d p = cTranspose(T.getLocalRot()) * (pWorld - T.getLocalPos());
+    const cVector3d mn = m_voxelObj->m_minCorner;
+    const cVector3d mx = m_voxelObj->m_maxCorner;
+    cVector3d texCoord;
+    for (int i = 0; i < 3; i++){
+        if (p(i) < mn(i) || p(i) > mx(i) || mx(i) - mn(i) < 1e-12){
+            return false;
+        }
+        texCoord(i) = m_voxelObj->m_minTextureCoord(i) + (p(i) - mn(i)) / (mx(i) - mn(i))
+                      * (m_voxelObj->m_maxTextureCoord(i) - m_voxelObj->m_minTextureCoord(i));
+    }
+    int x = 0, y = 0, z = 0;
+    m_voxelObj->m_texture->m_image->getVoxelLocation(texCoord, x, y, z, true);
+    if (x < 0 || y < 0 || z < 0){
+        return false;
+    }
+    cColorb color;
+    if (!m_voxelObj->m_texture->m_image->getVoxelColor((uint)x, (uint)y, (uint)z, color)){
+        return false;
+    }
+    return (float)color.getA() / 255.0f >= m_voxelObj->getIsosurfaceValue();
+}
+
+bool afVolmetricDrillingPlugin::boneAlongRay(const cVector3d& from, const cVector3d& dir,
+                                             double maxDist, double& tHit)
+{
+    if (!m_voxelObj || !m_voxelObj->m_texture || !m_voxelObj->m_texture->m_image){
+        return false;
+    }
+    const cImagePtr image = m_voxelObj->m_texture->m_image;
+    const cVector3d range = m_voxelObj->m_maxCorner - m_voxelObj->m_minCorner;
+    double voxel = range.x() / cMax(1u, image->getWidth());
+    voxel = cMin(voxel, range.y() / cMax(1u, image->getHeight()));
+    voxel = cMin(voxel, range.z() / cMax(1u, image->getImageCount()));
+    const double step = cMax(0.5 * voxel, 1e-5);
+    // A lone solid voxel in the air (left by segmentation) is not the bone: it takes
+    // a solid run of 1 mm to count.
+    const int need = cMax(3, (int)std::ceil(1.0 * m_drillManager.m_units_mmToSim / step));
+    int run = 0;
+    double runStart = 0.0;
+    for (double t = 0.0; t <= maxDist; t += step){
+        if (boneSolidAt(from + dir * t)){
+            if (run == 0){
+                runStart = t;
+            }
+            if (++run >= need){
+                tHit = runStart;
+                return true;
+            }
+        }
+        else{
+            run = 0;
+        }
+    }
+    return false;
+}
+
+bool afVolmetricDrillingPlugin::drillClearOfBone(const cVector3d& tip)
+{
+    // The burr and the shaft spheres, placed as snapToCameraView places them.
+    const cVector3d axis = m_drillManager.m_T_d.getLocalRot().getCol0() * m_drillManager.m_dX;
+    const int n = cMax(1, (int)m_drillManager.m_toolCursorList.size());
+    for (int i = 0; i < n; i++){
+        const cVector3d c = tip + axis * i;
+        double r = (i < (int)m_drillManager.m_toolCursorRadius.size()) ? m_drillManager.m_toolCursorRadius[i] : 0.02;
+        if (i == 0 && m_drillManager.m_activeDrill){
+            r = cMax(r, m_drillManager.m_activeDrill->m_size * 0.5);
+        }
+        const cVector3d offsets[7] = {cVector3d(0, 0, 0), cVector3d(r, 0, 0), cVector3d(-r, 0, 0),
+                                      cVector3d(0, r, 0), cVector3d(0, -r, 0), cVector3d(0, 0, r), cVector3d(0, 0, -r)};
+        for (const cVector3d& o : offsets){
+            if (boneSolidAt(c + o)){
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool afVolmetricDrillingPlugin::drillTipNearBone(double depthHint, cVector3d& tipOut)
+{
+    if (!m_mainCamera || !m_volumeObject){
+        return false;
+    }
+    cVector3d right = m_mainCamera->getRightVector();
+    cVector3d look = m_mainCamera->getLookVector();
+    if (right.length() < 1e-6 || look.length() < 1e-6){
+        return false;
+    }
+    right.normalize();
+    look.normalize();
+    const cVector3d camPos = m_mainCamera->getLocalPos();
+    double depth = depthHint;
+    if (depth <= 0.05){
+        depth = cMax(look.dot(m_volumeLookAt - camPos), 0.5);
+    }
+    const double halfHeight = depth * std::tan(m_mainCamera->getFieldViewAngle() * 0.5);
+    int displayW = 0;
+    int displayH = 0;
+    if (cCamera* camera = m_mainCamera->getInternalCamera()){
+        displayW = camera->getDisplayWidth();
+        displayH = camera->getDisplayHeight();
+    }
+    const double aspect = (displayW > 16 && displayH > 16) ? (double)displayW / (double)displayH : (16.0 / 9.0);
+    const double halfWidth = cMax(halfHeight * aspect, 0.02);
+    const double burrR = m_drillManager.m_activeDrill ? m_drillManager.m_activeDrill->m_size * 0.5 : 0.02;
+    const double gap = burrR + kBoneGapMm * m_drillManager.m_units_mmToSim;
+    const double backStep = 0.5 * m_drillManager.m_units_mmToSim;
+    // Right of the centre first, as before (the burr does not cover the middle of the
+    // view), then closer in if the bone is not there.
+    const double fractions[4] = {0.5, 0.35, 0.2, 0.0};
+    for (double f : fractions){
+        cVector3d dir = (camPos + look * depth + right * (halfWidth * f)) - camPos;
+        dir.normalize();
+        double t = 0.0;
+        if (!boneAlongRay(camPos, dir, depth * 3.0, t) || t <= gap){
+            continue;
+        }
+        cVector3d tip = camPos + dir * (t - gap);
+        // The shaft may touch bone where the burr does not: back off along the ray.
+        for (int i = 0; i < 60 && !drillClearOfBone(tip) && (tip - camPos).length() > backStep; i++){
+            tip -= dir * backStep;
+        }
+        if (drillClearOfBone(tip)){
+            tipOut = tip;
+            return true;
+        }
+    }
+    return false;
+}
+
 void afVolmetricDrillingPlugin::requestDrillReposition()
 {
     if (!m_volumeObject || !m_mainCamera){
@@ -1922,10 +2107,16 @@ void afVolmetricDrillingPlugin::requestDrillReposition()
     }
 
     cTransform poseFrom = m_drillManager.m_T_d;
-    cVector3d dims = m_volumeObject->getDimensions();
-    if (!m_drillManager.snapToCameraView(m_volumeLookAt, dims, m_volumeObject->getLocalTransform())){
-        showNotice("Cannot reposition drill");
-        return;
+    cVector3d nearBone;
+    if (drillTipNearBone(0.0, nearBone)){
+        m_drillManager.placeDrillTip(nearBone);
+    }
+    else{
+        cVector3d dims = m_volumeObject->getDimensions();
+        if (!m_drillManager.snapToCameraView(m_volumeLookAt, dims, m_volumeObject->getLocalTransform())){
+            showNotice("Cannot reposition drill");
+            return;
+        }
     }
 
     m_drillRecenterCount += 1;
@@ -3104,6 +3295,9 @@ void afVolmetricDrillingPlugin::mousePosUpdate(GLFWwindow *a_window, double x_po
 
 void afVolmetricDrillingPlugin::applyRoomGray()
 {
+    if (m_upstreamLook){
+        return;  // upstream AMBF had no room gray
+    }
     const float g = static_cast<float>(m_roomGrayStep) / 20.0f;
     const cColorf room(g, g, g);
     if (m_worldPtr && m_worldPtr->getChaiWorld()){
