@@ -502,6 +502,7 @@ void afVolmetricDrillingPlugin::publishDrillVisualState()
             << ",\"zoom_out\":" << m_zoomOutTravel
             << ",\"advance_count\":" << m_pedalAdvanceCount
             << ",\"skip_count\":" << m_tutorialSkipCount
+            << ",\"end_trial_count\":" << m_endTrialCount
             << ",\"scope_button\":" << (isDigit1Held() ? "true" : "false")
             << camText
             << deviceText
@@ -1387,9 +1388,13 @@ void afVolmetricDrillingPlugin::updateButtons(){
     // Ikkegol footpedal workaround: left/middle/right emit keyboard a/b/c.
     // Poll via X11 so this works even when /dev/input is not readable.
     // PCsensor FootSwitch: F17/F18/F19 for the same three pedals.
-    const bool xStyleHeld = isLetterKeyHeld(GLFW_KEY_A) || isLetterKeyHeld(GLFW_KEY_F17);
-    const bool xDrillHeld = isLetterKeyHeld(GLFW_KEY_B) || isLetterKeyHeld(GLFW_KEY_F18);
-    const bool xSizeHeld  = isLetterKeyHeld(GLFW_KEY_C) || isLetterKeyHeld(GLFW_KEY_F19);
+    // X11 sees every keyboard in every window, so typing a/b/c anywhere (a browser
+    // form) would press the pedals: the letters only count when the pedal device
+    // itself could not be opened. F17/F18/F19 are not typed, so they always count.
+    const bool letterPedals = !m_footpedal.isAvailable();
+    const bool xStyleHeld = (letterPedals && isLetterKeyHeld(GLFW_KEY_A)) || isLetterKeyHeld(GLFW_KEY_F17);
+    const bool xDrillHeld = (letterPedals && isLetterKeyHeld(GLFW_KEY_B)) || isLetterKeyHeld(GLFW_KEY_F18);
+    const bool xSizeHeld  = (letterPedals && isLetterKeyHeld(GLFW_KEY_C)) || isLetterKeyHeld(GLFW_KEY_F19);
 
     // The pedal can arrive both as an input device and as X11 keys; combine
     // them so one press counts once.
@@ -1440,6 +1445,7 @@ void afVolmetricDrillingPlugin::updateButtons(){
             }
             else if (!m_pauseConfirmClose){
                 m_pauseConfirmClose = true;
+                m_pauseConfirmEnd = false;
                 m_pauseConfirmYes = true;
                 refreshVrHudText();
             }
@@ -2418,8 +2424,8 @@ int afVolmetricDrillingPlugin::pauseViewCount()
 
 int afVolmetricDrillingPlugin::pauseRowCount()
 {
-    // Saved camera views (a list), Burr type, Burr size, Resume.
-    return 4;
+    // Saved camera views (a list), Burr type, Burr size, [End trial], Resume.
+    return m_studyTrialActive ? 5 : 4;
 }
 
 vector<int> afVolmetricDrillingPlugin::burrSizeOrder() const
@@ -2482,9 +2488,16 @@ void afVolmetricDrillingPlugin::cyclePauseViewHighlight(int delta)
 void afVolmetricDrillingPlugin::pauseMenuSelect()
 {
     if (m_pauseConfirmClose){
-        // Yes closes the menu and resumes; No goes back to the menu.
+        // Yes closes the menu and resumes (and, for End trial, tells the study
+        // session to end the trial); No goes back to the menu.
+        const bool endTrial = m_pauseConfirmEnd;
         m_pauseConfirmClose = false;
+        m_pauseConfirmEnd = false;
         if (m_pauseConfirmYes){
+            if (endTrial){
+                m_endTrialCount += 1;
+                cerr << "INFO! End trial selected in the pause menu" << endl;
+            }
             setVrHudVisible(false);
         }
         return;
@@ -2525,9 +2538,15 @@ void afVolmetricDrillingPlugin::pauseMenuSelect()
         m_pauseSubmenu = PauseSubmenu::BURR_TYPE;
         m_pauseSubIndex = (m_drillManager.m_burrStyle == BurrStyle::DIAMOND) ? 1 : 0;
     }
-    else if (m_pauseViewIndex == 3){
+    else if (m_pauseViewIndex == pauseRowCount() - 1){
         // Resume: leave the menu.
         setVrHudVisible(false);
+    }
+    else if (m_studyTrialActive && m_pauseViewIndex == 3){
+        // End trial: ask first, with No highlighted.
+        m_pauseConfirmClose = true;
+        m_pauseConfirmEnd = true;
+        m_pauseConfirmYes = false;
     }
     else{
         m_pauseSubmenu = PauseSubmenu::BURR_SIZE;
@@ -2546,6 +2565,7 @@ void afVolmetricDrillingPlugin::pauseMenuBack()
     // Back out of a list; at the top of the menu, leave the menu and resume.
     if (m_pauseConfirmClose){
         m_pauseConfirmClose = false;
+        m_pauseConfirmEnd = false;
         return;
     }
     if (m_pauseSubmenu != PauseSubmenu::NONE){
@@ -2558,6 +2578,11 @@ void afVolmetricDrillingPlugin::pauseMenuBack()
 string afVolmetricDrillingPlugin::pauseMenuListText()
 {
     clampPauseIndex();
+    if (m_pauseConfirmClose && m_pauseConfirmEnd){
+        return string("End the timed trial now?\n"
+                      "You will move on to the questionnaires and feedback.\n\n")
+            + (m_pauseConfirmYes ? "  > Yes\n    No\n" : "    Yes\n  > No\n");
+    }
     if (m_pauseConfirmClose){
         return string("Close pause menu and return to simulator?\n\n")
             + (m_pauseConfirmYes ? "  > Yes\n    No\n" : "    Yes\n  > No\n");
@@ -2602,7 +2627,10 @@ string afVolmetricDrillingPlugin::pauseMenuListText()
         }
         text += backOption();
     }
-    text += row(3, "Resume", "");
+    if (m_studyTrialActive){
+        text += row(3, "End trial", "");
+    }
+    text += row(pauseRowCount() - 1, "Resume", "");
     return text;
 }
 
@@ -2937,6 +2965,11 @@ void afVolmetricDrillingPlugin::setVrHudVisible(bool visible)
     m_vrHudVisible = visible;
     m_pauseSubmenu = PauseSubmenu::NONE;
     m_pauseConfirmClose = false;
+    m_pauseConfirmEnd = false;
+    if (visible){
+        std::error_code trialError;
+        m_studyTrialActive = std::filesystem::exists("/tmp/fivrs-rtx/study_trial_active", trialError);
+    }
     applySimPause(visible);
     if (!visible){
         writeRtxPauseHud("");

@@ -170,6 +170,12 @@ class RehearsalIO:
     def set_drill_lock(self, locked: bool) -> None:
         self.state["drill_locked"] = bool(locked)
 
+    def set_trial_active(self, active: bool) -> None:
+        self.state["trial_active"] = bool(active)
+
+    def write_headset_place(self, seq: int, kind: str, tilt_deg: float | None = None) -> None:
+        self.state["headset_place"] = (int(seq), kind, tilt_deg)
+
     def request_restore(self) -> None:
         self._restore_at = self.now() + RESTORE_S
         self._reload_at = None

@@ -15,7 +15,9 @@ Flow:
                  reloaded in RTX and the recorder starts; the left pedal (once all that is
                  done) begins the trial
     armed     -> recorder running, drill unlocked; timer waits for first bone removed
-    running   -> 10:00 of drilling time; pauses (pause menu) do not count
+    running   -> 10:00 of drilling time; pauses (pause menu) do not count. While armed or
+                 running the pause menu has End trial (study_trial_active); confirming it
+                 raises end_trial_count in drill_state.json and ends the trial here
     done      -> drill locked, recorder stopped, metadata written
 """
 from __future__ import annotations
@@ -51,7 +53,8 @@ BRIEFING_LINES = [
     "Your performance is not a primary endpoint in the study and will not be used to evaluate "
     "you whatsoever.",
     "",
-    "It is okay if you do not complete the task in the allotted time.",
+    "It is okay if you do not complete the task in the allotted time. If you finish your "
+    "trial early, hold the left foot pedal to open the pause menu and select End trial.",
     "",
     "After 10 minutes, you will be asked to complete a handful of brief questionnaires and "
     "review two forms of feedback.",
@@ -184,6 +187,24 @@ class SessionIO:
     def clear_hud(self) -> None:
         (self.runtime / "study_hud.json").unlink(missing_ok=True)
 
+    def set_trial_active(self, active: bool) -> None:
+        """The plugin's pause menu offers End trial while this file exists."""
+        path = self.runtime / "study_trial_active"
+        if active:
+            self.runtime.mkdir(parents=True, exist_ok=True)
+            path.write_text("study\n")
+        else:
+            path.unlink(missing_ok=True)
+
+    def write_headset_place(self, seq: int, kind: str, tilt_deg: float | None = None) -> None:
+        """Ask the headset eyepiece to place the view: "look" (ahead, tilted down
+        tilt_deg) or "lap". A new seq places it again from the current head pose."""
+        self.runtime.mkdir(parents=True, exist_ok=True)
+        partial = self.runtime / "headset_place.txt.part"
+        tilt = "" if tilt_deg is None else f" {float(tilt_deg):.1f}"
+        partial.write_text(f"{int(seq)} {kind}{tilt}\n")
+        partial.replace(self.runtime / "headset_place.txt")
+
     def set_drill_lock(self, locked: bool) -> None:
         path = self.runtime / "study_drill_lock"
         if locked:
@@ -297,6 +318,11 @@ class StudySession:
         self.status = ""
         self.error = None
         self.io.set_drill_lock(False)
+        self.io.set_trial_active(False)
+        self._place_kind = None
+        self._place_seq = 0
+        self._place_written = None
+        self.headset_tilt = None  # degrees down; None = the eyepiece default
         self._log("tutorial_started")
 
     # ---- proctor actions ----
@@ -360,12 +386,63 @@ class StudySession:
             self._ready(state)
         elif self.phase == "briefing":
             self._briefing(state, now)
+        elif self.phase in ("armed", "running") and self._resident_ended(state):
+            self._log("trial_ended_by_resident", phase=self.phase)
+            self._finish()
         elif self.phase == "armed":
             self._armed(state, now)
         elif self.phase == "running":
             self._running(state, dt, now)
         self.io.write_hud(self.hud(now))
+        self._place_headset(now)
         return self.phase
+
+    # ---- headset placement ----
+    def placement(self) -> str:
+        """The study introduction (text only) follows the head, centred. Every other
+        screen, drilling included, is placed ahead of the head and a little down."""
+        return "follow" if self.phase == "briefing" else "look"
+
+    def _place_moment(self) -> str | None:
+        """The view is placed from the head when the welcome page opens, while the
+        introduction is up (it follows), and once more when the trial starts."""
+        if self.phase == "tutorial" and TUTORIAL[self.step].key == "welcome":
+            return "welcome"
+        if self.phase == "briefing":
+            return "briefing"
+        if self.phase in ("armed", "running"):
+            return "trial"
+        return None
+
+    def set_headset_tilt(self, degrees: float):
+        """Proctor: tilt the view this far below the head's look direction, placed again now."""
+        self.headset_tilt = max(0.0, min(60.0, float(degrees)))
+        self._place_seq += 1
+        self._place_written = None
+        self._log("headset_tilt", degrees=self.headset_tilt)
+
+    def recenter_headset(self):
+        """Proctor: place the view again for the current screen, from where the head is now."""
+        self._place_seq += 1
+        self._place_written = None
+        self._log("headset_recentered", placement=self.placement())
+
+    def _place_headset(self, now):
+        kind = self.placement()
+        moment = self._place_moment()
+        if moment is not None and moment != self._place_kind:
+            if self._place_kind is not None:
+                self._place_seq += 1
+            self._place_written = None
+            self._log("headset_placement", placement=kind, moment=moment)
+        if moment is not None or self._place_kind is None:
+            self._place_kind = moment
+        # Rewritten every 2 s with the same number: the eyepiece ignores files older
+        # than itself, so a simulator started after this request still sees it.
+        if self._place_written is None or now - self._place_written >= 2.0:
+            tilt = 0.0 if kind == "follow" else self.headset_tilt
+            self.io.write_headset_place(self._place_seq, kind, tilt)
+            self._place_written = now
 
     # ---- tutorial ----
     def _tutorial(self, state, dt):
@@ -466,7 +543,9 @@ class StudySession:
         if self.phase == "briefing" and self._reset_ready and self._briefing_ack:
             state = self.io.read_state() or {}
             self._armed_removed = int(state.get("removed_voxels") or 0)
+            self._end_trial_base = int(state.get("end_trial_count") or 0)
             self.io.set_drill_lock(False)
+            self.io.set_trial_active(True)
             self.phase = "armed"
             self._log("trial_armed")
 
@@ -502,6 +581,15 @@ class StudySession:
                 self.io.set_drill_lock(False)
                 self._log("recorder_failed")
 
+    def _resident_ended(self, state) -> bool:
+        """End trial confirmed in the pause menu since the trial was armed."""
+        count = int(state.get("end_trial_count") or 0)
+        base = getattr(self, "_end_trial_base", 0)
+        if count < base:
+            self._end_trial_base = count  # the simulator restarted
+            return False
+        return count > base
+
     def _armed(self, state, now):
         # Measured from the count at arming: the plugin zeroes it on restore, but
         # the timer must not start from practice drilling if that ever changes.
@@ -521,6 +609,7 @@ class StudySession:
 
     def _finish(self):
         self.io.set_drill_lock(True)
+        self.io.set_trial_active(False)
         self.phase = "done"
         self.finished_wall = self.io.now()
         code = self.io.stop_recorder()
@@ -571,7 +660,8 @@ class StudySession:
             return {
                 "panel": {"title": "Timed trial",
                           "lines": ["Begin drilling when ready.",
-                                    "The 10-minute timer starts when the drill first removes bone."]},
+                                    "The 10-minute timer starts when the drill first removes bone.",
+                                    "If you finish early, hold the left foot pedal and select End trial."]},
                 "timer": timer, "banner": None,
             }
         if self.phase == "running":
@@ -594,6 +684,8 @@ class StudySession:
                 "first_bone_contact_wall": self.first_contact_wall,
                 "finished_wall": self.finished_wall,
                 "ended_early": self.drilling_elapsed < self.trial_seconds - 1e-6,
+                "ended_by": next((e["event"].removeprefix("trial_ended_by_") for e in self.events
+                                  if e["event"].startswith("trial_ended_by_")), None),
             },
             "tutorial_steps_done": sorted(k for k, v in self.progress.done.items() if v),
             "events": self.events,

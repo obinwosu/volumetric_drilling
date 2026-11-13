@@ -163,6 +163,11 @@ protected:
     // asks this; the left pedal toggles Yes / No and the middle pedal selects.
     bool m_pauseConfirmClose = false;
     bool m_pauseConfirmYes = true;
+    // The same Yes / No question, asking "End the timed trial now?" instead (No first).
+    bool m_pauseConfirmEnd = false;
+    // The study session writes /tmp/fivrs-rtx/study_trial_active during the timed
+    // trial; the menu then has an End trial row. Checked when the menu opens.
+    bool m_studyTrialActive = false;
     int pauseViewCount();
     int pauseRowCount();
     int pauseSubmenuCount() const;
@@ -291,6 +296,7 @@ private:
     double m_zoomOutTravel = 0.0;
     int m_pedalAdvanceCount = 0;  // left-pedal taps outside the menu (study tutorial)
     int m_tutorialSkipCount = 0;  // right-arrow presses outside the menu (study tutorial)
+    int m_endTrialCount = 0;      // End trial confirmed in the pause menu (study session)
     bool m_rightArrowPrev = false;
     long m_drillRecenterCount = 0;
 

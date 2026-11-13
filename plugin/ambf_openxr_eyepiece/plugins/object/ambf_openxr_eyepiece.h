@@ -107,6 +107,17 @@ protected:
     cTransform m_scenePoseXr;
     bool m_scenePoseInitialized = false;
     bool m_placeDragPrev = false;
+    // Placement requests from the study session (/tmp/fivrs-rtx/headset_place.txt,
+    // "<seq> look|lap"). Files older than this plugin are from an earlier run.
+    double m_placeCheckSec = 0.0;
+    long m_placeSeqApplied = -1;
+    long long m_placeStartWall = 0;
+    // "follow": the view stays locked to the head (text-only screens) until the
+    // next request places it.
+    bool m_placeFollow = false;
+    double m_placeFollowTilt = 0.0;
+    // Head pose tilted this far down: where long text screens are read.
+    static cTransform readingRelativeToHead(double tiltDeg = -1.0);
 
     // OpenXR
     XrInstance m_instance = XR_NULL_HANDLE;

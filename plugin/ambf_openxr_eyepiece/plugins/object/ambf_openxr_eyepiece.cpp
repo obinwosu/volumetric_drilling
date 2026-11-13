@@ -207,6 +207,27 @@ cTransform afOpenXREyepiece::defaultLapRelativeToHead(){
     return rel;
 }
 
+cTransform afOpenXREyepiece::readingRelativeToHead(double tiltDeg){
+    // Straight ahead of the head, tilted down: the study places text screens and the
+    // drilling field here. The study GUI sends the tilt; otherwise
+    // FIVRS_HEADSET_TILT_DEG, otherwise 15 degrees.
+    double tilt = 15.0;
+    if (tiltDeg >= 0.0 && tiltDeg <= 60.0){
+        tilt = tiltDeg;
+    }
+    else if (const char* env = std::getenv("FIVRS_HEADSET_TILT_DEG")){
+        const double value = std::atof(env);
+        if (value >= 0.0 && value <= 60.0){
+            tilt = value;
+        }
+    }
+    cTransform rel;
+    cMatrix3d R;
+    R.setExtrinsicEulerRotationDeg(-tilt, 0.0, 0.0, C_EULER_ORDER_XYZ);
+    rel.setLocalRot(R);
+    return rel;
+}
+
 double afOpenXREyepiece::hudStereoHalfShiftPx(uint32_t eyeWidth, const XrFovf& fov) const{
     // Parallel-camera stereo: disparity ≈ ipd * f / depth. Half goes to each eye.
     double ipd = std::abs((double)m_views[1].pose.position.x - (double)m_views[0].pose.position.x);
@@ -414,8 +435,57 @@ void afOpenXREyepiece::updateScenePlacement(const XrSpaceLocation& hmdLoc){
     }
 
     const bool wantHead = g_recenterToHead.exchange(0) != 0;
-    const bool wantLap = g_recenterLap.exchange(0) != 0;
+    bool wantLap = g_recenterLap.exchange(0) != 0;
     const bool dragging = g_placeDrag.load() != 0;
+
+    // Study session requests, checked four times a second.
+    bool wantReading = false;
+    double requestTilt = -1.0;
+    const double nowSec = std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (m_placeStartWall == 0){
+        m_placeStartWall = static_cast<long long>(std::time(nullptr));
+    }
+    if (nowSec - m_placeCheckSec >= 0.25){
+        m_placeCheckSec = nowSec;
+        const char* path = "/tmp/fivrs-rtx/headset_place.txt";
+        struct stat st{};
+        if (::stat(path, &st) == 0 && static_cast<long long>(st.st_mtime) >= m_placeStartWall){
+            if (FILE* f = std::fopen(path, "r")){
+                long seq = -1;
+                char kind[16] = {0};
+                double tilt = -1.0;
+                const int fields = std::fscanf(f, "%ld %15s %lf", &seq, kind, &tilt);
+                if (fields >= 2 && seq != m_placeSeqApplied){
+                    requestTilt = fields == 3 ? tilt : -1.0;
+                    m_placeSeqApplied = seq;
+                    m_placeFollow = std::strcmp(kind, "follow") == 0;
+                    m_placeFollowTilt = requestTilt;
+                    if (std::strcmp(kind, "look") == 0){
+                        wantReading = true;
+                    }
+                    else if (std::strcmp(kind, "lap") == 0){
+                        wantLap = true;
+                    }
+                }
+                std::fclose(f);
+            }
+        }
+    }
+    if (wantHead || dragging){
+        m_placeFollow = false;  // the keyboard placement keys take over
+    }
+    if (m_placeFollow){
+        m_scenePoseXr = H * readingRelativeToHead(m_placeFollowTilt);
+        m_placeDragPrev = dragging;
+        return;
+    }
+    if (wantReading && !wantHead && !dragging){
+        m_scenePoseXr = H * readingRelativeToHead(requestTilt);
+        std::cout << "INFO! OpenXR scene placed ahead of the head (study placement)" << std::endl;
+        m_placeDragPrev = dragging;
+        return;
+    }
 
     if (wantHead){
         m_scenePoseXr = H;

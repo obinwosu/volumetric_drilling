@@ -23,7 +23,7 @@ import sys
 import time
 
 from PyQt5 import QtWidgets
-from PyQt5.QtCore import QProcess, Qt, QTimer, QUrl
+from PyQt5.QtCore import QProcess, QSettings, Qt, QTimer, QUrl
 from PyQt5.QtGui import QDesktopServices
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -116,6 +116,7 @@ class StudyPanel(QtWidgets.QWidget):
         if not rehearsal_only:
             # A lock left by a crashed study session would stop the drill in normal use.
             study_session.SessionIO().set_drill_lock(False)
+            study_session.SessionIO().set_trial_active(False)
             study_session.SessionIO().clear_hud()
 
     # ---- layout ----
@@ -246,6 +247,21 @@ class StudyPanel(QtWidgets.QWidget):
         self.begin_button.clicked.connect(self.begin_trial)
         self.end_button = QtWidgets.QPushButton("End trial early")
         self.end_button.clicked.connect(self.end_early)
+        self.recenter_button = QtWidgets.QPushButton("Recenter headset view")
+        self.recenter_button.clicked.connect(lambda: self.session and self.session.recenter_headset())
+        # Tilt of the headset view below the resident's look direction. Remembered by
+        # the GUI (QSettings, ~/.config), not in gui_setup.yaml.
+        self._settings = QSettings("FIVRS", "study_gui")
+        self.tilt_box = QtWidgets.QSpinBox()
+        self.tilt_box.setRange(0, 60)
+        self.tilt_box.setSuffix("\u00b0 down")
+        self.tilt_box.setToolTip("Headset view tilt below where the resident looks. Changing it "
+                                 "places the view again from their head now.")
+        try:
+            self.tilt_box.setValue(int(self._settings.value("headset_tilt_deg", 15)))
+        except (TypeError, ValueError):
+            self.tilt_box.setValue(15)
+        self.tilt_box.valueChanged.connect(self._tilt_changed)
         self.feedback_button = QtWidgets.QPushButton("Proceed to feedback")
         self.feedback_button.clicked.connect(self.start_analysis)
         explain = [
@@ -254,6 +270,8 @@ class StudyPanel(QtWidgets.QWidget):
                                 "introduction while the bone resets and the recording starts; pressed "
                                 "during the introduction, starts the trial without waiting for their pedal."),
             (self.end_button, "During the trial: stop it now (hardware fault, or the resident stops)."),
+            (self.recenter_button, "Place the headset view again from where the resident's head is now "
+                                   "(ahead and a little down)."),
             (self.feedback_button, "After the trial: prepare the questionnaire and feedback reports again "
                                    "(for example after a failed analysis)."),
         ]
@@ -263,6 +281,14 @@ class StudyPanel(QtWidgets.QWidget):
             label.setWordWrap(True)
             grid.addWidget(button, row, 0)
             grid.addWidget(label, row, 1, 1, 2)
+            if button is self.recenter_button:
+                tilt_row = QtWidgets.QHBoxLayout()
+                tilt_row.addWidget(QtWidgets.QLabel("Tilt"))
+                tilt_row.addWidget(self.tilt_box)
+                tilt_row.addStretch(1)
+                grid.addLayout(tilt_row, row, 1, 1, 2)
+                label.hide()
+                button.setToolTip(text)
         layout.addWidget(status)
         self._set_buttons(None)
         self._name_changed()
@@ -299,6 +325,7 @@ class StudyPanel(QtWidgets.QWidget):
         self.skip_button.setEnabled(phase == "tutorial")
         self.begin_button.setEnabled(phase in ("tutorial", "ready", "briefing"))
         self.end_button.setEnabled(phase in ("armed", "running"))
+        self.recenter_button.setEnabled(not idle)
         if hasattr(self, "feedback_button"):
             self.feedback_button.setEnabled(
                 phase == "done" and self.recording_dir is not None
@@ -459,6 +486,7 @@ class StudyPanel(QtWidgets.QWidget):
         }
         io = study_session.SessionIO(recorder_cmd=recorder_command(volume_adf))
         self.session = study_session.StudySession(io, study_id, self.recording_dir, metadata)
+        self.session.set_headset_tilt(self.tilt_box.value())
         self._done_shown = False
         self.id_label.setText(f"Study ID: {study_id}" + (" (development, saved in study_dev)" if practice else ""))
         self._timer.start()
@@ -496,6 +524,11 @@ class StudyPanel(QtWidgets.QWidget):
         self.session.error = None
         self.session.begin_trial()
 
+    def _tilt_changed(self, value):
+        self._settings.setValue("headset_tilt_deg", int(value))
+        if self.session is not None and self.session.phase != "done":
+            self.session.set_headset_tilt(value)
+
     def end_early(self):
         if self.session is None:
             return
@@ -516,6 +549,7 @@ class StudyPanel(QtWidgets.QWidget):
         if self.session is not None:
             self.session.io.clear_hud()
             self.session.io.set_drill_lock(False)
+            self.session.io.set_trial_active(False)
             self._set_buttons("done" if self.session.phase == "done" else None)
 
     # ---- loop ----

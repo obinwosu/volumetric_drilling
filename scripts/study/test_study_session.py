@@ -35,6 +35,8 @@ class FakeIO:
     def write_hud(self, hud): self.hud = json.loads(json.dumps(hud))
     def clear_hud(self): self.hud = None
     def set_drill_lock(self, locked): self.locked = locked
+    def set_trial_active(self, active): self.trial_active = active
+    def write_headset_place(self, seq, kind, tilt_deg=None): self.place, self.tilt = (seq, kind), tilt_deg
     def request_restore(self): self.restore_requested = True
     def restore_done(self): return self.restore_requested
     def request_burr_reset(self): self.state.update(drill="6mm", style="cutting")
@@ -250,6 +252,84 @@ def test_state_file_from_an_earlier_simulator_is_ignored():
         assert io.read_state() == {"advance_count": 0}
 
 
+def armed_session(io, name, end_trial_count=0):
+    io.state["end_trial_count"] = end_trial_count  # left over from practice or a restart
+    session = ss.StudySession(io, name, pathlib.Path(tempfile.mkdtemp()) / name, {}, trial_seconds=30)
+    for _ in ss.TUTORIAL:
+        session.skip_step()
+    session.begin_trial()
+    run(session, io, 0.5)
+    session.begin_trial()
+    run(session, io, 0.2)
+    assert session.phase == "armed" and io.trial_active is True
+    return session
+
+
+def test_resident_ends_the_trial_from_the_pause_menu():
+    io = FakeIO()
+    session = armed_session(io, "S006", end_trial_count=2)
+    assert any("End trial" in line for line in session.hud(io.t)["panel"]["lines"])
+    run(session, io, 1.0)  # the count from before arming does not end it
+    assert session.phase == "armed"
+    run(session, io, 0.1, removed_voxels=900)
+    run(session, io, 5.0)
+    assert session.phase == "running"
+    run(session, io, 0.2, end_trial_count=3)
+    assert session.phase == "done" and io.locked is True and io.recorder == "stopped"
+    assert io.trial_active is False
+    meta = json.loads((session.recording_dir / "metadata.json").read_text())
+    assert meta["trial"]["ended_early"] and meta["trial"]["ended_by"] == "resident"
+    assert "End trial" in " ".join(ss.BRIEFING_LINES)
+
+
+def test_end_trial_before_first_bone_contact_and_after_a_simulator_restart():
+    io = FakeIO()
+    session = armed_session(io, "S007", end_trial_count=4)
+    run(session, io, 0.2, end_trial_count=0)  # simulator restarted: count back to zero
+    assert session.phase == "armed"
+    run(session, io, 0.2, end_trial_count=1)
+    assert session.phase == "done"
+    meta = json.loads((session.recording_dir / "metadata.json").read_text())
+    assert meta["trial"]["ended_by"] == "resident"
+
+
+def test_proctor_end_is_recorded_as_proctor():
+    io = FakeIO()
+    session = armed_session(io, "S008")
+    session.end_early()
+    meta = json.loads((session.recording_dir / "metadata.json").read_text())
+    assert meta["trial"]["ended_by"] == "proctor" and io.trial_active is False
+
+
+def test_headset_view_is_placed_at_the_welcome_page_and_the_introduction():
+    io = FakeIO()
+    session = ss.StudySession(io, "S010", pathlib.Path(tempfile.mkdtemp()) / "S010", {}, trial_seconds=30)
+    run(session, io, 0.2)
+    assert io.place == (0, "look")  # welcome page
+    advance(session, io)
+    run(session, io, 3.0)
+    assert io.place == (0, "look")  # the tutorial keeps the same placement
+    session.recenter_headset()
+    run(session, io, 0.1)
+    assert io.place == (1, "look")
+    for _ in ss.TUTORIAL:
+        session.skip_step()
+    session.begin_trial()
+    run(session, io, 0.2)
+    assert session.phase == "briefing" and io.place == (2, "follow") and io.tilt == 0.0
+    session.begin_trial()
+    run(session, io, 0.5)
+    assert session.phase == "armed" and io.place == (3, "look")  # placed once for the trial
+    assert io.tilt is None
+    run(session, io, 0.1, removed_voxels=600)
+    run(session, io, 3.0)
+    assert session.phase == "running" and io.place == (3, "look")  # then left alone
+    session.set_headset_tilt(22)
+    run(session, io, 0.1)
+    assert io.place == (4, "look") and io.tilt == 22.0
+    session.set_headset_tilt(90)
+    assert session.headset_tilt == 60.0
+
 if __name__ == "__main__":
     test_welcome_ignores_the_last_runs_tap_count()
     test_state_file_from_an_earlier_simulator_is_ignored()
@@ -259,4 +339,8 @@ if __name__ == "__main__":
     test_one_minute_warning()
     test_resident_pedal_waits_for_the_bone_and_proctor_can_skip()
     test_right_arrow_skips_steps_and_begins()
+    test_resident_ends_the_trial_from_the_pause_menu()
+    test_end_trial_before_first_bone_contact_and_after_a_simulator_restart()
+    test_proctor_end_is_recorded_as_proctor()
+    test_headset_view_is_placed_at_the_welcome_page_and_the_introduction()
     print("ok")
