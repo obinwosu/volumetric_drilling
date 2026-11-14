@@ -97,6 +97,10 @@ void CameraPanel::update(){
         xoffset = -m_panel->getWidth();
         yoffset = -m_panel->getHeight();
     }
+    else if (m_referenceOrigin == PanelReferenceOrigin::UPPER_LEFT){
+        xoffset = 0.;
+        yoffset = -m_panel->getHeight();
+    }
 
     if (m_referenceType == PanelReferenceType::NORMALIZED){
         xpos = m_xpos * m_camera->m_width + xoffset;

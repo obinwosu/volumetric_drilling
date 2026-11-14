@@ -29,6 +29,7 @@ import pathlib
 import signal
 import subprocess
 import sys
+import textwrap
 import time
 from dataclasses import dataclass, field
 
@@ -82,11 +83,6 @@ TUTORIAL = [
     Step("drill_move", "Moving the drill",
          ["Move the stylus to move the drill around the surgical field."],
          [{"device": "stylus", "marks": {}}]),
-    Step("reposition", "Repositioning the haptic device",
-         ["The haptic device has a set working area. Holding the stylus action button allows "
-          "you to reposition the device without moving the drill.",
-          "Hold the action button, move the stylus, then release."],
-         [{"device": "stylus", "marks": {"action": "Hold"}}]),
     Step("recenter", "Recentering the drill in view",
          ["To quickly recenter the drill and keep the haptic device in the working area, "
           "double-tap the stylus action button."],
@@ -95,7 +91,7 @@ TUTORIAL = [
          ["The view in the simulator is controlled by the position of the Quest headset. To move "
           "the camera, press and hold the button on the microscope handle and then reposition "
           "the Quest headset.",
-          "Move the view until the yellow target is inside the centre circle."],
+          "Holding the microscope button, look left, right, up and down."],
          [{"device": "scope", "marks": {"button": "Hold"}}, {"device": "headset", "marks": {}}]),
     Step("zoom", "Zooming in and out",
          ["To zoom in, press the button on the microscope AND press the left foot pedal. To zoom "
@@ -128,29 +124,67 @@ MENU_HELP = {
 
 # Thresholds for each tutorial check.
 DRILL_TRAVEL_UNITS = 0.5   # simulator units of tip travel (about 25 mm)
-DEVICE_TRAVEL_M = 0.015    # stylus travel while clutched, metres
-HOLD_SECONDS = 1.0         # clutch held this long, when the plugin reports no stylus position
 ZOOM_EACH_WAY = 0.5        # doublings of magnification, in and then out
 DRILL_VOXELS = 200         # voxels removed in practice
-LOOK_RADIUS = 0.15         # centre circle, in half-heights of the view
-LOOK_OFFSET = (0.55, 0.30) # target start: right and up of centre, in half-heights
-LOOK_HOLD_S = 0.3          # target held inside the circle
+LOOK_SHIFT = 0.35          # view swung this far each way, in half-heights of the view
+LOOK_DIRECTIONS = ("left", "right", "up", "down")
 
 
-def look_target(state: dict):
-    """A point on the drill tip's depth plane, right of and above the centre of the view."""
+def view_anchor(state: dict):
+    """The point at the centre of the view, at the drill tip's depth (fixed in the world)."""
     camera = headset_hud.camera_from_state(state)
     if camera is None:
         return None
-    c, look, up, fov = camera
+    c, look, _up, _fov = camera
     tip = np.array([state.get("px", 0.0), state.get("py", 0.0), state.get("pz", 0.0)], float)
     depth = float((tip - c) @ look)
     if depth <= 1e-6:
         depth = 1.0
-    half = depth * np.tan(fov / 2.0)
-    right = np.cross(look, up)
-    point = c + look * depth + right * (LOOK_OFFSET[0] * half) + up * (LOOK_OFFSET[1] * half)
-    return [float(v) for v in point]
+    return [float(v) for v in c + look * depth]
+
+
+def looked(spot) -> set:
+    """Directions the view has turned, from where the start-of-step centre now shows.
+
+    Looking left moves that point right on the screen; looking up moves it down.
+    """
+    if spot is None:
+        return set()
+    x, y = spot
+    return {name for name, hit in (("left", x >= LOOK_SHIFT), ("right", x <= -LOOK_SHIFT),
+                                   ("up", y >= LOOK_SHIFT), ("down", y <= -LOOK_SHIFT)) if hit}
+
+
+def look_line(seen) -> str:
+    return "     ".join(("✓ " if d in seen else "") + d.capitalize() for d in LOOK_DIRECTIONS)
+
+
+CARD_WIDTH = 64  # characters per line of the desktop card
+
+
+def card_text(hud: dict) -> str:
+    """study_hud.json's panel and banner as wrapped plain text ("" when there is none)."""
+    out = []
+    panel = (hud or {}).get("panel") or {}
+    if panel.get("title"):
+        out.append(("[done] " if panel.get("done") else "") + str(panel["title"]))
+        out.append("")
+    for line in panel.get("lines") or []:
+        out.extend(textwrap.wrap(str(line), CARD_WIDTH) or [""])
+    progress = panel.get("progress") or []
+    if progress:
+        out.append(f"Steps done: {sum(map(bool, progress))} of {len(progress)}")
+    for key in ("footer", "advance"):
+        if panel.get(key):
+            out.append("")
+            out.extend(textwrap.wrap(str(panel[key]), CARD_WIDTH))
+    banner = (hud or {}).get("banner")
+    if banner:
+        out.extend([""] if out else [])
+        out.extend(textwrap.wrap(str(banner), CARD_WIDTH))
+    while out and not out[-1]:
+        out.pop()
+    return "\n".join(out) + ("\n" if out else "")
 
 
 class SessionIO:
@@ -183,9 +217,19 @@ class SessionIO:
         partial = self.runtime / "study_hud.json.part"
         partial.write_text(json.dumps(hud))
         partial.replace(self.runtime / "study_hud.json")
+        # The same card as plain text for AMBF's desktop window (CHAI3D arms), so
+        # the proctor sees which step the participant is on.
+        card = card_text(hud)
+        if card != getattr(self, "_card", None):
+            self._card = card
+            partial = self.runtime / "study_card.txt.part"
+            partial.write_text(card)
+            partial.replace(self.runtime / "study_card.txt")
 
     def clear_hud(self) -> None:
         (self.runtime / "study_hud.json").unlink(missing_ok=True)
+        (self.runtime / "study_card.txt").unlink(missing_ok=True)
+        self._card = None
 
     def set_trial_active(self, active: bool) -> None:
         """The plugin's pause menu offers End trial while this file exists."""
@@ -287,15 +331,12 @@ class SessionIO:
 class Progress:
     travel: float = 0.0
     last_tip: tuple | None = None
-    device_travel: float = 0.0
-    last_device: tuple | None = None
-    clutch_s: float = 0.0
     zoom_start: tuple | None = None
     recenter_start: int | None = None
     removed_start: int | None = None
     saw_pause: bool = False
-    look_target: list | None = None
-    look_s: float = 0.0
+    look_anchor: list | None = None
+    looked: set = field(default_factory=set)
     step_done: bool = False          # current step done; waiting for the left pedal
     advance_base: int | None = None  # advance_count when it was done
     done: dict = field(default_factory=dict)
@@ -487,13 +528,6 @@ class StudySession:
             if p.last_tip is not None and key == "drill_move":
                 p.travel += math.dist(tip, p.last_tip)
             p.last_tip = tip
-        device = (state.get("hx"), state.get("hy"), state.get("hz"))
-        clutched = bool(state.get("device_clutch"))
-        if None not in device:
-            if p.last_device is not None and clutched and key == "reposition":
-                p.device_travel += math.dist(device, p.last_device)
-            p.last_device = device
-        p.clutch_s += dt if clutched and key == "reposition" else 0.0
         zoom = (float(state.get("zoom_in") or 0.0), float(state.get("zoom_out") or 0.0))
         recenter = int(state.get("recenter_count") or 0)
         removed = int(state.get("removed_voxels") or 0)
@@ -508,21 +542,17 @@ class StudySession:
         elif state.get("paused"):
             p.saw_pause = True
         if key == "camera":
-            if p.look_target is None:
-                p.look_target = look_target(state)
+            if p.look_anchor is None:
+                p.look_anchor = view_anchor(state)
             camera = headset_hud.camera_from_state(state)
-            spot = headset_hud.project(p.look_target, camera) if (camera and p.look_target) else None
-            inside = spot is not None and math.hypot(*spot) <= LOOK_RADIUS
-            p.look_s = p.look_s + dt if inside else 0.0
+            if camera and p.look_anchor:
+                p.looked |= looked(headset_hud.project(p.look_anchor, camera))
         if not p.step_done:
-            has_device = None not in device
             checks = {
                 "welcome": True,
                 "drill_move": p.travel >= DRILL_TRAVEL_UNITS,
-                "reposition": (p.device_travel >= DEVICE_TRAVEL_M if has_device
-                               else p.clutch_s >= HOLD_SECONDS),
                 "recenter": recenter > p.recenter_start,
-                "camera": p.look_s >= LOOK_HOLD_S,
+                "camera": p.looked >= set(LOOK_DIRECTIONS),
                 "zoom": (zoom[0] - p.zoom_start[0] >= ZOOM_EACH_WAY - 1e-6
                          and zoom[1] - p.zoom_start[1] >= ZOOM_EACH_WAY - 1e-6),
                 "drill": removed - p.removed_start >= DRILL_VOXELS,
@@ -543,8 +573,8 @@ class StudySession:
         self.progress.done.setdefault(TUTORIAL[self.step].key, False)
         self.progress.step_done = False
         self.progress.advance_base = None
-        self.progress.look_target = None
-        self.progress.look_s = 0.0
+        self.progress.look_anchor = None
+        self.progress.looked = set()
         self.step += 1
         if self.step >= len(TUTORIAL):
             self.step = len(TUTORIAL) - 1
@@ -680,8 +710,8 @@ class StudySession:
             }
             if step.key == "welcome":
                 panel["progress"] = []
-            if step.key == "camera" and p.look_target is not None and not p.step_done:
-                panel["look"] = {"target": p.look_target, "radius": LOOK_RADIUS}
+            if step.key == "camera":
+                panel["lines"] = list(step.lines) + [look_line(p.looked)]
             if step.key == "welcome":
                 panel["compact"] = True  # a long read: smaller text fits the view
             return {"panel": panel, "timer": None, "banner": None, "menu_help": MENU_HELP}

@@ -47,6 +47,7 @@
 #include "camera_panel_manager.h"
 #include "wave_generator.h"
 #include "haptic_safety.h"
+#include "pause_pointer.h"
 #include "gaze_marker_controller_jagged.h" // change bewteen gaze_marker_controller_smooth vs. gaze_marker_controller_jagged
 #include "drill_manager.h"
 #include "video_recording_controller.h"
@@ -145,6 +146,10 @@ protected:
     string findAnatomyAdfPathFromArgs(int argc, char** argv) const;
     string readLateralityFromAdf(const string& adfPath) const;
     void showNotice(const string& text, double durationSec = 4.0);
+    /// The study's current card (tutorial step, briefing, ...) in the upper left of
+    /// AMBF's desktop window, from /tmp/fivrs-rtx/study_card.txt, so the proctor sees
+    /// where the participant is. Only while study_hud.json is fresh (a study is running).
+    void serviceStudyCard();
     // Desktop + VR pause / session menu (Ctrl+P or hold the left pedal).
     void applyStereoCenteredHud();
     void ensurePauseMenuLabel();
@@ -182,6 +187,27 @@ protected:
     void pauseMenuSelect();
     void pauseMenuBack();
     string pauseMenuListText();
+    // Stylus as a mouse in the pause menu (pause_pointer.h). False = pedals only.
+    bool m_pausePointerEnabled = true;
+    void updatePauseCursor(bool actionButton);
+    void writeRtxPauseCursor(bool show);
+    bool pauseItemUnderCursor(int& level, int& k) const;
+    int pauseMenuLevel() const;
+    int pauseHighlight() const;
+    void setPauseHighlight(int k);
+    // Per line of pauseMenuListText(): (pauseMenuLevel(), item) the cursor clicks, or (-1, -1).
+    vector<std::pair<int, int>> m_pauseMenuLines;
+    int m_pauseMenuFirstLine = 2;     // title lines above the menu in pause_hud.txt
+    int m_pauseHudLineCount = 1;
+    pause_pointer::Cursor m_pauseCursor;
+    bool m_pauseCursorActive = false;
+    bool m_pauseCursorBtnPrev = false;
+    cVector3d m_pauseCursorLastPos;
+    // After the pause menu closes: stylus ignored and no drilling for a moment;
+    // m_recenterOnResume also puts the burr back in the middle of the view.
+    bool m_recenterOnResume = false;
+    static constexpr double kResumeHoldSec = 1.0;
+    double m_resumeHoldUntil = -1.0;
     // True if Ctrl is held system-wide (works even when study_gui / VR has focus).
     bool isCtrlHeld() const;
     // True if Shift is held system-wide (works even when study_gui / VR has focus).
@@ -194,7 +220,8 @@ protected:
     bool isXKeycodeHeld(unsigned int keycode) const;
     // True if letter key is held system-wide (Ikkegol a/b/c pedals).
     bool isLetterKeyHeld(int glfwKey) const;
-    void requestDrillReposition();
+    // byUser: the participant asked (double-tap / F9); counts toward recenter_count.
+    void requestDrillReposition(bool byUser = true);
     // Start the burr just above the bone, not at the volume's bounding box (2026-11-13).
     bool boneSolidAt(const cVector3d& pWorld);
     bool boneAlongRay(const cVector3d& from, const cVector3d& dir, double maxDist, double& tHit);
@@ -355,6 +382,9 @@ private:
     bool m_rtxFovWritten = false;
     cLabel* m_calibrationWarningLabel;
     cLabel* m_noticeLabel;
+    cLabel* m_studyCardLabel = nullptr;
+    string m_studyCardText;
+    double m_studyCardCheckSec = -1.0e9;
     cLabel* m_vrHudLabel = nullptr;
     double m_noticeTimer = 0.0;
     bool m_vrHudVisible = false;

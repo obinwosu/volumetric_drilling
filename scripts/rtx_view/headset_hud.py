@@ -3,12 +3,17 @@
 The headset shows the RTX image, not AMBF's own panels, so text is drawn into
 both eye images just before they go to the headset (rtx_eyes.Eyes.overlay).
 The same pixels in both eyes put the text at the depth of the field centre,
-where the eyes already converge, so reading it needs no refocusing.
+where the eyes already converge, so reading it needs no refocusing. The pause
+menu is the exception: it is shifted apart in the two eyes so it floats in
+front of the bone (MENU_DEPTH), since the stylus points at it.
 
 Sources, all under /tmp/fivrs-rtx:
 - pause_hud.txt  written by the simulator while its pause menu is open
                  (hold the left pedal). Shown only while drill_state.json
                  also reports the simulator paused, so a stale file is ignored.
+                 The highlighted row (marked "> ") is drawn on a bar.
+- pause_cursor.txt  "<line> <across>": the stylus cursor in the pause menu, in
+                 text lines of pause_hud.txt and 0..1 of the panel's text width.
 - study_hud.json written by the study controller (scripts/study/study_session.py):
     {"panel": {"title": str, "lines": [str], "progress": [done], "checklist": [[label, done]],
                "footer": str, "done": bool, "advance": str,
@@ -27,6 +32,7 @@ Recorded frames are copied before this runs (rtx_record), so recordings have no 
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import time
 
@@ -34,6 +40,7 @@ import numpy as np
 
 RUNTIME = pathlib.Path("/tmp/fivrs-rtx")
 PAUSE_PATH = RUNTIME / "pause_hud.txt"
+CURSOR_PATH = RUNTIME / "pause_cursor.txt"
 STUDY_PATH = RUNTIME / "study_hud.json"
 STATE_PATH = RUNTIME / "drill_state.json"
 FONT_DIR = pathlib.Path("/usr/share/fonts/truetype/dejavu")
@@ -59,6 +66,7 @@ TEXT = (236, 242, 248, 255)
 DIM = (150, 170, 190, 255)
 DONE = (120, 220, 140, 255)
 ACCENT = (255, 205, 90, 255)
+HIGHLIGHT_FILL = (84, 70, 30, 235)  # bar behind the highlighted pause menu row (opaque: PIL replaces, not blends)
 LOADING_BACKGROUND = (8, 14, 20)
 
 
@@ -92,11 +100,13 @@ def _read_file(path: pathlib.Path, cache: dict):
     return text, True
 
 
-def render_panel(lines, width: int, font_px: int, mono: bool = False, fill: bool = True):
+def render_panel(lines, width: int, font_px: int, mono: bool = False, fill: bool = True, bars=()):
     """lines: list of (text, colour, bold). Returns an RGBA uint8 array.
 
     Proportional text wraps to ``width``. Monospaced text (the pause menu's
     aligned columns) is never wrapped; the panel grows to its longest line.
+    ``bars``: indices of monospaced lines to draw on a highlight bar.
+    Layout (``panel_line_y``): padding ``font_px``, lines ``font_px * 1.35`` apart.
     """
     from PIL import Image, ImageDraw
 
@@ -131,10 +141,43 @@ def render_panel(lines, width: int, font_px: int, mono: bool = False, fill: bool
     if fill:
         draw.rounded_rectangle((0, 0, width - 1, height - 1), radius=font_px, fill=PANEL_FILL)
     y = pad
-    for text, colour, font in wrapped:
+    bars = set(bars) if mono else set()
+    for i, (text, colour, font) in enumerate(wrapped):
+        if i in bars:
+            half = gap // 2 + 1
+            draw.rounded_rectangle((pad // 2, y - half, width - pad // 2 - 1, y + font_px + half),
+                                   radius=max(2, font_px // 3), fill=HIGHLIGHT_FILL)
         draw.text((pad, y), text, fill=colour, font=font)
         y += line_h
     return np.asarray(image, dtype=np.uint8)
+
+
+def panel_line_y(line: float, font_px: int) -> float:
+    """Middle of text line ``line`` (fractions allowed) in a render_panel image."""
+    return font_px + line * (font_px + int(font_px * 0.35)) + font_px * 0.5
+
+
+def pause_lines(text: str):
+    """Pause menu text from the simulator: (lines, highlighted line indices)."""
+    lines, bars = [], []
+    for i, line in enumerate(text.rstrip().split("\n")):
+        if i == 0:
+            lines.append((line, ACCENT, True))
+        elif line.lstrip().startswith("> "):
+            lines.append((line, ACCENT, True))
+            bars.append(i)
+        else:
+            lines.append((line, TEXT, False))
+    return lines, bars
+
+
+def parse_cursor(text):
+    """(line, across) from pause_cursor.txt, or None."""
+    try:
+        line, across = (float(v) for v in (text or "").split()[:2])
+    except ValueError:
+        return None
+    return line, min(1.0, max(0.0, across))
 
 
 def blend(image: np.ndarray, overlay: np.ndarray, x: int, y: int) -> None:
@@ -349,6 +392,30 @@ def _ring(radius_px: int, colour, line: int, cross: bool = False, dot: bool = Fa
     return np.asarray(image, dtype=np.uint8)
 
 
+# The pause menu floats between the microscope and the bone: at this fraction of
+# the distance from the eyes to the field centre (where the eyes converge, so
+# 1.0 = on the bone). The microscope's narrow field magnifies depth a lot, so even
+# a little in front of the bone is a clear step forward; the disparity is capped
+# so the two images always fuse.
+MENU_DEPTH = 0.85
+MAX_MENU_DISPARITY = 0.03  # of the image width, both eyes together
+
+
+def menu_disparity_px(height: int, width: int, base: float, focus: float, fov_y: float,
+                      depth: float = MENU_DEPTH) -> float:
+    """Crossed disparity in pixels for something at ``depth`` of the way to the field centre.
+
+    The eyes sit ``base`` apart and converge at ``focus`` (same units), so the
+    field centre has none. Nearer things shift right in the left eye and left in
+    the right eye by base * (1/z - 1/focus) radians between them.
+    """
+    if not (base > 0 and focus > 0 and 0 < fov_y < np.pi and 0 < depth <= 1):
+        return 0.0
+    angle = base * (1.0 / (depth * focus) - 1.0 / focus)
+    f_px = (height / 2) / np.tan(fov_y / 2)
+    return float(min(angle * f_px, MAX_MENU_DISPARITY * width))
+
+
 # Timer corner: the headset image edges are blurred and partly hidden by the lenses.
 HEADSET_TIMER_INSET = (0.20, 0.18)
 DESKTOP_TIMER_INSET = (0.02, 0.03)
@@ -366,12 +433,14 @@ class HeadsetHud:
         self._files = {}
         self._study = {}
         self._pause_text = None
+        self._cursor = None
         self._paused = False
         self._state = {}
         self._state_checked = 0.0
         self._cache = {}
         self.loading = None  # (label, fraction 0..1) while the bone is loading
         self.timer_inset = HEADSET_TIMER_INSET  # (from the right, from the top) as fractions
+        self.stereo = None  # (base, focus, fov_y) of the headset eyes; None on the desktop
 
     def _loading_layer(self, width: int, height: int):
         label, fraction = self.loading
@@ -390,6 +459,8 @@ class HeadsetHud:
             except json.JSONDecodeError:
                 pass
         self._pause_text, _ = _read_file(PAUSE_PATH, self._files)
+        cursor_text, _ = _read_file(CURSOR_PATH, self._files)
+        self._cursor = parse_cursor(cursor_text) if cursor_text else None
         # Every frame while a look target is up (it follows the camera), else 10 Hz.
         looking = bool(((self._study or {}).get("panel") or {}).get("look"))
         if looking or now - self._state_checked > 0.1:
@@ -418,10 +489,10 @@ class HeadsetHud:
         out = []
         font_px = max(14, height // 32)
         if self._pause_text and self._paused:
-            lines = [(line, ACCENT if i == 0 else TEXT, i == 0) for i, line in enumerate(self._pause_text.rstrip().split("\n"))]
+            lines, bars = pause_lines(self._pause_text)
             panel_w = int(width * 0.4)
             rgba = self._cached(("pause", self._pause_text, width, height),
-                                lambda: render_panel(lines, panel_w, font_px, mono=True))
+                                lambda: render_panel(lines, panel_w, font_px, mono=True, bars=bars))
             y = (height - rgba.shape[0]) // 2
             help_panel = (self._study or {}).get("menu_help")
             if help_panel:
@@ -432,7 +503,16 @@ class HeadsetHud:
                 top = int(height * 0.06)
                 out.append((tip, (width - tip.shape[1]) // 2, top))
                 y = max(y, top + tip.shape[0] + int(font_px * 0.5))
-            out.append((rgba, (width - rgba.shape[1]) // 2, y))
+            x = (width - rgba.shape[1]) // 2
+            out.append((rgba, x, y))
+            if self._cursor is not None:
+                # The stylus cursor, on top of the menu.
+                line, across = self._cursor
+                r_px = max(8, int(font_px * 0.7))
+                dot = self._cached(("cursor", r_px), lambda: _ring(r_px, TEXT, max(2, height // 300), dot=True))
+                cx = x + font_px + across * (rgba.shape[1] - 2 * font_px)
+                cy = y + panel_line_y(line, font_px)
+                out.append((dot, int(cx) - dot.shape[1] // 2, int(cy) - dot.shape[0] // 2))
             return out  # the pause menu covers everything else
         study = self._study or {}
         panel = study.get("panel") or {}
@@ -521,14 +601,22 @@ class HeadsetHud:
             return True, [self._loading_layer(width, height)]
         return False, layers
 
+    def menu_open(self) -> bool:
+        return bool(self._pause_text and self._paused)
+
     def draw(self, left: np.ndarray, right: np.ndarray) -> None:
         height, width = left.shape[:2]
         cover, layers = self.frame(width, height)
-        for eye in (left, right):
+        # The pause menu (and its cursor) sits in front of the bone: shift it in
+        # opposite directions in the two eyes. Everything else stays on the bone.
+        shift = 0
+        if self.stereo is not None and self.menu_open() and not cover:
+            shift = int(round(menu_disparity_px(height, width, *self.stereo) / 2))
+        for eye, dx in ((left, shift), (right, -shift)):
             if cover:
                 eye[..., :3] = LOADING_BACKGROUND
             for rgba, x, y in layers:
-                blend(eye, rgba, x, y)
+                blend(eye, rgba, x + dx, y)
 
 
 def install_desktop(viewer) -> HeadsetHud:
@@ -540,6 +628,7 @@ def install_desktop(viewer) -> HeadsetHud:
     import warp as wp
 
     PAUSE_PATH.unlink(missing_ok=True)
+    CURSOR_PATH.unlink(missing_ok=True)
     hud = HeadsetHud()
     hud.timer_inset = DESKTOP_TIMER_INSET
     blit = viewer._blit_to_window
@@ -574,7 +663,95 @@ def install(viewer) -> HeadsetHud | None:
         return None
     # A pause file left by an earlier session must not show.
     PAUSE_PATH.unlink(missing_ok=True)
+    CURSOR_PATH.unlink(missing_ok=True)
     hud = HeadsetHud()
-    eyes.overlay = hud.draw
+
+    def draw(left, right):
+        focus = getattr(eyes, "focus_used", None)
+        fov = float(np.radians(getattr(viewer.camera, "fov", 10.29)))
+        hud.stereo = (float(eyes.base_units), float(focus), fov) if focus else None
+        hud.draw(left, right)
+
+    eyes.overlay = draw
     print("Headset text ready (pause menu, study prompts)", flush=True)
+    if os.environ.get("FIVRS_DESKTOP_CARD", "1") != "0":
+        mirror_to_desktop(viewer, hud)
     return hud
+
+
+_BLEND_KERNEL = None
+
+
+def _blend_kernel():
+    """GPU version of blend(): one RGBA uint8 layer into a vec4ub image, top row first."""
+    global _BLEND_KERNEL
+    if _BLEND_KERNEL is None:
+        import warp as wp
+
+        @wp.kernel
+        def blend_layer(dst: wp.array2d(dtype=wp.vec4ub), src: wp.array3d(dtype=wp.uint8), x0: int, y0: int):
+            i, j = wp.tid()
+            y = y0 + i
+            x = x0 + j
+            if y < 0 or y >= dst.shape[0] or x < 0 or x >= dst.shape[1]:
+                return
+            a = wp.uint32(src[i, j, 3])
+            if a == wp.uint32(0):
+                return
+            p = dst[y, x]
+            k = wp.uint32(255) - a
+            r = (wp.uint32(p[0]) * k + wp.uint32(src[i, j, 0]) * a + wp.uint32(127)) / wp.uint32(255)
+            g = (wp.uint32(p[1]) * k + wp.uint32(src[i, j, 1]) * a + wp.uint32(127)) / wp.uint32(255)
+            b = (wp.uint32(p[2]) * k + wp.uint32(src[i, j, 2]) * a + wp.uint32(127)) / wp.uint32(255)
+            dst[y, x] = wp.vec4ub(wp.uint8(r), wp.uint8(g), wp.uint8(b), p[3])
+
+        _BLEND_KERNEL = blend_layer
+    return _BLEND_KERNEL
+
+
+def mirror_to_desktop(viewer, hud: HeadsetHud) -> None:
+    """Headset mode: show the participant's text on the desktop window too, for the proctor.
+
+    The desktop window shows the left eye without text. This draws the same study
+    card, timer and pause menu over it (the briefing cover and the loading card are
+    left out, so the proctor still sees the bone). The window's image is copied on
+    the GPU and the text blended into the copy there; the headset images are not
+    touched. FIVRS_DESKTOP_CARD=0 turns it off.
+    """
+    import warp as wp
+
+    blit = viewer._blit_to_window
+    kernel = _blend_kernel()
+    uploads = {}     # id(layer image) -> (image, GPU copy); layers are cached, so ids are stable
+    scratch = {}     # the copy of the window image
+    warned = []
+
+    def blit_with_text(pixels):
+        try:
+            if isinstance(pixels, wp.array) and pixels.ndim == 2:
+                height, width = pixels.shape
+                layers = hud.layers(width, height)
+                if layers:
+                    out = scratch.get("image")
+                    if out is None or out.shape != pixels.shape or out.device != pixels.device:
+                        out = scratch["image"] = wp.empty_like(pixels)
+                    wp.copy(out, pixels)
+                    used = {}
+                    for rgba, x, y in layers:
+                        entry = uploads.get(id(rgba))
+                        if entry is None or entry[0] is not rgba:
+                            entry = (rgba, wp.array(np.ascontiguousarray(rgba), dtype=wp.uint8, device=pixels.device))
+                        used[id(rgba)] = entry
+                        wp.launch(kernel, dim=rgba.shape[:2], inputs=[out, entry[1], int(x), int(y)],
+                                  device=pixels.device)
+                    uploads.clear()
+                    uploads.update(used)
+                    pixels = out
+        except Exception as exc:  # text must never stop the picture
+            if not warned:
+                print(f"Desktop copy of the headset text failed: {exc}", flush=True)
+                warned.append(True)
+        blit(pixels)
+
+    viewer._blit_to_window = blit_with_text
+    print("Desktop window shows the headset text for the proctor (FIVRS_DESKTOP_CARD=0 turns it off)", flush=True)

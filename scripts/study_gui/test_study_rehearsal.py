@@ -105,31 +105,27 @@ def test_full_rehearsal():
     for _ in range(3):
         sim._move(); tick()
     assert session.progress.step_done; advance()        # moving the drill
-    held["device_clutch"] = True
-    for _ in range(3):
-        sim._move(); tick()
-    held["device_clutch"] = False; tick()
-    assert session.progress.step_done; advance()        # repositioning the device
-    sim._recenter(); tick(); advance()                  # recentering
+    sim._recenter(); tick(); advance()                  # recentering (no device clutch step)
     assert ss.TUTORIAL[session.step].key == "camera"
     sim._turn(-1, 0); tick()
     assert io.state["lx"] == 0.0                        # no turn without the microscope button
     held["scope_button"] = True; tick()
-    for _ in range(60):                                 # turn the head towards the target
-        if session.progress.step_done:
-            break
-        spot = sr.headset_hud.project(session.progress.look_target, sr.headset_hud.camera_from_state(io.state))
-        sim._turn(-1 if spot[0] > 0.05 else (1 if spot[0] < -0.05 else 0), 1 if spot[1] < -0.05 else (-1 if spot[1] > 0.05 else 0))
+    for name, yaw, pitch in [("left", 1, 0), ("right", -1, 0), ("up", 0, 1), ("down", 0, -1)]:
+        turns = 0
+        while name not in session.progress.looked and turns < 200:
+            sim._turn(yaw, pitch); tick(0.1); turns += 1
+        assert name in session.progress.looked, (name, turns)
+        for _ in range(turns):                          # and back to the middle
+            sim._turn(-yaw, -pitch)
         tick(0.1)
-    tick(0.5)
-    assert session.progress.step_done, spot
+    assert session.progress.step_done
     held["scope_button"] = False; tick()
     advance()                                           # moving the microscope
     held["scope_button"] = True; tick()
     sim._pedal_a(); sim._pedal_a(); sim._pedal_b(); sim._pedal_b(); tick()
     held["scope_button"] = False; tick()
     assert session.progress.step_done, (io.state["zoom_in"], io.state["zoom_out"])
-    assert io.state["advance_count"] == 5  # the pedal presses with the microscope button zoomed instead
+    assert io.state["advance_count"] == 4  # the pedal presses with the microscope button zoomed instead
     advance()                                           # zooming
     io.state["removed_voxels"] = 300; tick(); advance() # drilling
     sim._hold_a(); tick()                               # hold the left pedal: open the pause menu

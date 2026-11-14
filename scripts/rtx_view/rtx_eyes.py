@@ -196,6 +196,7 @@ class Eyes:
         self.failed = False
         # Optional callable(left, right) that draws text into both eye images (headset_hud).
         self.overlay = None
+        self.focus_used = None  # eye-to-convergence distance of the last frame, sim units
         # Mean ms per step over recent frames, for summary.json.
         self.timing = {}
         # Pipelined readback (FIVRS_EYE_PIPELINE=1): two pinned host slots per eye.
@@ -263,6 +264,7 @@ class Eyes:
         """Left eye on the window camera, right eye on its own camera."""
         position, right, up, forward = packed
         focus = self.focus_units if self.focus_units is not None else distance_units
+        self.focus_used = float(focus)  # the HUD places the pause menu in depth from this
         left_mat, right_mat = eye_matrices(position, right, up, forward, self.base_units, focus)
         viewer = self.viewer
         for path, mat in ((viewer._camera_prim_path, left_mat), (self.eye_camera, right_mat)):

@@ -54,7 +54,8 @@ enum class PanelReferenceOrigin{
     LOWER_LEFT=0, // Take the lower left corner of the panel/label as its origin
     CENTER=1, // Take the center of the panel/label as its origin
     LOWER_RIGHT=2,
-    UPPER_RIGHT=3
+    UPPER_RIGHT=3,
+    UPPER_LEFT=4
 };
 
 enum class PanelReferenceType{

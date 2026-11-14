@@ -77,22 +77,23 @@ def tutorial(session, io):
     assert session.progress.step_done and session.step == 1  # done, still practising
     assert session.hud(io.t)["panel"]["done"]
     advance(session, io)
-    run(session, io, 2.0, device_clutch=True)  # held without moving: not done
-    assert not session.progress.step_done
-    for k in range(5):
-        run(session, io, 0.1, hx=0.005 * k)
-    run(session, io, 0.1, device_clutch=False)
-    assert session.progress.step_done
-    advance(session, io)
     run(session, io, 0.1, recenter_count=1); advance(session, io)
-    assert ss.TUTORIAL[session.step].key == "camera"
+    assert ss.TUTORIAL[session.step].key == "camera"  # the device clutch step is gone
     run(session, io, 2.0, cam_clutch=True)  # clutch without moving the view: not done
-    look = session.hud(io.t)["panel"]["look"]
     assert not session.progress.step_done
-    target = np.array(look["target"]); here = np.array([0.0, 0.0, 1.0])
-    d = (target - here) / np.linalg.norm(target - here)
-    run(session, io, 0.5, lx=d[0], ly=d[1], lz=d[2])
+    assert session.hud(io.t)["panel"]["lines"][-1] == "Left     Right     Up     Down"
+    assert "look" not in session.hud(io.t)["panel"]  # no target any more
+    for name, (dx, dy) in [("left", (-0.06, 0)), ("right", (0.06, 0)), ("up", (0, 0.06))]:
+        look = np.array([dx, dy, -1.0]) / np.linalg.norm([dx, dy, -1.0])
+        run(session, io, 0.2, lx=look[0], ly=look[1], lz=look[2])
+        assert name in session.progress.looked and not session.progress.step_done, name
+    assert session.hud(io.t)["panel"]["lines"][-1] == "✓ Left     ✓ Right     ✓ Up     Down"
+    run(session, io, 0.2, lx=0.0, ly=0.0, lz=-1.0)  # back to the middle: still not done
+    assert not session.progress.step_done
+    look = np.array([0.0, -0.06, -1.0]) / np.linalg.norm([0.0, -0.06, -1.0])
+    run(session, io, 0.2, lx=look[0], ly=look[1], lz=look[2])
     assert session.progress.step_done
+    run(session, io, 0.1, lx=0.0, ly=0.0, lz=-1.0)
     advance(session, io)
     run(session, io, 0.1, zoom_in=1.0)
     assert not session.progress.step_done  # in only
@@ -331,6 +332,26 @@ def test_headset_view_is_placed_at_the_welcome_page_and_the_introduction():
     session.set_headset_tilt(90)
     assert session.headset_tilt == 60.0
 
+def test_desktop_card_text():
+    hud = {"panel": {"title": "Step 4 of 7: Moving the microscope", "done": True,
+                     "lines": ["word " * 30, "✓ Left     Right     Up     Down"],
+                     "progress": [True, True, True, False, False, False, False],
+                     "advance": "Tap the left foot pedal to advance"},
+           "banner": None}
+    text = ss.card_text(hud)
+    lines = text.splitlines()
+    assert lines[0] == "[done] Step 4 of 7: Moving the microscope"
+    assert max(len(line) for line in lines) <= ss.CARD_WIDTH
+    assert "Steps done: 3 of 7" in lines and lines[-1] == "Tap the left foot pedal to advance"
+    assert ss.card_text({"panel": None, "banner": None}) == ""
+    with tempfile.TemporaryDirectory() as tmp:
+        io = ss.SessionIO(runtime=tmp)
+        io.write_hud(hud)
+        assert (pathlib.Path(tmp) / "study_card.txt").read_text() == text
+        io.clear_hud()
+        assert not (pathlib.Path(tmp) / "study_card.txt").exists()
+
+
 if __name__ == "__main__":
     test_welcome_ignores_the_last_runs_tap_count()
     test_state_file_from_an_earlier_simulator_is_ignored()
@@ -344,4 +365,5 @@ if __name__ == "__main__":
     test_end_trial_before_first_bone_contact_and_after_a_simulator_restart()
     test_proctor_end_is_recorded_as_proctor()
     test_headset_view_is_placed_at_the_welcome_page_and_the_introduction()
+    test_desktop_card_text()
     print("ok")

@@ -21,6 +21,7 @@ W, H = 1152, 864
 
 def _point_at(tmp: pathlib.Path):
     headset_hud.PAUSE_PATH = tmp / "pause_hud.txt"
+    headset_hud.CURSOR_PATH = tmp / "pause_cursor.txt"
     headset_hud.STUDY_PATH = tmp / "study_hud.json"
     headset_hud.STATE_PATH = tmp / "drill_state.json"
 
@@ -151,6 +152,97 @@ def preview(path):
         Image.fromarray(both).save(path)
 
 
+def test_pause_menu_highlight_and_stylus_cursor():
+    lines, bars = headset_hud.pause_lines("FIVRS Pause Menu\n\n    Saved camera views\n  > Burr type           Cutting\n    Resume\n")
+    assert bars == [3]
+    assert lines[3][1] == headset_hud.ACCENT and lines[3][2]
+    plain = headset_hud.render_panel(lines, 400, 20, mono=True)
+    barred = headset_hud.render_panel(lines, 400, 20, mono=True, bars=bars)
+    assert plain.shape == barred.shape and not np.array_equal(plain, barred)
+    assert headset_hud.parse_cursor("3.250 0.400\n") == (3.25, 0.4)
+    assert headset_hud.parse_cursor("junk") is None
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = pathlib.Path(tmp)
+        _point_at(tmp)
+        (tmp / "pause_hud.txt").write_text("FIVRS Pause Menu\n\n  > Saved camera views\n    Resume\n")
+        (tmp / "drill_state.json").write_text(json.dumps({"paused": True}))
+        hud = headset_hud.HeadsetHud()
+        assert len(hud.layers(W, H)) == 1  # no cursor file: menu only
+        (tmp / "pause_cursor.txt").write_text("3.0 0.5\n")
+        layers = hud.layers(W, H)
+        assert len(layers) == 2
+        (menu, mx, my), (dot, dx, dy) = layers
+        # The cursor sits on line 3 ("Resume"), in the middle of the panel.
+        centre_y = dy + dot.shape[0] / 2 - my
+        assert abs(centre_y - headset_hud.panel_line_y(3.0, max(14, H // 32))) <= 1
+        assert mx < dx + dot.shape[1] / 2 < mx + menu.shape[1]
+
+
+def test_pause_menu_floats_in_front_of_the_bone_in_the_headset():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = pathlib.Path(tmp)
+        _point_at(tmp)
+        (tmp / "pause_hud.txt").write_text("FIVRS Pause Menu\n\n  > Resume\n")
+        (tmp / "drill_state.json").write_text(json.dumps({"paused": True}))
+        hud = headset_hud.HeadsetHud()
+        left, right = _eyes()
+        hud.draw(left, right)
+        assert np.array_equal(left, right)  # desktop / no stereo: same place in both eyes
+        hud.stereo = (0.23, 2.5, np.radians(10.29))
+        left, right = _eyes()
+        hud.draw(left, right)
+        cols_l = np.where((left[..., :3] != 90).any(axis=(0, 2)))[0]
+        cols_r = np.where((right[..., :3] != 90).any(axis=(0, 2)))[0]
+        # Crossed disparity: right in the left eye, left in the right eye, within the cap.
+        gap = cols_l[0] - cols_r[0]
+        assert 0 < gap <= headset_hud.MAX_MENU_DISPARITY * W + 1
+    # Nearer than the field centre: some disparity; at it: none.
+    assert headset_hud.menu_disparity_px(H, W, 0.23, 2.5, 0.18, depth=1.0) == 0.0
+    assert headset_hud.menu_disparity_px(H, W, 0.23, 2.5, 0.18, depth=0.99) > 0.0
+
+
+def test_desktop_mirror_draws_what_the_cpu_blend_draws():
+    """Headset mode copies the text onto the desktop window on the GPU; same pixels as blend()."""
+    try:
+        import warp as wp
+        wp.init()
+        if not wp.is_cuda_available():
+            raise RuntimeError("no CUDA device")
+    except Exception as exc:
+        print(f"skipped desktop mirror test ({exc})")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = pathlib.Path(tmp)
+        _point_at(tmp)
+        headset_hud.STUDY_PATH.write_text(json.dumps({"panel": {
+            "title": "Step 4 of 7: Moving the microscope", "lines": ["Look left, right, up and down."],
+            "progress": [True, True, True, False], "advance": "Tap the left foot pedal to advance"},
+            "timer": None, "banner": None}))
+        hud = headset_hud.HeadsetHud()
+        rng = np.random.default_rng(1)
+        frame = rng.integers(0, 255, (H, W, 4), dtype=np.uint8)
+        shown = []
+
+        class Viewer:
+            def _blit_to_window(self, pixels):
+                shown.append(pixels.numpy().copy())
+
+        viewer = Viewer()
+        headset_hud.mirror_to_desktop(viewer, hud)
+        source = wp.array(frame, dtype=wp.vec4ub, device="cuda:0")
+        viewer._blit_to_window(source)
+        expected = frame.copy()
+        for rgba, x, y in hud.layers(W, H):
+            headset_hud.blend(expected, rgba, x, y)
+        assert np.array_equal(shown[0], expected)
+        assert not np.array_equal(shown[0], frame)  # text was drawn
+        assert np.array_equal(source.numpy(), frame)  # the renderer's own image is untouched
+        headset_hud.STUDY_PATH.unlink()
+        time.sleep(0.01)
+        viewer._blit_to_window(source)
+        assert np.array_equal(shown[1], frame)  # no text: the frame goes straight through
+
+
 if __name__ == "__main__":
     test_nothing_drawn_without_files()
     test_study_panel_and_timer_draw_identically_in_both_eyes()
@@ -158,6 +250,9 @@ if __name__ == "__main__":
     test_running_timer_counts_down_from_its_write_time()
     test_blend_is_fast_enough_for_every_headset_frame()
     test_loading_card_hides_the_bone_in_both_eyes()
+    test_pause_menu_highlight_and_stylus_cursor()
+    test_pause_menu_floats_in_front_of_the_bone_in_the_headset()
+    test_desktop_mirror_draws_what_the_cpu_blend_draws()
     if len(sys.argv) > 1:
         preview(sys.argv[1])
     print("ok")

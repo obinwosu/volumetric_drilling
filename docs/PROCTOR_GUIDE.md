@@ -58,7 +58,7 @@ with **No** highlighted, so a stray tap cannot end the trial.
 sees in the headset, with buttons for **Burr type**, **Burr size**, **Saved camera
 views**, **End trial** (only during the timed trial; asks to confirm) and **Resume**.
 The headset menu follows your choice. You can use the buttons instead of talking the
-participant through the pedals. The window closes when the menu closes To pause the participant yourself,
+participant through the pedals. The window closes when the menu closes. To pause the participant yourself,
 press **Open pause menu** on the study panel.
 
 ---
@@ -76,18 +76,22 @@ press **Open pause menu** on the study panel.
 ### 3.2 Tutorial (in the headset)
 
 Each page turns green when its step is done. The participant then **taps the left pedal**
-to move on. The proctor panel shows the current page and whether it is done.
+to move on. The proctor panel shows the current page and whether it is done, and the same
+card is drawn on the simulator's desktop window (the RTX window's left eye in RTX sessions,
+AMBF's window, upper left, in CHAI3D sessions).
 
 | # | Page | What the participant does |
 |---|---|---|
 | — | Welcome | Read; tap the left pedal |
 | 1 | Moving the drill | Move the stylus around the field |
-| 2 | Repositioning the haptic device | Hold the action button, move the stylus, release |
-| 3 | Recentering the drill in view | Double-tap the action button |
-| 4 | Moving the microscope | Hold the microscope button and move the head until the yellow target is inside the centre circle |
-| 5 | Zooming in and out | Microscope button + left pedal (in), then + middle pedal (out). Keep the microscope button held, or the left pedal moves to the next page |
-| 6 | Activating the drill | Hold the right pedal and remove some bone. The camera returns to its start-up view and zoom when this page opens. Practice bone is restored before the trial |
-| 7 | The pause menu | Hold the left pedal to open it, then close it (instructions appear above the menu) |
+| 2 | Recentering the drill in view | Double-tap the action button |
+| 3 | Moving the microscope | Hold the microscope button and look left, right, up and down (each ticks off on the card) |
+| 4 | Zooming in and out | Microscope button + left pedal (in), then + middle pedal (out). Keep the microscope button held, or the left pedal moves to the next page |
+| 5 | Activating the drill | Hold the right pedal and remove some bone. The camera returns to its start-up view and zoom when this page opens. Practice bone is restored before the trial |
+| 6 | The pause menu | Hold the left pedal to open it, then close it (instructions appear above the menu) |
+
+Repositioning the stylus with the held action button still works, but is no longer taught;
+recentering (double-tap) covers it.
 
 When all pages are done, the headset reads **Tutorial complete**. The participant may keep
 practising, then **taps the left pedal** to begin the study session.

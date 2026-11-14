@@ -1129,6 +1129,7 @@ void afVolmetricDrillingPlugin::graphicsUpdate(){
         refreshVrHudText();
     }
     updateButtons();
+    serviceStudyCard();
     m_panelManager.update();
     if (m_rtxView){
         publishDrillVisualState();
@@ -1562,7 +1563,10 @@ void afVolmetricDrillingPlugin::updateButtons(){
     else if (m_vrHudVisible){
         m_pedalDrillSuppress = true;
     }
-    m_drillManager.m_isOn = pedalDrillHeld && !m_pedalDrillSuppress && !m_studyDrillLock && !m_vrHudVisible;
+    // Just after the pause menu closes the burr is recentered and held still
+    // (see setVrHudVisible): no drilling until that is over.
+    const bool resumeHold = glfwGetTime() < m_resumeHoldUntil;
+    m_drillManager.m_isOn = pedalDrillHeld && !m_pedalDrillSuppress && !m_studyDrillLock && !m_vrHudVisible && !resumeHold;
     m_drillManager.updateBurrLabel();
 
     m_drillManager.m_camClutch = false;
@@ -1632,8 +1636,10 @@ void afVolmetricDrillingPlugin::updateButtons(){
             }
             else{
                 if (m_vrHudVisible){
-                    // The pause menu is driven by the pedals only (left = down,
-                    // middle = select); the stylus does nothing there.
+                    // In the pause menu the stylus is a mouse: up / down / left /
+                    // right move a cursor, depth is ignored, the action button
+                    // clicks (pause_pointer.h). The pedals still work.
+                    updatePauseCursor(btn2);
                     m_btn2Prev = btn2;
                     m_btn2LastClickTime = -1.0;
                 }
@@ -1688,6 +1694,12 @@ void afVolmetricDrillingPlugin::updateButtons(){
             }
         }
     };
+
+    // Hands off for a moment after the pause menu closes: the stylus does not
+    // move the burr and no forces are sent (same as the device clutch).
+    if (resumeHold){
+        m_drillManager.m_deviceClutch = true;
+    }
 
     const string home = getenv("HOME") ? getenv("HOME") : "";
     if (m_openvrCamera){
@@ -2106,7 +2118,7 @@ bool afVolmetricDrillingPlugin::drillTipNearBone(double depthHint, cVector3d& ti
     return false;
 }
 
-void afVolmetricDrillingPlugin::requestDrillReposition()
+void afVolmetricDrillingPlugin::requestDrillReposition(bool byUser)
 {
     if (!m_volumeObject || !m_mainCamera){
         showNotice("Cannot reposition drill (no volume or camera)");
@@ -2126,7 +2138,9 @@ void afVolmetricDrillingPlugin::requestDrillReposition()
         }
     }
 
-    m_drillRecenterCount += 1;
+    if (byUser){
+        m_drillRecenterCount += 1;  // the study tutorial counts the participant's recenters
+    }
     if (m_drillManager.m_drillingPub){
         m_drillManager.m_drillingPub->publishDrillReposition(
             poseFrom, m_drillManager.m_T_d, m_worldPtr->getCurrentTimeStamp());
@@ -2776,24 +2790,32 @@ void afVolmetricDrillingPlugin::pauseMenuBack()
 string afVolmetricDrillingPlugin::pauseMenuListText()
 {
     clampPauseIndex();
+    // One entry per line of the returned text: which item the stylus cursor
+    // clicks there (pauseMenuLevel(), index), or none.
+    m_pauseMenuLines.clear();
     if (m_pauseConfirmClose && m_pauseConfirmEnd){
+        m_pauseMenuLines = {{-1, -1}, {-1, -1}, {-1, -1}, {100, 0}, {100, 1}};
         return string("End the timed trial now?\n"
                       "You will move on to the questionnaires and feedback.\n\n")
             + (m_pauseConfirmYes ? "  > Yes\n    No\n" : "    Yes\n  > No\n");
     }
     if (m_pauseConfirmClose){
+        m_pauseMenuLines = {{-1, -1}, {-1, -1}, {100, 0}, {100, 1}};
         return string("Close pause menu and return to simulator?\n\n")
             + (m_pauseConfirmYes ? "  > Yes\n    No\n" : "    Yes\n  > No\n");
     }
     const bool inSub = m_pauseSubmenu != PauseSubmenu::NONE;
+    const int subLevel = static_cast<int>(m_pauseSubmenu);
     auto row = [&](int index, const string& label, const string& value){
         string name = label;
         while (name.size() < 20){
             name += " ";
         }
+        m_pauseMenuLines.push_back({0, index});
         return string((!inSub && m_pauseViewIndex == index) ? "  > " : "    ") + name + value + "\n";
     };
     auto option = [&](int k, const string& label){
+        m_pauseMenuLines.push_back({subLevel, k});
         return string(k == m_pauseSubIndex ? "        > " : "          ") + label + "\n";
     };
     auto backOption = [&](){
@@ -2830,6 +2852,139 @@ string afVolmetricDrillingPlugin::pauseMenuListText()
     }
     text += row(pauseRowCount() - 1, "Resume", "");
     return text;
+}
+
+int afVolmetricDrillingPlugin::pauseMenuLevel() const
+{
+    if (m_pauseConfirmClose){
+        return 100;
+    }
+    return static_cast<int>(m_pauseSubmenu);
+}
+
+int afVolmetricDrillingPlugin::pauseHighlight() const
+{
+    if (m_pauseConfirmClose){
+        return m_pauseConfirmYes ? 0 : 1;
+    }
+    if (m_pauseSubmenu != PauseSubmenu::NONE){
+        return m_pauseSubIndex;
+    }
+    return m_pauseViewIndex;
+}
+
+void afVolmetricDrillingPlugin::setPauseHighlight(int k)
+{
+    if (m_pauseConfirmClose){
+        m_pauseConfirmYes = (k == 0);
+    }
+    else if (m_pauseSubmenu != PauseSubmenu::NONE){
+        m_pauseSubIndex = k;
+    }
+    else{
+        m_pauseViewIndex = k;
+    }
+}
+
+bool afVolmetricDrillingPlugin::pauseItemUnderCursor(int& level, int& k) const
+{
+    const int i = pause_pointer::lineUnder(m_pauseCursor) - m_pauseMenuFirstLine;
+    if (i < 0 || i >= static_cast<int>(m_pauseMenuLines.size()) || m_pauseMenuLines[i].first < 0){
+        return false;
+    }
+    level = m_pauseMenuLines[i].first;
+    k = m_pauseMenuLines[i].second;
+    return true;
+}
+
+void afVolmetricDrillingPlugin::updatePauseCursor(bool actionButton)
+{
+    cGenericHapticDevicePtr device = m_drillManager.m_hapticDevice;
+    if (!m_pausePointerEnabled || !device || !device->isDeviceAvailable()){
+        return;
+    }
+    cVector3d p;
+    device->getPosition(p);
+    if (!m_pauseCursorActive){
+        // Menu just opened: the cursor starts on the highlighted row. A press
+        // still down from before does not click.
+        m_pauseCursorActive = true;
+        m_pauseCursorLastPos = p;
+        m_pauseCursorBtnPrev = actionButton;
+        m_pauseCursor = pause_pointer::Cursor();
+        for (int i = 0; i < static_cast<int>(m_pauseMenuLines.size()); i++){
+            if (m_pauseMenuLines[i].first == pauseMenuLevel() && m_pauseMenuLines[i].second == pauseHighlight()){
+                m_pauseCursor.line = m_pauseMenuFirstLine + i;
+            }
+        }
+        writeRtxPauseCursor(true);
+        return;
+    }
+
+    // Up / down / left / right only; toward and away from you is ignored.
+    const cVector3d d = p - m_pauseCursorLastPos;
+    m_pauseCursorLastPos = p;
+    const bool moved = pause_pointer::moved(d.y(), d.z());
+    if (moved){
+        m_pauseCursor = pause_pointer::step(m_pauseCursor, d.y(), d.z(), m_pauseHudLineCount);
+        writeRtxPauseCursor(true);
+        // Hovering highlights the row under the cursor. Only while the stylus
+        // moves, so a resting hand does not undo the pedals.
+        int level = -1, k = -1;
+        if (pauseItemUnderCursor(level, k) && level == pauseMenuLevel() && k != pauseHighlight()){
+            setPauseHighlight(k);
+            refreshVrHudText();
+        }
+    }
+
+    const bool clicked = actionButton && !m_pauseCursorBtnPrev;
+    m_pauseCursorBtnPrev = actionButton;
+    if (!clicked){
+        return;
+    }
+    int level = -1, k = -1;
+    if (!pauseItemUnderCursor(level, k)){
+        return;  // clicked on nothing
+    }
+    if (level == pauseMenuLevel()){
+        setPauseHighlight(k);
+    }
+    else if (level == 0 && !m_pauseConfirmClose){
+        // A main row clicked while a list is open: close the list, act on the row.
+        m_pauseSubmenu = PauseSubmenu::NONE;
+        m_pauseViewIndex = k;
+    }
+    else{
+        return;
+    }
+    pauseMenuSelect();
+    if (m_vrHudVisible){
+        refreshVrHudText();
+    }
+}
+
+void afVolmetricDrillingPlugin::writeRtxPauseCursor(bool show)
+{
+    // /tmp/fivrs-rtx/pause_cursor.txt: "<line> <across>", in lines of pause_hud.txt.
+    // The headset HUD draws the cursor there. Removed when the menu closes.
+    namespace fs = std::filesystem;
+    std::error_code error;
+    const fs::path dir = "/tmp/fivrs-rtx";
+    const fs::path path = dir / "pause_cursor.txt";
+    if (!show){
+        fs::remove(path, error);
+        return;
+    }
+    fs::create_directories(dir, error);
+    const fs::path partial = dir / "pause_cursor.txt.part";
+    {
+        std::ofstream out(partial, std::ios::trunc);
+        if (!out){
+            return;
+        }
+        out << std::fixed << std::setprecision(3) << m_pauseCursor.line << " " << m_pauseCursor.across << "\n";
+    }
+    fs::rename(partial, path, error);
 }
 
 void afVolmetricDrillingPlugin::applyHighlightedPauseView()
@@ -2989,18 +3144,31 @@ void afVolmetricDrillingPlugin::refreshVrHudText()
     string text = status + session + viewsHeader + menuList + "\n" + controlHelpText(true);
     // The headset shows the RTX image, not this panel, so the RTX window draws
     // a shorter copy into both eyes. Written only when it changes.
+    // With the stylus cursor on, pointing and the action button come first.
+    const string pointHint = m_pausePointerEnabled
+        ? string("Point                Move the stylus\n")
+        : string();
+    const string selectHint = m_pausePointerEnabled
+        ? string("Select               Action button / middle pedal\n")
+        : string("Select               Middle pedal\n");
     string hints = m_pauseConfirmClose
         ? string("pause menu navigation\n")
+            + pointHint
             + "Yes / No             Left pedal\n"
-            + "Select               Middle pedal\n"
+            + selectHint
         : string("pause menu navigation\n")
+            + pointHint
             + "Down                 Tap left pedal\n"
-            + "Select               Middle pedal\n"
+            + selectHint
             + (m_pauseSubmenu != PauseSubmenu::NONE
                ? "Back                 Select Back\n"
                : "Resume               Select Resume\n")
             + "Close menu           Hold left pedal\n";
-    writeRtxPauseHud(status + menuList + "\n" + hints);
+    const string hud = status + menuList + "\n" + hints;
+    // The cursor is in lines of this text: the menu starts after the title lines.
+    m_pauseMenuFirstLine = static_cast<int>(std::count(status.begin(), status.end(), '\n'));
+    m_pauseHudLineCount = static_cast<int>(std::count(hud.begin(), hud.end(), '\n'));
+    writeRtxPauseHud(hud);
     writeProctorPauseOptions(menuList);
     m_vrHudLabel->setText(text);
     m_panelManager.setText(m_vrHudLabel, text);
@@ -3288,6 +3456,11 @@ void afVolmetricDrillingPlugin::writeRtxPauseHud(const string& text)
 
 void afVolmetricDrillingPlugin::setVrHudVisible(bool visible)
 {
+    m_pauseCursorActive = false;  // the next menu starts the cursor afresh
+    const bool closing = !visible && m_vrHudVisible;
+    if (!visible){
+        writeRtxPauseCursor(false);
+    }
     m_vrHudVisible = visible;
     m_pauseSubmenu = PauseSubmenu::NONE;
     m_pauseConfirmClose = false;
@@ -3300,6 +3473,17 @@ void afVolmetricDrillingPlugin::setVrHudVisible(bool visible)
     if (!visible){
         writeRtxPauseHud("");
         writeProctorPauseOptions("");
+    }
+    if (closing){
+        // The burr comes back where it was frozen: stylus travel in the menu is
+        // not applied while paused (drill_manager moves the burr by velocity).
+        // Its angle follows the hand again at once, so hold it still a moment.
+        // Optionally also put it back in the middle of the view (logged as a
+        // reposition, not counted as the participant's recenter).
+        if (m_recenterOnResume){
+            requestDrillReposition(false);
+        }
+        m_resumeHoldUntil = glfwGetTime() + kResumeHoldSec;
     }
 
     ensurePauseMenuLabel();
@@ -3692,6 +3876,61 @@ void afVolmetricDrillingPlugin::initializeLabels()
     m_noticeLabel->setText("");
     m_panelManager.addPanel(m_noticeLabel, 0.985, 0.97, PanelReferenceOrigin::UPPER_RIGHT, PanelReferenceType::NORMALIZED);
     m_panelManager.setVisible(m_noticeLabel, false);
+
+    m_studyCardLabel = new cLabel(font);
+    m_studyCardLabel->m_fontColor.setBlack();
+    m_studyCardLabel->setFontScale(0.42);
+    m_studyCardLabel->setColor(cColorf(1.0, 1.0, 0.9));
+    m_studyCardLabel->setTransparencyLevel(0.85);
+    m_studyCardLabel->setCornerRadius(8, 8, 8, 8);
+    m_studyCardLabel->setMargins(12, 12, 12, 12);
+    m_studyCardLabel->setShowPanel(true);
+    m_studyCardLabel->setText("");
+    m_panelManager.addPanel(m_studyCardLabel, 0.015, 0.97, PanelReferenceOrigin::UPPER_LEFT, PanelReferenceType::NORMALIZED);
+    m_panelManager.setVisible(m_studyCardLabel, false);
+}
+
+void afVolmetricDrillingPlugin::serviceStudyCard()
+{
+    if (!m_studyCardLabel){
+        return;
+    }
+    const double now = std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (now - m_studyCardCheckSec < 0.25){
+        return;
+    }
+    m_studyCardCheckSec = now;
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const auto written = fs::last_write_time("/tmp/fivrs-rtx/study_hud.json", ec);
+    // The study controller rewrites study_hud.json every tick; an old one is left over.
+    const bool live = !ec && (fs::file_time_type::clock::now() - written) < std::chrono::seconds(3);
+    string text;
+    if (live){
+        std::ifstream in("/tmp/fivrs-rtx/study_card.txt");
+        if (in){
+            std::stringstream buffer;
+            buffer << in.rdbuf();
+            text = buffer.str();
+            while (!text.empty() && (text.back() == '\n' || text.back() == '\r')){
+                text.pop_back();
+            }
+        }
+    }
+    if (text == m_studyCardText){
+        return;
+    }
+    m_studyCardText = text;
+    m_panelManager.setVisible(m_studyCardLabel, false);
+    if (text.empty()){
+        return;
+    }
+    m_panelManager.setText(m_studyCardLabel, text);
+    // Desktop window only: the headset has its own copy of the card.
+    if (m_mainCamera){
+        m_panelManager.setVisibleForCamera(m_studyCardLabel, m_mainCamera, true);
+    }
 }
 
 
