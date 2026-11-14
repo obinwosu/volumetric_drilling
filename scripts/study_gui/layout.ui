@@ -231,7 +231,7 @@
             <item>
              <widget class="QLabel" name="label_canonical_view">
               <property name="text">
-               <string>Canonical view:</string>
+               <string>Saved Views:</string>
               </property>
              </widget>
             </item>

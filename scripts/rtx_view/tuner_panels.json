@@ -2,7 +2,7 @@
   "Light": false,
   "Irrigation": false,
   "Paste": false,
-  "Camera": false,
+  "Camera": true,
   "Structures": false,
   "Cortex masks": false,
   "Shaders": false

@@ -1,6 +1,6 @@
 from PyQt5 import QtWidgets, uic
 from PyQt5.QtGui import QPixmap, QFont
-from PyQt5.QtCore import Qt, QProcess, QProcessEnvironment, QTimer
+from PyQt5.QtCore import Qt, QEvent, QProcess, QProcessEnvironment, QTimer
 from PyQt5.QtWidgets import QVBoxLayout, QButtonGroup, QFileDialog, QInputDialog, QMessageBox
 import sys
 from study_manager import StudyManager, RecordOptions
@@ -295,6 +295,17 @@ class Ui(QtWidgets.QWidget):
         anatomy_layout.addStretch(1)
         self.scroll_area.setWidget(anatomy_container)
         self.scroll_area.setWidgetResizable(True)
+        # Rename the selected anatomy (also on right-click). Saved in gui_setup.yaml.
+        self.button_rename_anatomy = QtWidgets.QPushButton("Rename anatomy...")
+        self.button_rename_anatomy.setToolTip("Change the selected anatomy's name in this list (gui_setup.yaml).")
+        self.button_rename_anatomy.clicked.connect(lambda: self.rename_anatomy())
+        list_layout = self.findChild(QtWidgets.QVBoxLayout, "anatomyListLayout")
+        if list_layout is not None:
+            list_layout.addWidget(self.button_rename_anatomy)
+        # Saved Views: re-read canonical_views.yaml whenever the list is opened, so a view
+        # just saved in the tuner or the pause menu is there without restarting the launcher.
+        if self.combo_canonical_view is not None:
+            self.combo_canonical_view.installEventFilter(self)
 
         # --- Burr radios ---
         self.radio_burr_1 = self.findChild(QtWidgets.QRadioButton, "radio_burr_1")
@@ -427,8 +438,42 @@ class Ui(QtWidgets.QWidget):
         self.place_on_pc_monitor(0)
         self.show()
 
+    def eventFilter(self, obj, event):
+        if (obj is self.combo_canonical_view
+                and event.type() in (QEvent.MouseButtonPress, QEvent.KeyPress)):
+            self.refresh_canonical_view_combo(read_adf_laterality(self.active_volume_adf)
+                                              if getattr(self, "active_volume_adf", None) else None)
+        return super().eventFilter(obj, event)
+
+    def rename_anatomy(self, radio=None):
+        radio = radio or self.anatomy_button_group.checkedButton()
+        if radio is None:
+            self.print_info("Select an anatomy to rename.")
+            return
+        name, ok = QInputDialog.getText(self, "Rename anatomy", "New name:", text=radio.volume_name)
+        name = name.strip()
+        if not ok or not name or name == radio.volume_name:
+            return
+        if any(b.volume_name == name for b in self.anatomy_button_group.buttons() if b is not radio):
+            QMessageBox.warning(self, "Rename anatomy", f"There is already an anatomy called {name}.")
+            return
+        key = add_volume_tab.rename_volume(self.gui_configuration.yaml_file_path, radio.volume_adf, name)
+        if key is None:
+            self.print_info(f"ERROR! {radio.volume_adf} is not in gui_setup.yaml; not renamed.")
+            return
+        old = radio.volume_name
+        self.gui_configuration.yaml_data.setdefault(key, {})["name"] = name
+        radio.setText(name)
+        radio.volume_name = name
+        radio.volume_info.name = name
+        if radio.isChecked():
+            self.active_volume_name = name
+        self.print_info(f"Renamed anatomy {old} to {name}.")
+
     def _add_anatomy_radio(self, vinfo):
         radio = QtWidgets.QRadioButton(vinfo.name)
+        radio.setContextMenuPolicy(Qt.CustomContextMenu)
+        radio.customContextMenuRequested.connect(lambda pos, r=radio: self._anatomy_menu(r, pos))
         radio.volume_name = vinfo.name
         radio.volume_adf = str(vinfo.adf_path)
         radio.volume_info = vinfo
@@ -471,6 +516,11 @@ class Ui(QtWidgets.QWidget):
             tabs.setCurrentIndex(0)
         self.pressed_start_simulation()
         return f"Starting the simulator on {self.active_volume_name}."
+
+    def _anatomy_menu(self, radio, pos):
+        menu = QtWidgets.QMenu(self)
+        menu.addAction("Rename...", lambda: self.rename_anatomy(radio))
+        menu.exec_(radio.mapToGlobal(pos))
 
     def radio_button_volume_selection_for(self, radio):
         self.active_volume_adf = radio.volume_adf
@@ -1355,11 +1405,14 @@ class Ui(QtWidgets.QWidget):
         if combo is None:
             return
         prev = combo.currentData()
+        # The tuner and the pause menu write the same file; read it fresh.
+        self._canonical_views = load_canonical_views()
+        lat = (laterality or "").strip().lower()
+        default_view = next((v for v in self._canonical_views if v["id"] == lat and v.get("valid")), None)
         combo.blockSignals(True)
         combo.clear()
-        combo.addItem("Default (laterality)", "default")
+        combo.addItem(f"Default ({default_view['label']})" if default_view else "Default (laterality)", "default")
         combo.addItem("Home", "home")
-        lat = (laterality or "").strip().lower()
         for view in self._canonical_views:
             vlat = view.get("laterality") or ""
             if lat in ("left", "right") and vlat in ("left", "right") and vlat != lat:

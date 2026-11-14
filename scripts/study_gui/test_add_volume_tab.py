@@ -50,6 +50,18 @@ def test_register_adds_then_updates():
         assert again == key and data["volumes"].count(key) == 1 and data[key]["name"] == "Renamed"
 
 
+def test_rename_changes_only_that_name():
+    with tempfile.TemporaryDirectory() as folder:
+        path = pathlib.Path(folder) / "gui_setup.yaml"
+        path.write_text(SETUP)
+        adf = path.parent / "../../ADF/volume_256_LT144.yaml"
+        assert tab.rename_volume(path, adf, "Left: Anatomy G") == "volume7"
+        data = yaml.safe_load(path.read_text())
+        assert data["volume7"]["name"] == "Left: Anatomy G" and data["volume1"]["name"] == "Anatomy A"
+        assert path.read_text().replace('"Left: Anatomy G"', "Anatomy G") == SETUP
+        assert tab.rename_volume(path, path.parent / "nope.yaml", "x") is None
+
+
 def test_laterality_from_series_name():
     cases = {
         "Left Dehiscence  0.4  Ur70  3": "left",

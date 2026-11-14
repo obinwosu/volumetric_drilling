@@ -6,8 +6,8 @@ views:
     label: "Left transtemporal"
     laterality: left
     valid: true
-    t: [-4.0833, -1.09966, 0.11406]
-    q: [0.38138, -0.0858802, -0.169681, 0.904645]
+    t: [-11.946915, 1.9088804, -2.7280688]
+    q: [-0.11827469, 0.53258686, 0.77345462, 0.32269223]
   - id: right
     label: "Right transtemporal"
     laterality: right

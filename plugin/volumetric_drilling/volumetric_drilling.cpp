@@ -348,6 +348,9 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
         std::error_code staleError;
         std::filesystem::remove("/tmp/fivrs-rtx/pause_options.json", staleError);
         std::filesystem::remove("/tmp/fivrs-rtx/proctor_menu.txt", staleError);
+        // The RTX desktop card's last command ("1 apply <view>") would otherwise replay on
+        // the first frame and replace the startup view chosen in the launcher.
+        std::filesystem::remove("/tmp/fivrs-rtx/pause_menu.txt", staleError);
     }
     loadCanonicalViews();
     applyStartupView();

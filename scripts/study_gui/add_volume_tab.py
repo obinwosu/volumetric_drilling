@@ -81,6 +81,41 @@ def register_volume(yaml_path: pathlib.Path, name: str, adf: pathlib.Path, icon:
     return key
 
 
+def rename_volume(yaml_path: pathlib.Path, adf: pathlib.Path, name: str) -> str | None:
+    """Change the name: line of the volumeN entry whose adf_path is adf. Only that line changes.
+    Returns the key, or None if no entry uses that ADF."""
+    yaml_path = pathlib.Path(yaml_path).resolve()
+    lines = yaml_path.read_text().splitlines()
+    target = pathlib.Path(adf).resolve()
+    key = None
+    for index, line in enumerate(lines):
+        match = re.match(r"^(volume\d+):\s*$", line)
+        if match:
+            key, block_start = match.group(1), index
+            continue
+        if not line.startswith("  "):
+            key = None  # left the volumeN block
+            continue
+        if key is not None and line.startswith("  adf_path:"):
+            path = pathlib.Path(line.split(":", 1)[1].strip()).expanduser()
+            if not path.is_absolute():
+                path = yaml_path.parent / path
+            if path.resolve() != target:
+                continue
+            end = block_start + 1
+            while end < len(lines) and lines[end].startswith("  "):
+                end += 1
+            for row in range(block_start + 1, end):
+                if lines[row].startswith("  name:"):
+                    lines[row] = f"  name: {json.dumps(name)}"
+                    break
+            else:
+                lines.insert(block_start + 1, f"  name: {json.dumps(name)}")
+            yaml_path.write_text("\n".join(lines) + "\n")
+            return key
+    return None
+
+
 # ---------------------------------------------------------------- slice views
 
 
