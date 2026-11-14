@@ -110,14 +110,10 @@ def test_full_rehearsal():
     sim._turn(-1, 0); tick()
     assert io.state["lx"] == 0.0                        # no turn without the microscope button
     held["scope_button"] = True; tick()
-    for name, yaw, pitch in [("left", 1, 0), ("right", -1, 0), ("up", 0, 1), ("down", 0, -1)]:
-        turns = 0
-        while name not in session.progress.looked and turns < 200:
-            sim._turn(yaw, pitch); tick(0.1); turns += 1
-        assert name in session.progress.looked, (name, turns)
-        for _ in range(turns):                          # and back to the middle
-            sim._turn(-yaw, -pitch)
-        tick(0.1)
+    turns = 0
+    while not session.progress.step_done and turns < 200:  # any one move of the view
+        sim._turn(1, 0); tick(0.1); turns += 1
+    assert 0 < turns < 200, turns
     assert session.progress.step_done
     held["scope_button"] = False; tick()
     advance()                                           # moving the microscope

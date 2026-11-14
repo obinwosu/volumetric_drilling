@@ -2243,16 +2243,31 @@ void afVolmetricDrillingPlugin::nudgeCameraRoll(double clockwiseDeg)
     m_customViewActive = true;
 }
 
+cVector3d afVolmetricDrillingPlugin::orbitPivot() const
+{
+    const cVector3d pos = m_mainCamera->getLocalPos();
+    cVector3d look = m_mainCamera->getLookVector();
+    if (look.length() < 1e-6){
+        return m_volumeLookAt;
+    }
+    look.normalize();
+    // Depth of the bone centre along the view; if it is behind or beside the camera,
+    // fall back to the old look-at distance.
+    double depth = (m_volumeLookAt - pos).dot(look);
+    if (depth < 0.2){
+        depth = (m_mainCamera->getTargetPosLocal() - pos).length();
+    }
+    depth = cClamp(depth, 0.2, 25.0);
+    return pos + look * depth;
+}
+
 void afVolmetricDrillingPlugin::nudgeCameraOrbitYaw(double rightDeg)
 {
     if (!m_mainCamera){
         return;
     }
     cVector3d pos = m_mainCamera->getLocalPos();
-    cVector3d pivot = m_mainCamera->getTargetPosLocal();
-    if ((pivot - pos).length() < 1e-3){
-        pivot = m_volumeLookAt;
-    }
+    cVector3d pivot = orbitPivot();
     cVector3d up = m_mainCamera->getUpVector();
     if (up.length() < 1e-6){
         return;
@@ -2279,10 +2294,7 @@ void afVolmetricDrillingPlugin::nudgeCameraOrbitPitch(double upDeg)
         return;
     }
     cVector3d pos = m_mainCamera->getLocalPos();
-    cVector3d pivot = m_mainCamera->getTargetPosLocal();
-    if ((pivot - pos).length() < 1e-3){
-        pivot = m_volumeLookAt;
-    }
+    cVector3d pivot = orbitPivot();
     cVector3d right = m_mainCamera->getRightVector();
     cVector3d up = m_mainCamera->getUpVector();
     if (right.length() < 1e-6 || up.length() < 1e-6){
@@ -2500,6 +2512,7 @@ void afVolmetricDrillingPlugin::saveCanonicalViews()
     out << "# Volume is never moved. Quaternion is qx qy qz qw.\n";
     out << "# Add new labeled slots here (valid: false) and overwrite them from the pause menu.\n";
     out << "views:\n";
+    out << std::setprecision(8);  // the default 6 digits rounded every view on each save
     for (const CanonicalView& v : m_canonicalViews){
         cQuaternion q;
         q.fromRotMat(v.T_rel.getLocalRot());
@@ -2552,6 +2565,66 @@ void afVolmetricDrillingPlugin::saveCurrentIntoView(const string& id)
     saveCanonicalViews();
     string name = v->label.empty() ? v->id : v->label;
     showNotice("Saved view: " + name + "\n" + canonicalViewsPath());
+}
+
+void afVolmetricDrillingPlugin::saveViewAs(const string& rawLabel)
+{
+    // Label: printable characters, at most 40. Id: side + lowercase words joined by "_".
+    string label;
+    for (char ch : rawLabel){
+        if (ch >= 0x20 && ch < 0x7f && ch != '"' && ch != '\\'){
+            label += ch;
+        }
+    }
+    while (!label.empty() && label.back() == ' '){
+        label.pop_back();
+    }
+    while (!label.empty() && label.front() == ' '){
+        label.erase(label.begin());
+    }
+    if (label.size() > 40){
+        label.resize(40);
+    }
+    string slug;
+    for (char ch : label){
+        const bool alnum = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9');
+        if (alnum){
+            slug += static_cast<char>(::tolower(ch));
+        }
+        else if (!slug.empty() && slug.back() != '_'){
+            slug += '_';
+        }
+    }
+    while (!slug.empty() && slug.back() == '_'){
+        slug.pop_back();
+    }
+    if (slug.empty()){
+        showNotice("Type a name for the view first");
+        return;
+    }
+    const string side = m_anatomyLaterality;
+    string id = slug;
+    if (!side.empty() && slug.rfind(side + "_", 0) != 0 && slug != side){
+        id = side + "_" + slug;
+    }
+    if (id == "home" || id == "default"){
+        showNotice("Home and Default are reserved names");
+        return;
+    }
+    CanonicalView* existing = findCanonicalView(id);
+    if (existing){
+        existing->label = label;
+    }
+    else{
+        CanonicalView view;
+        view.id = id;
+        view.label = label;
+        view.laterality = side;
+        view.valid = false;
+        m_canonicalViews.push_back(view);
+    }
+    cerr << "INFO! Saving the current camera as view \"" << label << "\" (" << id << ")" << endl;
+    saveCurrentIntoView(id);
 }
 
 bool afVolmetricDrillingPlugin::applyNamedView(const string& id)
@@ -3266,11 +3339,21 @@ void afVolmetricDrillingPlugin::serviceRtxPauseMenu()
         return;
     }
     std::string id;
-    in >> id;
+    std::getline(in, id);  // the rest of the line: a view id, or a new view's name
     if (seq == m_rtxPauseSeq){
         return;
     }
     m_rtxPauseSeq = seq;
+    if (verb == "save_new"){
+        saveViewAs(id);
+        return;
+    }
+    {
+        // A view id is one word.
+        std::istringstream words(id);
+        id.clear();
+        words >> id;
+    }
     if (verb == "pause"){
         applySimPause(true);
         return;
@@ -3365,17 +3448,20 @@ void afVolmetricDrillingPlugin::writeProctorPauseOptions(const string& menuText)
 void afVolmetricDrillingPlugin::serviceProctorPauseCommand()
 {
     // One command per file, removed once read: "open", "resume", "burr_type cutting|diamond",
-    // "burr_size <k, smallest first>", "view <id>", "end_trial".
+    // "burr_size <k, smallest first>", "view <id>", "save_view <name>", "end_trial".
     namespace fs = std::filesystem;
     const fs::path path = "/tmp/fivrs-rtx/proctor_menu.txt";
     std::error_code error;
     if (!fs::exists(path, error)){
         return;
     }
-    string verb, arg;
+    string verb, arg, rest;
     {
         std::ifstream in(path);
-        in >> verb >> arg;
+        in >> verb;
+        std::getline(in, rest);  // "save_view" takes a name with spaces
+        std::istringstream words(rest);
+        words >> arg;
     }
     fs::remove(path, error);
     if (verb == "open"){
@@ -3404,7 +3490,10 @@ void afVolmetricDrillingPlugin::serviceProctorPauseCommand()
         }
         return;
     }
-    if (verb == "burr_type" && (arg == "cutting" || arg == "diamond")){
+    if (verb == "save_view"){
+        saveViewAs(rest);
+    }
+    else if (verb == "burr_type" && (arg == "cutting" || arg == "diamond")){
         m_drillManager.setBurrStyle(arg == "diamond" ? BurrStyle::DIAMOND : BurrStyle::CUTTING);
         showNotice("Burr: " + m_drillManager.burrStyleName());
     }
@@ -3598,6 +3687,24 @@ void afVolmetricDrillingPlugin::applyLateralityStartupView()
 
 void afVolmetricDrillingPlugin::mousePosUpdate(GLFWwindow *a_window, double x_pos, double y_pos)
 {
+    if (m_mainCamera && m_shiftPanDown && !m_vrHudVisible){
+        // Undo whatever AMBF did with this drag, then pan by the mouse travel so the
+        // bone follows the cursor: world units per pixel at the bone's distance.
+        m_mainCamera->setLocalTransform(m_shiftPanPose);
+        int width = 0;
+        int height = 0;
+        glfwGetWindowSize(a_window, &width, &height);
+        double distance = (m_mainCamera->getLocalPos() - m_volumeLookAt).length();
+        distance = std::max(distance, 0.5);
+        cCamera* internal = m_mainCamera->getInternalCamera();
+        const double fov = internal ? internal->getFieldViewAngleRad() : 0.7;
+        const double perPixel = 2.0 * distance * tan(0.5 * fov) / std::max(height, 1);
+        panCamera(-(x_pos - m_shiftPanX) * perPixel, (y_pos - m_shiftPanY) * perPixel);
+        m_shiftPanX = x_pos;
+        m_shiftPanY = y_pos;
+        m_shiftPanPose = m_mainCamera->getLocalTransform();
+        return;
+    }
     if (!m_mainCamera || !m_customViewActive){
         return;
     }
@@ -4550,12 +4657,18 @@ void afVolmetricDrillingPlugin::keyboardUpdate(GLFWwindow *a_window, int a_key, 
 
 
 void afVolmetricDrillingPlugin::mouseBtnsUpdate(GLFWwindow *a_window, int a_button, int a_action, int a_modes){
-    (void)a_window;
     (void)a_modes;
     if (a_button == GLFW_MOUSE_BUTTON_MIDDLE){
-        m_arcballMouseDown = (a_action == GLFW_PRESS);
+        const bool pressed = (a_action == GLFW_PRESS);
+        // Middle drag orbits (AMBF arcball); Shift + middle drag pans.
+        m_shiftPanDown = pressed && isShiftHeld() && m_mainCamera;
+        m_arcballMouseDown = pressed && !m_shiftPanDown;
         if (m_arcballMouseDown && m_mainCamera){
             m_preservedUp = m_mainCamera->getUpVector();
+        }
+        if (m_shiftPanDown){
+            m_shiftPanPose = m_mainCamera->getLocalTransform();
+            glfwGetCursorPos(a_window, &m_shiftPanX, &m_shiftPanY);
         }
     }
     else if (a_button == GLFW_MOUSE_BUTTON_RIGHT){

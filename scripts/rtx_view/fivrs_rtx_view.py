@@ -1194,7 +1194,8 @@ def _bind_exposure_keys(viewer):
             pause_menu.toggle(viewer)
             return True
         if pause_menu.is_open(viewer):
-            return True
+            # Typing a view name: Backspace, Enter and the arrows go on to ImGui.
+            return None if pause_menu.typing() else True
         if symbol == key.BRACKETLEFT:
             _set_exposure(viewer, viewer._exposure / 1.25)
         elif symbol == key.BRACKETRIGHT:
@@ -1241,12 +1242,15 @@ def _pan_scale(viewer, bridge):
 def _rtx_mouse_drag(viewer, bridge, x, y, dx, dy, buttons, to_framebuffer_coords, modifiers=0):
     import pyglet
 
-    del x, y, to_framebuffer_coords, modifiers
-    if buttons & pyglet.window.mouse.LEFT:
-        bridge.publish_camera_nudge(yaw=-float(dx) * 0.25, pitch=float(dy) * 0.25)
-    elif buttons & (pyglet.window.mouse.RIGHT | pyglet.window.mouse.MIDDLE):
+    del x, y, to_framebuffer_coords
+    shift = bool(modifiers & pyglet.window.key.MOD_SHIFT)
+    middle = bool(buttons & pyglet.window.mouse.MIDDLE)
+    # Orbit: left drag or middle drag. Pan: right drag or Shift + middle drag.
+    if (middle and shift) or (buttons & pyglet.window.mouse.RIGHT):
         scale = _pan_scale(viewer, bridge)
         bridge.publish_camera_nudge(pan_right=-float(dx) * scale, pan_up=-float(dy) * scale)
+    elif middle or buttons & pyglet.window.mouse.LEFT:
+        bridge.publish_camera_nudge(yaw=-float(dx) * 0.25, pitch=float(dy) * 0.25)
 
 
 def _rtx_mouse_scroll(viewer, bridge, scroll_y, is_ctrl_down=False):
@@ -1287,7 +1291,8 @@ def _bind_window_input(viewer, bridge):
         gui.handle_mouse_scroll = lambda *args, **kwargs: None
         gui.update_camera_from_keys = lambda *args, **kwargs: None
     viewer._window_input_bound = True
-    print("RTX camera: left-drag orbit, right-drag pan, wheel dolly. AMBF keeps main_camera.", flush=True)
+    print("RTX camera: left or middle drag orbit, right or Shift+middle drag pan, wheel dolly. "
+          "AMBF keeps main_camera.", flush=True)
 
 
 def _closed_structure_rgbs(occupied, colors, document=None):

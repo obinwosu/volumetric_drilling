@@ -81,17 +81,13 @@ def tutorial(session, io):
     assert ss.TUTORIAL[session.step].key == "camera"  # the device clutch step is gone
     run(session, io, 2.0, cam_clutch=True)  # clutch without moving the view: not done
     assert not session.progress.step_done
-    assert session.hud(io.t)["panel"]["lines"][-1] == "Left     Right     Up     Down"
+    assert not any("Left" in line for line in session.hud(io.t)["panel"]["lines"])  # no direction list
     assert "look" not in session.hud(io.t)["panel"]  # no target any more
-    for name, (dx, dy) in [("left", (-0.06, 0)), ("right", (0.06, 0)), ("up", (0, 0.06))]:
-        look = np.array([dx, dy, -1.0]) / np.linalg.norm([dx, dy, -1.0])
-        run(session, io, 0.2, lx=look[0], ly=look[1], lz=look[2])
-        assert name in session.progress.looked and not session.progress.step_done, name
-    assert session.hud(io.t)["panel"]["lines"][-1] == "✓ Left     ✓ Right     ✓ Up     Down"
-    run(session, io, 0.2, lx=0.0, ly=0.0, lz=-1.0)  # back to the middle: still not done
+    look = np.array([0.02, 0.0, -1.0]) / np.linalg.norm([0.02, 0.0, -1.0])
+    run(session, io, 0.2, lx=look[0], ly=look[1], lz=look[2])  # a small nudge: not yet
     assert not session.progress.step_done
-    look = np.array([0.0, -0.06, -1.0]) / np.linalg.norm([0.0, -0.06, -1.0])
-    run(session, io, 0.2, lx=look[0], ly=look[1], lz=look[2])
+    look = np.array([0.0, -0.04, -1.0]) / np.linalg.norm([0.0, -0.04, -1.0])
+    run(session, io, 0.2, lx=look[0], ly=look[1], lz=look[2])  # one clear move, any direction: done
     assert session.progress.step_done
     run(session, io, 0.1, lx=0.0, ly=0.0, lz=-1.0)
     advance(session, io)
@@ -334,7 +330,7 @@ def test_headset_view_is_placed_at_the_welcome_page_and_the_introduction():
 
 def test_desktop_card_text():
     hud = {"panel": {"title": "Step 4 of 7: Moving the microscope", "done": True,
-                     "lines": ["word " * 30, "✓ Left     Right     Up     Down"],
+                     "lines": ["word " * 30, "Hold the microscope button and move your head to move the view."],
                      "progress": [True, True, True, False, False, False, False],
                      "advance": "Tap the left foot pedal to advance"},
            "banner": None}

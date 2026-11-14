@@ -745,22 +745,25 @@ class Ui(QtWidgets.QWidget):
         self.combo_render_preset.blockSignals(False)
 
     def _launch_options(self):
-        """Options for this launch. Study mode always runs without irrigation or suction,
-        with the fastest headset render that keeps the look (Nov 12 measurements, both
-        eyes 1152x864: 21 fps before, about 50 after): DLSS ultra performance, no bloom,
-        2 bounces, exposure 1.3 to make up the
-        brightness bloom and the bounces gave, and the headset eyes read back while the
-        next frame renders."""
+        """Options for this launch: the Advanced tab's Rendering / Instruments settings as
+        they are now. A study always runs without irrigation or suction, on DLSS ultra
+        performance, whatever the tab shows; samples, bounces and bone dust follow the tab.
+        It also reads the headset eyes back while the next frame renders (frame rate
+        only; the image is the same)."""
         options = dict(self.gui_configuration.sim_options)
         if self.study_mode:
             options["irrigation"] = False
             options["suction"] = False
             options["dlss"] = "ultra_performance"
-            options["bounces"] = 2
-            options["bloom"] = False
-            options["exposure"] = 1.3
             options["eye_pipeline"] = True
+            options["preset"] = gui_setup.matching_preset(options)
         return options
+
+    def study_render_settings(self) -> dict:
+        """What a study launch renders with, for the session's metadata."""
+        options = self._launch_options()
+        return {key: options.get(key) for key in
+                ("preset", "dlss", "samples", "bounces", "irrigation", "bone_dust", "suction")}
 
     def save_configuration(self):
         for param_id, text_edit in self.gui_param_dialogs.items():
@@ -848,7 +851,8 @@ class Ui(QtWidgets.QWidget):
                 "--session_anatomy",
                 self.active_volume_name or "",
                 "--startup_view",
-                self.selected_startup_view_id(),
+                # The studies always start on their own view, whatever Main shows.
+                (self.study_mode or {}).get("startup_view") or self.selected_startup_view_id(),
             ]
             if use_rtx or chai_eyes:
                 args.extend(["--rtx_view", "1"])

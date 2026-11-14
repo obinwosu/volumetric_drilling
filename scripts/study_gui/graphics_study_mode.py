@@ -32,7 +32,7 @@ import sys
 import time
 
 from PyQt5 import QtWidgets
-from PyQt5.QtCore import QProcess, Qt, QTimer
+from PyQt5.QtCore import QProcess, QSettings, Qt, QTimer
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parent.parent
@@ -523,7 +523,8 @@ class GraphicsStudyPanel(QtWidgets.QWidget):
             "Tutorial, then the same task twice in random order: cortical mastoidectomy with "
             "identification of the incus short process, once with the FIVRS RTX graphics and once "
             "with AMBF/CHAI3D. NASA-TLX on this monitor after each session. Anatomy A, headset, "
-            "haptic device 1, no irrigation.")
+            "haptic device 1, no irrigation, DLSS ultra performance (samples, bounces and dust from "
+            "the Advanced tab).")
         about.setWordWrap(True)
         about.setStyleSheet("color: gray;")
         layout.addWidget(about)
@@ -634,6 +635,20 @@ class GraphicsStudyPanel(QtWidgets.QWidget):
         self.end_button.clicked.connect(self.end_early)
         self.pause_button = QtWidgets.QPushButton("Open pause menu")
         self.pause_button.clicked.connect(lambda: proctor_pause.send("open"))
+        self.recenter_button = QtWidgets.QPushButton("Recenter headset view")
+        self.recenter_button.clicked.connect(lambda: self.session and self.session.recenter_headset())
+        # Same tilt setting as the resident study (QSettings, ~/.config), not in gui_setup.yaml.
+        self._settings = QSettings("FIVRS", "study_gui")
+        self.tilt_box = QtWidgets.QSpinBox()
+        self.tilt_box.setRange(0, 60)
+        self.tilt_box.setSuffix("\u00b0 down")
+        self.tilt_box.setToolTip("Headset view tilt below where the participant looks. Changing it "
+                                 "places the view again from their head now.")
+        try:
+            self.tilt_box.setValue(int(self._settings.value("headset_tilt_deg", 15)))
+        except (TypeError, ValueError):
+            self.tilt_box.setValue(15)
+        self.tilt_box.valueChanged.connect(self._tilt_changed)
         self.next_button = QtWidgets.QPushButton("Start session 2")
         self.next_button.clicked.connect(self.start_next_arm)
         self.retry_button = QtWidgets.QPushButton("Restart this session")
@@ -647,6 +662,8 @@ class GraphicsStudyPanel(QtWidgets.QWidget):
             (self.begin_button, "Normally the participant does this with the left pedal."),
             (self.pause_button, "Pause the simulator; change burr, view or end trial from the pop-up."),
             (self.end_button, "Stop the session now (hardware fault, or the participant stops)."),
+            (self.recenter_button, "Place the headset view again from where the participant's head is "
+                                   "now (ahead and a little down)."),
             (self.tlx_button, "Open the current questionnaire (NASA-TLX, background, comparison or "
                               "Post Sim Reflection) again if it was closed without saving."),
             (self.next_button, "After the first questionnaire, once the headset is back on: opens the "
@@ -660,8 +677,21 @@ class GraphicsStudyPanel(QtWidgets.QWidget):
             label.setWordWrap(True)
             grid.addWidget(button, row, 0)
             grid.addWidget(label, row, 1, 1, 2)
+            if button is self.recenter_button:
+                tilt_row = QtWidgets.QHBoxLayout()
+                tilt_row.addWidget(QtWidgets.QLabel("Tilt"))
+                tilt_row.addWidget(self.tilt_box)
+                tilt_row.addStretch(1)
+                grid.addLayout(tilt_row, row, 1, 1, 2)
+                label.hide()
+                button.setToolTip(text)
         layout.addWidget(proctor)
         self._set_buttons()
+
+    def _tilt_changed(self, value):
+        self._settings.setValue("headset_tilt_deg", int(value))
+        if self.session is not None and self.session.phase != "done":
+            self.session.set_headset_tilt(value)
 
     # ---- helpers ----
     @property
@@ -709,6 +739,7 @@ class GraphicsStudyPanel(QtWidgets.QWidget):
         self.skip_button.setEnabled(in_session and phase == "tutorial")
         self.begin_button.setEnabled(in_session and phase in ("tutorial", "ready", "briefing"))
         self.end_button.setEnabled(in_session and phase in ("armed", "running"))
+        self.recenter_button.setEnabled(in_session and phase != "done")
         self.pause_button.setEnabled(in_session and not self.rehearsing)
         self.tlx_button.setEnabled(self.stage in ("tlx", "background", "preferences", "reflection"))
         self.next_button.setEnabled(self.stage == "between")
@@ -830,7 +861,8 @@ class GraphicsStudyPanel(QtWidgets.QWidget):
                             (self.ui.check_openvr_hmd, False), (self.ui.check_video_record, False)):
                 if box is not None:
                     box.setChecked(on)
-            self.ui.study_mode = {"study_id": self.plan["study_id"], "graphics": graphics}
+            self.ui.study_mode = {"study_id": self.plan["study_id"], "graphics": graphics,
+                                  "startup_view": study_mode.STUDY_START_VIEW}
             self._launch_started = time.time()
             self._say(f"{self.plan['study_id']} session {self.arm + 1}: starting the simulator ({gs.GRAPHICS[graphics]})")
             self.ui.pressed_start_simulation()
@@ -845,13 +877,14 @@ class GraphicsStudyPanel(QtWidgets.QWidget):
             metadata.update({
                 "volume_adf": str(volume_adf), "volume_name": volume.volume_name,
                 "starting_burr_mm": self.ui.get_starting_burr_mm(),
-                "study_mode": {"irrigation": False, "haptic_devices": 1,
+                "study_mode": {"render": self.ui.study_render_settings(), "haptic_devices": 1,
                                "display": "desktop (development)" if desktop else "headset eyepiece"},
             })
             io = study_session.SessionIO(recorder_cmd=study_mode.recorder_command(volume_adf))
         self.session = study_session.StudySession(
             io, self.plan["study_id"], recording_dir, metadata, trial_seconds=self.plan["trial_seconds"],
             tutorial=tutorial, rtx_reload=(graphics == "rtx"), text=text)
+        self.session.set_headset_tilt(self.tilt_box.value())
         self.stage = "session"
         self._done_handled = False
         self._timer.start()

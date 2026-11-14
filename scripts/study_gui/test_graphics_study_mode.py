@@ -163,6 +163,10 @@ class FakeUi:
     def get_starting_burr_mm(self):
         return 6
 
+    def study_render_settings(self):
+        return {"preset": "custom", "dlss": "quality", "samples": 2, "bounces": 4,
+                "irrigation": True, "bone_dust": False, "suction": False}
+
     def print_info(self, text):
         pass
 
@@ -203,7 +207,7 @@ def test_full_study_with_files():
     order = panel.plan["order"]
     assert sorted(order) == ["rtx", "upstream"]
     mode, rtx_box, headset_box = ui.launches[0]
-    assert mode == {"study_id": "G001", "graphics": order[0]} and rtx_box == (order[0] == "rtx") and headset_box
+    assert mode == {"study_id": "G001", "graphics": order[0], "startup_view": "right"} and rtx_box == (order[0] == "rtx") and headset_box
     drive_arm(panel, io, tutorial=True)
     assert panel.stage == "between", panel.stage  # TLX filled by fill_tlx
     assert not ui._ambf_process.running  # simulator closed for the questionnaire

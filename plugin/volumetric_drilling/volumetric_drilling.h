@@ -128,11 +128,16 @@ protected:
     void saveCanonicalViews();
     CanonicalView* findCanonicalView(const string& id);
     void saveCurrentIntoView(const string& id);
+    // New named view from the current camera (or overwrite the one with the same name).
+    void saveViewAs(const string& label);
     bool applyNamedView(const string& id);
     void applyHomeView();
     void applyStartupView();
     void nudgeCameraRoll(double clockwiseDeg);
     // Yaw-orbit around the current look-at, about camera up (keeps roll).
+    // Orbit centre: straight ahead of the camera at the bone's depth, so the first
+    // orbit after a pan, saved view or clutch does not swing to a stale look-at.
+    cVector3d orbitPivot() const;
     void nudgeCameraOrbitYaw(double rightDeg);
     // Pitch-orbit around the current look-at, about camera right.
     void nudgeCameraOrbitPitch(double upDeg);
@@ -359,6 +364,12 @@ private:
     double m_activeCameraRollDeg = 0.0;
     bool m_customViewActive = false;
     bool m_arcballMouseDown = false;
+    // Shift + middle drag pans (AMBF's own Shift pan is 10x slow and was bent by the
+    // arcball up fix). The pose is kept here so AMBF's change can be undone first.
+    bool m_shiftPanDown = false;
+    cTransform m_shiftPanPose;
+    double m_shiftPanX = 0.0;
+    double m_shiftPanY = 0.0;
     bool m_rightMouseDown = false;
     cMatrix3d m_rightDragRot;
     cVector3d m_preservedUp;

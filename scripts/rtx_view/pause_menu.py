@@ -35,6 +35,16 @@ def command_line(seq: int, verb: str, view_id: str = "") -> str:
     return f"{int(seq)} {verb}\n"
 
 
+def typing() -> bool:
+    """True while an ImGui text box (the new view name) has the keyboard."""
+    try:
+        from imgui_bundle import imgui
+
+        return bool(imgui.get_io().want_text_input)
+    except Exception:
+        return False
+
+
 def is_open(viewer) -> bool:
     return bool(getattr(viewer, "_pause_open", False))
 
@@ -146,11 +156,22 @@ def _save(viewer, chosen) -> None:
     viewer._pause_status = f"Saving {chosen.get('label') or chosen['id']}"
 
 
+def _save_new(viewer) -> None:
+    name = (getattr(viewer, "_pause_new_name", "") or "").strip()
+    if not name:
+        viewer._pause_status = "Type a name for the view first."
+        return
+    _send(viewer, "save_new", name)
+    viewer._pause_new_name = ""
+    viewer._pause_views_mtime = None
+    viewer._pause_status = f"Saving the current view as {name}"
+
+
 def _draw(imgui, viewer) -> None:
     if not is_open(viewer):
         return
     io = imgui.get_io()
-    width, height = 460.0, 560.0
+    width, height = 460.0, 620.0
     display = io.display_size
     imgui.set_next_window_pos(
         imgui.ImVec2((display[0] - width) * 0.5, (display[1] - height) * 0.5),
@@ -212,6 +233,12 @@ def _draw(imgui, viewer) -> None:
     imgui.same_line()
     if imgui.button("Resume", imgui.ImVec2(100, 0)):
         toggle(viewer)
+    imgui.set_next_item_width(250)
+    _, viewer._pause_new_name = imgui.input_text_with_hint(
+        "##pause_new_name", "New view name", getattr(viewer, "_pause_new_name", "") or "")
+    imgui.same_line()
+    if imgui.button("Save as new view", imgui.ImVec2(150, 0)):
+        _save_new(viewer)
     status = getattr(viewer, "_pause_status", "") or ""
     if status:
         imgui.text(status)

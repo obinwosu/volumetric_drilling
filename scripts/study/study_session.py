@@ -91,7 +91,7 @@ TUTORIAL = [
          ["The view in the simulator is controlled by the position of the Quest headset. To move "
           "the camera, press and hold the button on the microscope handle and then reposition "
           "the Quest headset.",
-          "Holding the microscope button, look left, right, up and down."],
+          "Hold the microscope button and move your head to move the view."],
          [{"device": "scope", "marks": {"button": "Hold"}}, {"device": "headset", "marks": {}}]),
     Step("zoom", "Zooming in and out",
          ["To zoom in, press the button on the microscope AND press the left foot pedal. To zoom "
@@ -126,8 +126,7 @@ MENU_HELP = {
 DRILL_TRAVEL_UNITS = 0.5   # simulator units of tip travel (about 25 mm)
 ZOOM_EACH_WAY = 0.5        # doublings of magnification, in and then out
 DRILL_VOXELS = 200         # voxels removed in practice
-LOOK_SHIFT = 0.35          # view swung this far each way, in half-heights of the view
-LOOK_DIRECTIONS = ("left", "right", "up", "down")
+CAMERA_MOVE = 0.2          # view moved this far (any direction), in half-heights of the view
 
 
 def view_anchor(state: dict):
@@ -143,20 +142,11 @@ def view_anchor(state: dict):
     return [float(v) for v in c + look * depth]
 
 
-def looked(spot) -> set:
-    """Directions the view has turned, from where the start-of-step centre now shows.
-
-    Looking left moves that point right on the screen; looking up moves it down.
-    """
+def view_shift(spot) -> float:
+    """How far the start-of-step centre has moved on screen, in half-heights of the view."""
     if spot is None:
-        return set()
-    x, y = spot
-    return {name for name, hit in (("left", x >= LOOK_SHIFT), ("right", x <= -LOOK_SHIFT),
-                                   ("up", y >= LOOK_SHIFT), ("down", y <= -LOOK_SHIFT)) if hit}
-
-
-def look_line(seen) -> str:
-    return "     ".join(("✓ " if d in seen else "") + d.capitalize() for d in LOOK_DIRECTIONS)
+        return 0.0
+    return float(np.hypot(spot[0], spot[1]))
 
 
 CARD_WIDTH = 64  # characters per line of the desktop card
@@ -336,7 +326,7 @@ class Progress:
     removed_start: int | None = None
     saw_pause: bool = False
     look_anchor: list | None = None
-    looked: set = field(default_factory=set)
+    view_moved: float = 0.0          # camera step: furthest the view has moved
     step_done: bool = False          # current step done; waiting for the left pedal
     advance_base: int | None = None  # advance_count when it was done
     done: dict = field(default_factory=dict)
@@ -546,13 +536,13 @@ class StudySession:
                 p.look_anchor = view_anchor(state)
             camera = headset_hud.camera_from_state(state)
             if camera and p.look_anchor:
-                p.looked |= looked(headset_hud.project(p.look_anchor, camera))
+                p.view_moved = max(p.view_moved, view_shift(headset_hud.project(p.look_anchor, camera)))
         if not p.step_done:
             checks = {
                 "welcome": True,
                 "drill_move": p.travel >= DRILL_TRAVEL_UNITS,
                 "recenter": recenter > p.recenter_start,
-                "camera": p.looked >= set(LOOK_DIRECTIONS),
+                "camera": p.view_moved >= CAMERA_MOVE,
                 "zoom": (zoom[0] - p.zoom_start[0] >= ZOOM_EACH_WAY - 1e-6
                          and zoom[1] - p.zoom_start[1] >= ZOOM_EACH_WAY - 1e-6),
                 "drill": removed - p.removed_start >= DRILL_VOXELS,
@@ -574,7 +564,7 @@ class StudySession:
         self.progress.step_done = False
         self.progress.advance_base = None
         self.progress.look_anchor = None
-        self.progress.looked = set()
+        self.progress.view_moved = 0.0
         self.step += 1
         if self.step >= len(TUTORIAL):
             self.step = len(TUTORIAL) - 1
@@ -710,8 +700,6 @@ class StudySession:
             }
             if step.key == "welcome":
                 panel["progress"] = []
-            if step.key == "camera":
-                panel["lines"] = list(step.lines) + [look_line(p.looked)]
             if step.key == "welcome":
                 panel["compact"] = True  # a long read: smaller text fits the view
             return {"panel": panel, "timer": None, "banner": None, "menu_help": MENU_HELP}

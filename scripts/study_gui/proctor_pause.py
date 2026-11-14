@@ -88,6 +88,18 @@ class ProctorPauseWindow(QtWidgets.QWidget):
         self.row_views = QtWidgets.QGridLayout(self.box_views)
         layout.addWidget(self.box_views)
 
+        # Save the camera as it is now under a new name (same name: overwritten).
+        save_row = QtWidgets.QHBoxLayout()
+        self.view_name = QtWidgets.QLineEdit()
+        self.view_name.setPlaceholderText("New view name, for example Antrum close-up")
+        self.view_name.setMaxLength(40)
+        self.view_name.returnPressed.connect(self._save_view)
+        self.button_save_view = QtWidgets.QPushButton("Save current view")
+        self.button_save_view.clicked.connect(self._save_view)
+        save_row.addWidget(self.view_name, 1)
+        save_row.addWidget(self.button_save_view)
+        layout.addLayout(save_row)
+
         self.menu_label = QtWidgets.QLabel()
         self.menu_label.setFont(QFont("Monospace", 9))
         self.menu_label.setStyleSheet("color: #555;")
@@ -151,6 +163,14 @@ class ProctorPauseWindow(QtWidgets.QWidget):
             button.setChecked(k == options.get("size_index"))
         self.button_end.setVisible(bool(options.get("trial_active")))
         self.menu_label.setText(str(options.get("menu", "")).rstrip())
+
+    def _save_view(self):
+        name = " ".join(self.view_name.text().split())
+        if not name:
+            self.view_name.setFocus()
+            return
+        send("save_view", name)
+        self.view_name.clear()
 
     def _end_trial(self):
         answer = QtWidgets.QMessageBox.question(

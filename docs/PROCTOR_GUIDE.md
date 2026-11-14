@@ -22,6 +22,9 @@ are in [`study_descriptions/`](study_descriptions/).
 4. **Development boxes:** make sure **Practice run**, **Desktop view** and **Rehearse**
    are **unticked** for a real participant. A practice run is saved separately and never
    uses a participant Study ID.
+   **Rendering:** both studies always run without irrigation or suction, on DLSS
+   **ultra performance**, whatever the **Advanced** tab shows. Samples per pixel, light
+   bounces and bone dust come from that tab at Start. Each session records the settings.
 5. **Stylus:** seat the Touch stylus in its dock. Have the participant sit at the rig
    with the stylus in their dominant hand and the foot pedals under their feet.
 
@@ -85,9 +88,9 @@ AMBF's window, upper left, in CHAI3D sessions).
 | — | Welcome | Read; tap the left pedal |
 | 1 | Moving the drill | Move the stylus around the field |
 | 2 | Recentering the drill in view | Double-tap the action button |
-| 3 | Moving the microscope | Hold the microscope button and look left, right, up and down (each ticks off on the card) |
+| 3 | Moving the microscope | Hold the microscope button and move the head; the step ticks off once the view has moved |
 | 4 | Zooming in and out | Microscope button + left pedal (in), then + middle pedal (out). Keep the microscope button held, or the left pedal moves to the next page |
-| 5 | Activating the drill | Hold the right pedal and remove some bone. The camera returns to its start-up view and zoom when this page opens. Practice bone is restored before the trial |
+| 5 | Activating the drill | Hold the right pedal and remove some bone. The camera returns to the study start view (Right transtemporal) and zoom when this page opens. Practice bone is restored before the trial |
 | 6 | The pause menu | Hold the left pedal to open it, then close it (instructions appear above the menu) |
 
 Repositioning the stylus with the held action button still works, but is no longer taught;
@@ -174,8 +177,8 @@ practising, then **taps the left pedal** to begin the study session.
 The anatomy, controls, headset framing and task are the same in both sessions; only the
 graphics differ. If the simulator closes during a session, use **Restart this session**.
 
-The graphics study panel has no Recenter or Tilt controls; its sessions use the default
-15° placement.
+The graphics study panel has the same **Recenter headset view** and **Tilt** controls as the
+resident study (section 3.2), and shares the Tilt setting with it.
 
 ---
 

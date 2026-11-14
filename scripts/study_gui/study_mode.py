@@ -5,7 +5,7 @@ only in the study key file (participant_key.csv next to the recordings); the
 recording, the simulator and the headset use the Study ID.
 
 Start launches the simulator in study mode: Volume A, RTX view in the headset,
-haptic device 1 only, no irrigation. The resident then works through the
+haptic device 1 only, no irrigation, DLSS ultra performance. The resident then works through the
 tutorial in the headset (scripts/study/study_session.py) and the proctor
 presses Begin trial when they are ready. At the end the launcher asks to
 continue to feedback and starts the analysis.
@@ -36,6 +36,9 @@ import study_checks  # noqa: E402
 import feedback_order  # noqa: E402
 
 STUDY_VOLUME = "volume_256_RT143.yaml"  # Anatomy A
+# Both studies start (and the tutorial returns for drilling) on this saved view of
+# canonical_views.yaml: Right transtemporal, re-saved for Anatomy A on 2026-11-14.
+STUDY_START_VIEW = "right"
 KEY_FILE = "participant_key.csv"
 
 
@@ -156,7 +159,8 @@ class StudyPanel(QtWidgets.QWidget):
         layout.addWidget(self.start_button)
 
         info = QtWidgets.QLabel(
-            "Opens Anatomy A with the RTX view in the headset, haptic device 1 only, no irrigation. "
+            "Opens Anatomy A with the RTX view in the headset, haptic device 1 only, no irrigation or "
+            "suction, DLSS ultra performance (samples, bounces and dust from the Advanced tab). "
             "The resident works through a short tutorial in the headset, then you begin the 10-minute "
             "timed trial below.")
         info.setWordWrap(True)
@@ -470,7 +474,7 @@ class StudyPanel(QtWidgets.QWidget):
                         (self.ui.check_openvr_hmd, False), (self.ui.check_video_record, False)):
             if box is not None:
                 box.setChecked(on)
-        self.ui.study_mode = {"study_id": study_id}
+        self.ui.study_mode = {"study_id": study_id, "startup_view": STUDY_START_VIEW}
         self.ui.print_info(f"Study session {study_id}: starting the simulator")
         self._launch_started = time.time()
         self._problems_seen = set()
@@ -487,7 +491,8 @@ class StudyPanel(QtWidgets.QWidget):
             "volume_adf": str(volume_adf),
             "volume_name": volume.volume_name,
             "starting_burr_mm": self.ui.get_starting_burr_mm(),
-            "study_mode": {"irrigation": False, "haptic_devices": 1, "development": practice,
+            "study_mode": {"render": self.ui.study_render_settings(), "haptic_devices": 1,
+                           "development": practice,
                            "display": "desktop RTX (development)" if desktop else "headset RTX"},
         }
         io = study_session.SessionIO(recorder_cmd=recorder_command(volume_adf))
