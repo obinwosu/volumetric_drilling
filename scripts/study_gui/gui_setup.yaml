@@ -171,6 +171,11 @@ volume9:
   icon_path: ./assets/LT146.png
   name: Anatomy I
   description: 'Anatomy I: Temporal bone CT volume (left ear).'
+volume33:
+  adf_path: ../../ADF/volume_left_dehiscence_ct_0p196mm.yaml
+  icon_path: ./assets/left_dehiscence_ct.png
+  name: "Left Dehiscence CT"
+  description: 'Left Dehiscence CT: left ear, segmented from CT by tbone nnU-Net (fold 0, 0.196 mm), 2026-11-13.'
 volumes:
 - volume1
 - volume2
@@ -201,3 +206,4 @@ volumes:
 - volume30
 - volume31
 - volume32
+- volume33

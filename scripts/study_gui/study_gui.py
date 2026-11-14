@@ -11,6 +11,7 @@ import study_mode
 import graphics_study_mode
 import study_chooser
 import proctor_pause
+import add_volume_tab
 
 import datetime
 from enum import Enum
@@ -286,14 +287,9 @@ class Ui(QtWidgets.QWidget):
         anatomy_container = QtWidgets.QWidget()
         anatomy_layout = QVBoxLayout(anatomy_container)
         anatomy_layout.setAlignment(Qt.AlignTop)
+        self.anatomy_layout = anatomy_layout
         for i, vinfo in enumerate(self.gui_configuration.volumes_info):
-            radio = QtWidgets.QRadioButton(vinfo.name)
-            radio.volume_name = vinfo.name
-            radio.volume_adf = str(vinfo.adf_path)
-            radio.volume_info = vinfo
-            radio.toggled.connect(self.radio_button_volume_selection)
-            self.anatomy_button_group.addButton(radio)
-            anatomy_layout.addWidget(radio)
+            radio = self._add_anatomy_radio(vinfo)
             if i == 0:
                 radio.setChecked(True)
         anatomy_layout.addStretch(1)
@@ -419,11 +415,68 @@ class Ui(QtWidgets.QWidget):
                 save=lambda key: self.gui_configuration.save_value(study_chooser.SETTING, key))
             tabs.addTab(self.study_chooser, "Study")
 
+        # "Add a volume": CT DICOM -> segmentation -> new anatomy (add_volume_tab.py).
+        if tabs is not None:
+            self.add_volume_panel = add_volume_tab.AddVolumePanel(
+                self, self.gui_configuration.yaml_data.get("tbone_seg_dir") or None)
+            tabs.addTab(self.add_volume_panel, "Add a volume")
+
         # Pops up while the participant's pause menu is open (proctor_pause.py).
         self.proctor_pause = proctor_pause.ProctorPauseWindow(self)
 
         self.place_on_pc_monitor(0)
         self.show()
+
+    def _add_anatomy_radio(self, vinfo):
+        radio = QtWidgets.QRadioButton(vinfo.name)
+        radio.volume_name = vinfo.name
+        radio.volume_adf = str(vinfo.adf_path)
+        radio.volume_info = vinfo
+        radio.toggled.connect(self.radio_button_volume_selection)
+        self.anatomy_button_group.addButton(radio)
+        # Above the stretch at the end, if it is there yet.
+        stretch_at = self.anatomy_layout.count() - 1
+        if stretch_at >= 0 and self.anatomy_layout.itemAt(stretch_at).spacerItem() is not None:
+            self.anatomy_layout.insertWidget(stretch_at, radio)
+        else:
+            self.anatomy_layout.addWidget(radio)
+        return radio
+
+    def add_volume(self, name, adf_path, icon_path, description=""):
+        """A volume made in the "Add a volume" tab: list it (or update it) and select it."""
+        adf_path = pathlib.Path(adf_path).resolve()
+        for radio in self.anatomy_button_group.buttons():
+            if pathlib.Path(radio.volume_adf).resolve() == adf_path:
+                radio.setText(name)
+                radio.volume_name = name
+                radio.volume_info = gui_setup.VolumeInfo(name, adf_path, pathlib.Path(icon_path), description)
+                break
+        else:
+            vinfo = gui_setup.VolumeInfo(name, adf_path, pathlib.Path(icon_path), description)
+            self.gui_configuration.volumes_info.append(vinfo)
+            radio = self._add_anatomy_radio(vinfo)
+        radio.setChecked(True)
+        self.radio_button_volume_selection_for(radio)
+        self.print_info(f"Added volume {name}; selected it on the Launch tab.")
+
+    def start_simulation_on_selected_volume(self):
+        """From the "Add a volume" tab: start the simulator on the volume just added, with the
+        Main tab's settings. Returns a line for the tab's log."""
+        if self._ambf_process.state() != QProcess.NotRunning:
+            return "The simulator is already running; close it and press Start simulation to drill the new volume."
+        if self.study_mode:
+            return "A study is in progress; the simulator was not started."
+        tabs = self.findChild(QtWidgets.QTabWidget, "tabWidget")
+        if tabs is not None:
+            tabs.setCurrentIndex(0)
+        self.pressed_start_simulation()
+        return f"Starting the simulator on {self.active_volume_name}."
+
+    def radio_button_volume_selection_for(self, radio):
+        self.active_volume_adf = radio.volume_adf
+        self.active_volume_name = radio.volume_name
+        self.active_volume_info = radio.volume_info
+        self.update_preview(self.active_volume_info)
 
     def place_on_pc_monitor(self, screen_index=0):
         """Move the study GUI onto a normal PC monitor, not the VR headset display."""
