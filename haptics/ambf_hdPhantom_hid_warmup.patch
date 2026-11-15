@@ -1,0 +1,65 @@
+From 38c2b1c1a2de3d9b781b504fb3fbbf76c22a373b Mon Sep 17 00:00:00 2001
+From: obi nwosu <obinwosu@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 20:39:49 -0500
+Subject: [PATCH] hdPhantom: warm up the HID Touch before opening it
+
+With the HID Geomagic Touch (USB 2988:0304) and the Sep 2024 Touch
+driver, about half of the first hdInitDevice() calls in a process leave
+the motors off. Nothing reports it: force output reads on, calibration
+OK, no HD error. Whether the motors come on follows a repeatable
+sequence over the open count, and from about the 21st open in a process
+they always do. The simulator opens the drill once, so each launch was
+a coin flip: no force until it was restarted.
+
+Do 20 quick hdInitDevice/hdDisableDevice cycles (no servo loop, no
+force, ~1.2 s) before the real open. Measured by pulsing a resting
+stylus and reading the encoders: 20/20 with the warm-up vs 0/10
+without it through this library, 50/50 loaded the way the simulator
+loads it, plus working force in a real simulator launch.
+
+FIVRS_HAPTIC_WARMUP=0 turns it off; another number sets the cycle
+count. It stops early if no device opens.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../chai3d/extras/hdPhantom/hdPhantom.cpp     | 24 +++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/core/external/chai3d/extras/hdPhantom/hdPhantom.cpp b/core/external/chai3d/extras/hdPhantom/hdPhantom.cpp
+index 4f1299a2..2098f232 100644
+--- a/core/external/chai3d/extras/hdPhantom/hdPhantom.cpp
++++ b/core/external/chai3d/extras/hdPhantom/hdPhantom.cpp
+@@ -185,6 +185,30 @@ _hdLoad(void)
+         HDErrorInfo error;
+         numPhantomDevices = 0;
+ 
++        // Warm-up for the HID Touch (USB 2988:0304) with the Sep 2024 driver:
++        // on about half of the first opens in a process the motors stay off,
++        // with no error reported (force output on, calibration OK). From
++        // about the 21st open on they always come on. 20 quick open/close
++        // cycles first (~1.2 s, no servo loop, no force) made every following
++        // open work: 80/80 vs 14/30 without (2026-11-14, see
++        // ~/haptic_setup/diag/pulse_warmup.txt). FIVRS_HAPTIC_WARMUP=0 turns
++        // it off; any other number sets the cycle count.
++        {
++            int warmup = 20;
++            const char* env = getenv("FIVRS_HAPTIC_WARMUP");
++            if (env) warmup = atoi(env);
++            for (int i = 0; i < warmup; i++)
++            {
++                HHD hWarm = hdInitDevice(HD_DEFAULT_DEVICE);
++                if (HD_DEVICE_ERROR(hdGetError()) || hWarm == HD_INVALID_HANDLE)
++                {
++                    while (HD_DEVICE_ERROR(hdGetError())) {}
++                    break;   // no device: stop warming up
++                }
++                hdDisableDevice(hWarm);
++            }
++        }
++
+         // search for a first device
+         HHD hHD0 = hdInitDevice(HD_DEFAULT_DEVICE);
+ 
+-- 
+2.43.0
+
