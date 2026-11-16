@@ -12,6 +12,8 @@ import graphics_study_mode
 import study_chooser
 import proctor_pause
 import add_volume_tab
+import register_mri_tab
+import haptic_monitor_toggle
 
 import datetime
 from enum import Enum
@@ -358,6 +360,7 @@ class Ui(QtWidgets.QWidget):
         self.button_toggle_vol_smooth = self.findChild(QtWidgets.QPushButton, "button_toggle_vol_smooth")
         self.button_toggle_vol_smooth.clicked.connect(self.study_manager.toggle_volume_smoothening)
         self._build_sim_options_group()
+        self._build_haptic_monitor_group()
 
         self.textEdit_info = self.findChild(QtWidgets.QPlainTextEdit, "textEdit_info")
         self.textEdit_debug = self.findChild(QtWidgets.QPlainTextEdit, "textEdit_debug")
@@ -431,6 +434,13 @@ class Ui(QtWidgets.QWidget):
             self.add_volume_panel = add_volume_tab.AddVolumePanel(
                 self, self.gui_configuration.yaml_data.get("tbone_seg_dir") or None)
             tabs.addTab(self.add_volume_panel, "Add a volume")
+            # "Register MRI": MRI -> CT rigid registration, checked here or in 3D Slicer.
+            self.register_mri_panel = register_mri_tab.RegisterMriPanel(
+                self, self.gui_configuration.yaml_data.get("tbone_seg_dir") or None,
+                slicer_path=self.gui_configuration.yaml_data.get(register_mri_tab.SLICER_SETTING) or None,
+                save=self.gui_configuration.save_value,
+                tumor_python=self.gui_configuration.yaml_data.get("nninteractive_python") or None)
+            tabs.addTab(self.register_mri_panel, "Register MRI")
 
         # Pops up while the participant's pause menu is open (proctor_pause.py).
         self.proctor_pause = proctor_pause.ProctorPauseWindow(self)
@@ -705,6 +715,17 @@ class Ui(QtWidgets.QWidget):
         for widget in (self.check_irrigation, self.check_bone_dust, self.check_suction):
             widget.toggled.connect(self._sim_options_changed)
 
+    def _build_haptic_monitor_group(self):
+        """Haptic device box under Rendering / Instruments: opens the haptic monitor window
+        (haptic_monitor_toggle.py). Saved as haptic_monitor in gui_setup.yaml."""
+        self.haptic_monitor = haptic_monitor_toggle.HapticMonitorToggle(
+            self.gui_configuration, print_info=self.print_info, parent=self)
+        box = self.haptic_monitor.build_group(self)
+        sim_box = self.findChild(QtWidgets.QGroupBox, "groupBox_sim_controls")
+        layout = sim_box.parentWidget().layout()
+        layout.insertWidget(layout.indexOf(sim_box) + 2, box)
+        QTimer.singleShot(0, self.haptic_monitor.restore)
+
     def _sim_option_widgets(self):
         return (self.combo_render_preset, self.combo_dlss, self.combo_samples, self.combo_bounces,
                 self.check_irrigation, self.check_bone_dust, self.check_suction)
@@ -964,6 +985,8 @@ class Ui(QtWidgets.QWidget):
             if self._ambf_log_path.exists():
                 self._ambf_log_path.replace(self._ambf_log_path.with_name("ambf.prev.log"))
             self._ambf_log_path.write_text(f"{self.get_time_as_str()}AMBF [{mode}] {' '.join(self._current_args)}\n")
+            # With the simulator closed the haptic monitor owns the Touch; free it first.
+            self.haptic_monitor.release_for_simulator()
             self._ambf_process.start(ambf_bin, self._current_args)
             if use_rtx:
                 # AMBF's window is left as it opens. Minimizing it before its first
@@ -1524,6 +1547,9 @@ class Ui(QtWidgets.QWidget):
             self._stop_study_logging(save_metadata=True)
         self._stop_fluid()
         self._stop_hud_overlay()
+        self.haptic_monitor.shutdown()
+        if getattr(self, "register_mri_panel", None) is not None:
+            self.register_mri_panel.tumor.shutdown()
         self._ambf_process.close()
         self._pupil_process.close()
         self.study_manager.close()
