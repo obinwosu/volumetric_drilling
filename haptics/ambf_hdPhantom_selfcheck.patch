@@ -1,0 +1,564 @@
+diff --git a/core/external/chai3d/extras/hdPhantom/hdPhantom.cpp b/core/external/chai3d/extras/hdPhantom/hdPhantom.cpp
+index 2098f232..d555f90c 100644
+--- a/core/external/chai3d/extras/hdPhantom/hdPhantom.cpp
++++ b/core/external/chai3d/extras/hdPhantom/hdPhantom.cpp
+@@ -113,6 +113,14 @@ bool servoStarted = false;
+ 
+ // main servo controller callback
+ HDCallbackCode servoCallbackHandle;
++
++// FIVRS: launch self-check of the motors (fivrs_selfcheck.h)
++HDSchedulerHandle fivrsServoSched = 0;
++#include <atomic>
++std::atomic<int> fivrsReopening(0);
++const char* phantomInitName[8] = {0};
++#include "fivrs_selfcheck.h"
++static void fivrsSelfCheckWorker();
+ HDCallbackCode HDCALLBACK servoPhantomDevices(void* pUserData);
+ 
+ 
+@@ -184,6 +192,7 @@ _hdLoad(void)
+         //------------------------------------------------------------------
+         HDErrorInfo error;
+         numPhantomDevices = 0;
++        fivrs_sc::configure();
+ 
+         // Warm-up for the HID Touch (USB 2988:0304) with the Sep 2024 driver:
+         // on about half of the first opens in a process the motors stay off,
+@@ -222,6 +231,9 @@ _hdLoad(void)
+             // add device to list
+             phantomDevices[numPhantomDevices].handle = hHD0;
+             phantomDevices[numPhantomDevices].enabled = true;
++            phantomInitName[numPhantomDevices] = HD_DEFAULT_DEVICE;
++            fivrs_sc::readInfo(numPhantomDevices);
++            fivrs_sc::arm(numPhantomDevices);
+             numPhantomDevices++;
+         }
+ 
+@@ -250,6 +262,9 @@ _hdLoad(void)
+             // add device to list
+             phantomDevices[numPhantomDevices].handle = hHD1;
+             phantomDevices[numPhantomDevices].enabled = true;
++            phantomInitName[numPhantomDevices] = "Phantom2";
++            fivrs_sc::readInfo(numPhantomDevices);
++            fivrs_sc::arm(numPhantomDevices);
+             numPhantomDevices++;
+         }
+ 
+@@ -270,6 +285,9 @@ _hdLoad(void)
+             // add device to list
+             phantomDevices[numPhantomDevices].handle = hHD2;
+             phantomDevices[numPhantomDevices].enabled = true;
++            phantomInitName[numPhantomDevices] = "Phantom3";
++            fivrs_sc::readInfo(numPhantomDevices);
++            fivrs_sc::arm(numPhantomDevices);
+             numPhantomDevices++;
+         }
+ 
+@@ -290,6 +308,9 @@ _hdLoad(void)
+             // add device to list
+             phantomDevices[numPhantomDevices].handle = hHD3;
+             phantomDevices[numPhantomDevices].enabled = true;
++            phantomInitName[numPhantomDevices] = "Phantom4";
++            fivrs_sc::readInfo(numPhantomDevices);
++            fivrs_sc::arm(numPhantomDevices);
+             numPhantomDevices++;
+         }
+ 
+@@ -310,6 +331,9 @@ _hdLoad(void)
+             // add device to list
+             phantomDevices[numPhantomDevices].handle = hHD4;
+             phantomDevices[numPhantomDevices].enabled = true;
++            phantomInitName[numPhantomDevices] = "Right";
++            fivrs_sc::readInfo(numPhantomDevices);
++            fivrs_sc::arm(numPhantomDevices);
+             numPhantomDevices++;
+         }
+ 
+@@ -330,8 +354,16 @@ _hdLoad(void)
+             // add device to list
+             phantomDevices[numPhantomDevices].handle = hHD5;
+             phantomDevices[numPhantomDevices].enabled = true;
++            phantomInitName[numPhantomDevices] = "Left";
++            fivrs_sc::readInfo(numPhantomDevices);
++            fivrs_sc::arm(numPhantomDevices);
+             numPhantomDevices++;
+         }
++
++        if (fivrs_sc::enabled && numPhantomDevices > 0)
++        {
++            std::thread(fivrsSelfCheckWorker).detach();
++        }
+     }
+ }
+ 
+@@ -895,13 +927,14 @@ int __FNCALL hdPhantomGetType(const int a_deviceID,
+ //==========================================================================
+ void __FNCALL hdPhantomStartServo(void)
+ {
++    if (fivrsReopening.load()) return;   // the self-check is re-opening a device
+     if (!servoStarted)
+     {
+         // servo controller has been started
+         servoStarted = true;
+ 
+         // create callback
+-        HDCallbackCode servoCallbackHandle = hdScheduleAsynchronous(
++        fivrsServoSched = hdScheduleAsynchronous(
+         servoPhantomDevices, NULL, HD_DEFAULT_SCHEDULER_PRIORITY);
+ 
+         // start scheduler
+@@ -971,6 +1004,15 @@ HDCallbackCode HDCALLBACK servoPhantomDevices(void* pUserData)
+             double frame[16];
+             hdGetDoublev(HD_CURRENT_TRANSFORM, frame);
+ 
++            // FIVRS motor self-check (raw mm, mm/s)
++            {
++                double vmm[3];
++                HDboolean ink = 1;
++                hdGetDoublev(HD_CURRENT_VELOCITY, vmm);
++                hdGetBooleanv(HD_CURRENT_INKWELL_SWITCH, &ink);
++                fivrs_sc::step(i, numPhantomDevices, &frame[12], vmm, ink != 0);
++            }
++
+             // convert position from [mm] to [m]
+             frame[12] = frame[12] * 0.001;
+             frame[13] = frame[13] * 0.001;
+@@ -1016,6 +1058,9 @@ HDCallbackCode HDCALLBACK servoPhantomDevices(void* pUserData)
+             force[0] = phantomDevices[i].force[0];
+             force[1] = phantomDevices[i].force[1];
+             force[2] = phantomDevices[i].force[2];
++            force[0] += fivrs_sc::dev[i].force[0];
++            force[1] += fivrs_sc::dev[i].force[1];
++            force[2] += fivrs_sc::dev[i].force[2];
+             hdSetDoublev(HD_CURRENT_FORCE, force);
+ 
+             // send torque to end-effector
+@@ -1032,3 +1077,184 @@ HDCallbackCode HDCALLBACK servoPhantomDevices(void* pUserData)
+ 
+     return (HD_CALLBACK_CONTINUE);
+ }
++
++
++//==========================================================================
++// FIVRS motor self-check helper thread (see fivrs_selfcheck.h)
++//==========================================================================
++
++static std::string fivrsJsonPath()
++{
++    const char* e = getenv("FIVRS_HAPTIC_SELFCHECK_FILE");
++    if (e && *e) return e;
++    mkdir("/tmp/fivrs-rtx", 0775);
++    return "/tmp/fivrs-rtx/haptic_selfcheck.json";
++}
++
++static void fivrsHealthLog(const std::string& line)
++{
++    const char* over = getenv("FIVRS_HAPTIC_HEALTH_LOG");   // "" = off, else a file
++    if (over)
++    {
++        if (!*over) return;
++        FILE* f = fopen(over, "a");
++        if (f) { fprintf(f, "%s [hdPhantom] %s\n", fivrs_sc::stamp().c_str(), line.c_str()); fclose(f); }
++        return;
++    }
++    const char* home = getenv("HOME");
++    if (!home) return;
++    std::string dir = std::string(home) + "/.local/share/fivrs";
++    mkdir((std::string(home) + "/.local/share").c_str(), 0775);
++    mkdir(dir.c_str(), 0775);
++    FILE* f = fopen((dir + "/haptic_health.log").c_str(), "a");
++    if (!f) return;
++    fprintf(f, "%s [hdPhantom] %s\n", fivrs_sc::stamp().c_str(), line.c_str());
++    fclose(f);
++}
++
++static void fivrsWriteReport(int lastResult[])
++{
++    using namespace fivrs_sc;
++    bool anyDead = false, anyPending = false, recovering = busy.load() != 0;
++    std::string devs;
++    for (int i = 0; i < numPhantomDevices; i++)
++    {
++        Dev& d = dev[i];
++        bool finalDead = d.result == R_NO_MOVE && d.reopens >= maxReopens;
++        bool willRetry = d.result == R_NO_MOVE && d.reopens < maxReopens;
++        if (finalDead) anyDead = true;
++        if (d.result == R_NONE || d.result == R_DOCKED || willRetry) anyPending = true;
++        char buf[512];
++        snprintf(buf, sizeof(buf),
++                 "%s{\"index\":%d,\"serial\":\"%s\",\"model\":\"%s\",\"result\":\"%s\","
++                 "\"move_mm\":%.3f,\"taps\":%d,\"reopens\":%d,\"docked\":%s,\"tap_n\":%.2f,"
++                 "\"checks\":%d,\"dead_checks\":%d,\"t_s\":%.2f}",
++                 i ? "," : "", i, d.serial, d.model, resultName(d.result), d.lastMove,
++                 d.taps, d.reopens, d.docked ? "true" : "false", tapN,
++                 d.checks, d.deadChecks, now() - tLoad);
++        devs += buf;
++
++        int key = d.result * 1000 + d.checks;
++        if (key != lastResult[i] && !(d.result == R_NONE && d.reopens == 0))
++        {
++            lastResult[i] = key;
++            char line[512];
++            const char* what = "";
++            switch (d.result) {
++            case R_MOVED: what = "motors OK"; break;
++            case R_NO_MOVE: what = willRetry ? "MOTORS DEAD (no movement), re-opening the device"
++                                             : "MOTORS DEAD (no movement), re-open did not help: NO FORCE FEEDBACK"; break;
++            case R_DOCKED: what = "stylus in the inkwell, motors checked once it is lifted"; break;
++            case R_HELD: what = "stylus never still (held?), tap gave no movement: not verified"; break;
++            default: what = "re-checking"; break;
++            }
++            snprintf(line, sizeof(line),
++                     "device %d (SN %s): motor self-check: %s (moved %.2f mm after a %.1f N tap, tap %d, re-opens %d, %.1f s after load)",
++                     i, d.serial, what, d.lastMove, tapN, d.taps, d.reopens, now() - tLoad);
++            fprintf(stderr, "%s FIVRS HAPTIC SELF-CHECK: %s\n",
++                    (d.result == R_NO_MOVE) ? "!!!!!!!!" : "INFO!", line);
++            fivrsHealthLog(line);
++        }
++    }
++    char head[256];
++    snprintf(head, sizeof(head),
++             "{\"pid\":%d,\"wall_time\":%.3f,\"since_load_s\":%.2f,\"status\":\"%s\",\"devices\":[",
++             (int)getpid(), (double)time(NULL), now() - tLoad,
++             anyDead ? "dead" : (recovering ? "recovering" : (anyPending ? "pending" : "ok")));
++    std::string json = std::string(head) + devs + "]}\n";
++    std::string path = fivrsJsonPath(), tmp = path + ".tmp";
++    FILE* f = fopen(tmp.c_str(), "w");
++    if (!f) return;
++    fputs(json.c_str(), f);
++    fclose(f);
++    rename(tmp.c_str(), path.c_str());
++}
++
++// Helper thread only. Stops the scheduler, closes and re-opens device i, restarts.
++// CHAI3D's haptics thread just waits in hdPhantomSetForce meanwhile (~0.1 s).
++static bool fivrsReopen(int i)
++{
++    using namespace fivrs_sc;
++    Dev& d = dev[i];
++    d.reopens++;
++    // Readers outside this library (the drilling plugin's haptic monitor feed)
++    // run hdScheduleSynchronous only while servoStarted is true. With the
++    // scheduler stopped such a call runs in the caller's thread and reads the
++    // closed device: AMBF segfaulted in hd_get_current_or_last_encoder_values
++    // (2026-11-15). So: servoStarted = false, let them notice, then re-open.
++    // hdPhantomStartServo() does nothing while fivrsReopening is set.
++    fivrsReopening.store(1);
++    servoStarted = false;
++    usleep(300000);
++    hdStopScheduler();
++    if (fivrsServoSched) hdUnschedule(fivrsServoSched);
++    while (HD_DEVICE_ERROR(hdGetError())) {}
++    hdDisableDevice(phantomDevices[i].handle);
++    while (HD_DEVICE_ERROR(hdGetError())) {}
++    HHD h = HD_INVALID_HANDLE;
++    for (int attempt = 0; attempt < 5; attempt++)
++    {
++        h = hdInitDevice(phantomInitName[i]);
++        if (!HD_DEVICE_ERROR(hdGetError()) && h != HD_INVALID_HANDLE) break;
++        while (HD_DEVICE_ERROR(hdGetError())) {}
++        h = HD_INVALID_HANDLE;
++        usleep(300000);
++    }
++    bool ok = h != HD_INVALID_HANDLE;
++    if (ok)
++    {
++        hdMakeCurrentDevice(h);
++        hdEnable(HD_FORCE_OUTPUT);
++        char line[160];
++        snprintf(line, sizeof(line), "device %d (SN %s): re-opened (handle %u -> %u)",
++                 i, d.serial, (unsigned)phantomDevices[i].handle, (unsigned)h);
++        fivrsHealthLog(line);
++        phantomDevices[i].handle = h;
++    }
++    else
++    {
++        phantomDevices[i].enabled = false;   // device lost: keep the others running
++        fivrsHealthLog("device " + std::to_string(i) + " (SN " + d.serial + "): re-open FAILED, device dropped");
++    }
++    arm(i);
++    d.result = R_NONE;
++    fivrsServoSched = hdScheduleAsynchronous(servoPhantomDevices, NULL, HD_DEFAULT_SCHEDULER_PRIORITY);
++    hdStartScheduler();
++    while (HD_DEVICE_ERROR(hdGetError())) {}
++    servoStarted = true;
++    fivrsReopening.store(0);
++    return ok;
++}
++
++static void fivrsSelfCheckWorker()
++{
++    using namespace fivrs_sc;
++    int lastResult[8];
++    for (int i = 0; i < 8; i++) lastResult[i] = -1;
++    const double tStart = now();
++    bool wroteFinal = false;
++    while (true)
++    {
++        usleep(20000);
++        if (dirty.exchange(0)) fivrsWriteReport(lastResult);
++        for (int i = 0; i < numPhantomDevices; i++)
++        {
++            Dev& d = dev[i];
++            if (servoStarted && d.phase == DONE && d.result == R_NO_MOVE && d.reopens < maxReopens)
++            {
++                busy.store(1);
++                fivrsWriteReport(lastResult);
++                fivrsReopen(i);
++                busy.store(0);
++                fivrsWriteReport(lastResult);
++            }
++        }
++        // nothing left to do: stop polling after everything is final
++        bool open = false;
++        for (int i = 0; i < numPhantomDevices; i++)
++            if (dev[i].phase != DONE && dev[i].phase != OFF) open = true;
++        if (!open && !wroteFinal && now() - tStart > 1.0) { fivrsWriteReport(lastResult); wroteFinal = true; }
++        if (!open && wroteFinal) usleep(500000);
++        else if (open) wroteFinal = false;
++    }
++}
+diff --git a/core/external/chai3d/extras/hdPhantom/fivrs_selfcheck.h b/core/external/chai3d/extras/hdPhantom/fivrs_selfcheck.h
+new file mode 100644
+index 00000000..c732404b
+--- /dev/null
++++ b/core/external/chai3d/extras/hdPhantom/fivrs_selfcheck.h
+@@ -0,0 +1,237 @@
++// FIVRS launch self-check for the Touch motors (included by hdPhantom.cpp).
++//
++// The HID Geomagic Touch (USB 2988:0304, Sep 2024 driver) sometimes opens with
++// its motor amplifiers off and reports nothing: force output reads on,
++// calibration OK, no HD error. The only way to tell is to push and look.
++//
++// Runs inside the real servo loop, so it tests exactly the handle and scheduler
++// the simulator uses. Per device, once the servo has run 0.6 s:
++//   quiet window 0.25 s  - the stylus must be still (< 0.3 mm), else wait and retry
++//   tap          0.10 s  - +0.8 N up (added to what CHAI3D commands), cut at 100 mm/s
++//   watch        0.15 s  - max displacement from the start of the tap
++// MOVED > 0.1 mm. A stylus in the inkwell cannot move: the check waits until it
++// is lifted and still. If the stylus never stays still (held all the time), the
++// check runs anyway after 20 s and reports "held" instead of "dead".
++//
++// NO MOVE on a free stylus: a helper thread stops the scheduler, closes and
++// re-opens that device, restarts the scheduler and checks again (up to
++// FIVRS_HAPTIC_RECOVER tries, default 3).
++//
++// Result: stderr, /tmp/fivrs-rtx/haptic_selfcheck.json
++// (FIVRS_HAPTIC_SELFCHECK_FILE overrides) and a line in
++// ~/.local/share/fivrs/haptic_health.log.
++// FIVRS_HAPTIC_SELFCHECK=0 turns it off. FIVRS_HAPTIC_SELFCHECK_N sets the tap
++// force (default 0.8 N, max 1.5 N).
++// FIVRS_HAPTIC_SELFCHECK_RECHECK="10,20" taps again at those seconds after load
++// (testing only: is a device ever lost after it passed?).
++
++#ifndef FIVRS_SELFCHECK_H
++#define FIVRS_SELFCHECK_H
++
++#include <atomic>
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <ctime>
++#include <string>
++#include <sys/stat.h>
++#include <thread>
++#include <unistd.h>
++
++namespace fivrs_sc {
++
++enum Phase { WAIT = 0, QUIET, TAP, WATCH, DONE, OFF };
++enum Result { R_NONE = 0, R_MOVED, R_NO_MOVE, R_DOCKED, R_HELD };
++
++struct Dev {
++    int phase = OFF;
++    double tPhase = 0;          // phase start (monotonic s)
++    double tArmed = 0;          // when this round of checking started
++    double base[3] = {0, 0, 0};
++    double quietMax = 0;
++    double moveMax = 0;
++    double lastMove = 0;        // move of the last finished tap
++    bool cut = false;
++    bool docked = false;        // inkwell switch reads "in the inkwell"
++    bool everDocked = false;
++    int taps = 0;
++    int reopens = 0;
++    int result = R_NONE;
++    int checks = 0;             // finished taps-with-a-verdict (first check + re-checks)
++    int recheckIdx = 0;
++    int deadChecks = 0;         // verdicts that were "dead"
++    double force[3] = {0, 0, 0}; // added to CHAI3D's force this tick
++    char serial[64] = "";
++    char model[64] = "";
++};
++
++static Dev dev[8];
++static bool enabled = true;
++static double tapN = 0.8;
++static int maxReopens = 3;
++static std::atomic<int> busy(0);      // helper thread running
++static std::atomic<int> pendingReopen(-1);
++static double tLoad = 0;
++static double recheckAt[8];     // seconds after load (FIVRS_HAPTIC_SELFCHECK_RECHECK="12,30")
++static int nRecheck = 0;
++
++inline double now()
++{
++    timespec t;
++    clock_gettime(CLOCK_MONOTONIC, &t);
++    return t.tv_sec + t.tv_nsec * 1e-9;
++}
++
++inline const char* resultName(int r)
++{
++    switch (r) {
++    case R_MOVED: return "ok";
++    case R_NO_MOVE: return "dead";
++    case R_DOCKED: return "docked";
++    case R_HELD: return "held";
++    default: return "pending";
++    }
++}
++
++inline void configure()
++{
++    tLoad = now();
++    const char* e = getenv("FIVRS_HAPTIC_SELFCHECK");
++    enabled = !(e && atoi(e) == 0);
++    e = getenv("FIVRS_HAPTIC_SELFCHECK_N");
++    if (e) tapN = fmin(1.5, fmax(0.1, atof(e)));
++    e = getenv("FIVRS_HAPTIC_RECOVER");
++    if (e) maxReopens = atoi(e);
++    e = getenv("FIVRS_HAPTIC_SELFCHECK_RECHECK");
++    if (e)
++    {
++        const char* p = e;
++        while (*p && nRecheck < 8)
++        {
++            char* end = 0;
++            double v = strtod(p, &end);
++            if (end == p) break;
++            recheckAt[nRecheck++] = v;
++            p = (*end == ',') ? end + 1 : end;
++        }
++    }
++}
++
++// Called after a device is opened (load time or after a re-open), servo not running.
++inline void arm(int i)
++{
++    Dev& d = dev[i];
++    d.phase = enabled ? WAIT : OFF;
++    d.tPhase = 0;
++    d.tArmed = 0;
++    d.quietMax = d.moveMax = 0;
++    d.cut = false;
++    d.force[0] = d.force[1] = d.force[2] = 0;
++}
++
++inline void readInfo(int i)
++{
++    const char* s = hdGetString(HD_DEVICE_SERIAL_NUMBER);
++    snprintf(dev[i].serial, sizeof(dev[i].serial), "%s", s ? s : "");
++    s = hdGetString(HD_DEVICE_MODEL_TYPE);
++    snprintf(dev[i].model, sizeof(dev[i].model), "%s", s ? s : "");
++    while (HD_DEVICE_ERROR(hdGetError())) {}
++}
++
++inline std::string stamp()
++{
++    timespec t;
++    clock_gettime(CLOCK_REALTIME, &t);
++    tm lt;
++    localtime_r(&t.tv_sec, &lt);
++    char buf[64];
++    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &lt);
++    char out[80];
++    snprintf(out, sizeof(out), "%s.%03ld", buf, t.tv_nsec / 1000000);
++    return out;
++}
++
++static std::atomic<int> dirty(0);
++// Servo thread: only flags it; the helper thread writes the files.
++inline void report(int) { dirty.store(1); }
++
++// Servo thread, inside the device's frame. pos/vel in mm and mm/s (raw HD).
++// inkwell: raw HD_CURRENT_INKWELL_SWITCH. On the Touch it reads false while
++// the stylus sits in the inkwell (checked 2026-11-15: both Touches docked at
++// the calibration pose read false).
++inline void step(int i, int n, const double pos[3], const double vel[3], bool inkwell)
++{
++    Dev& d = dev[i];
++    d.force[0] = d.force[1] = d.force[2] = 0;
++    if (d.phase == OFF) return;
++    const double t = now();
++    if (d.phase == DONE)
++    {
++        // later re-checks of a device that passed (does something kill it after launch?)
++        if ((d.result == R_MOVED || d.result == R_HELD) && d.recheckIdx < nRecheck
++            && t - tLoad >= recheckAt[d.recheckIdx])
++        {
++            d.recheckIdx++;
++            d.phase = WAIT; d.tPhase = t - 0.6; d.tArmed = 0;
++        }
++        return;
++    }
++    if (d.tArmed == 0) { d.tArmed = t; d.tPhase = t; }
++    d.docked = !inkwell;
++    if (d.docked) d.everDocked = true;
++    const double speed = sqrt(vel[0]*vel[0] + vel[1]*vel[1] + vel[2]*vel[2]);
++    auto dist = [&]() {
++        double dx = pos[0]-d.base[0], dy = pos[1]-d.base[1], dz = pos[2]-d.base[2];
++        return sqrt(dx*dx + dy*dy + dz*dz);
++    };
++    const bool forced = (t - d.tArmed) > 20.0;   // held all the time: test anyway
++
++    switch (d.phase) {
++    case WAIT:
++        if (d.docked) {
++            d.tArmed = t;   // the 20 s "held" clock starts once it is lifted
++            if (d.result == R_NONE && t - d.tPhase >= 0.6) { d.result = R_DOCKED; report(n); }
++            return;   // a docked stylus cannot move: wait for it to come out
++        }
++        if (t - d.tPhase < 0.6) return;
++        d.phase = QUIET; d.tPhase = t; d.quietMax = 0;
++        d.base[0] = pos[0]; d.base[1] = pos[1]; d.base[2] = pos[2];
++        return;
++    case QUIET:
++        d.quietMax = fmax(d.quietMax, dist());
++        if (d.quietMax > 0.3 && !forced) { d.phase = WAIT; d.tPhase = t - 0.4; return; }
++        if (d.docked) { d.phase = WAIT; d.tPhase = t; return; }
++        if (t - d.tPhase < 0.25) return;
++        d.phase = TAP; d.tPhase = t; d.moveMax = 0; d.cut = false;
++        d.base[0] = pos[0]; d.base[1] = pos[1]; d.base[2] = pos[2];
++        // fall through to apply the force this tick
++    case TAP:
++        d.moveMax = fmax(d.moveMax, dist());
++        if (speed > 100.0) d.cut = true;
++        if (!d.cut && t - d.tPhase < 0.10) { d.force[1] = tapN; return; }
++        d.phase = WATCH;
++        return;
++    case WATCH:
++        d.moveMax = fmax(d.moveMax, dist());
++        if (t - d.tPhase < 0.25) return;
++        d.taps++;
++        d.lastMove = d.moveMax;
++        if (d.moveMax > 0.1) d.result = R_MOVED;
++        else if (forced) d.result = R_HELD;
++        else d.result = R_NO_MOVE;
++        d.checks++;
++        if (d.result == R_NO_MOVE) d.deadChecks++;
++        d.phase = DONE;
++        if (d.result == R_NO_MOVE && d.reopens < maxReopens) {
++            int expect = -1;
++            pendingReopen.compare_exchange_strong(expect, i);
++        }
++        report(n);
++        return;
++    }
++}
++
++} // namespace fivrs_sc
++
++#endif

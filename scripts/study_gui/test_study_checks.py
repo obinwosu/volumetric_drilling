@@ -164,6 +164,37 @@ def test_problem_log_records_thread_waits():
         assert len(text.splitlines()) >= 3
 
 
+def test_haptic_selfcheck_row():
+    """libhdPhantom's motor self-check: dead after re-open is a failure the proctor sees."""
+    import json
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = pathlib.Path(tmp)
+        _runtime(tmp)
+        started = time.time() - 5
+        assert sc.haptic_selfcheck(started) is None  # no check for this launch
+        path = tmp / sc.HAPTIC_SELFCHECK
+
+        def put(status, *results, reopens=0):
+            devs = [{"index": i, "result": r, "reopens": reopens} for i, r in enumerate(results)]
+            path.write_text(json.dumps({"status": status, "devices": devs}))
+
+        put("ok", "ok", "ok")
+        assert sc.haptic_selfcheck(started)[0] == sc.OK
+        put("ok", "ok", "ok", reopens=1)
+        assert "re-open" in sc.haptic_selfcheck(started)[1]
+        put("recovering", "dead", "ok")
+        assert sc.haptic_selfcheck(started)[0] == sc.WAIT
+        put("dead", "dead", "ok")
+        state, detail = sc.haptic_selfcheck(started)
+        assert state == sc.FAIL and "drill" in detail and "suction" not in detail
+        put("pending", "docked", "ok")
+        assert "inkwell" in sc.haptic_selfcheck(started)[1]
+        # A file from an earlier launch is ignored.
+        stamp = started - 60
+        os.utime(path, (stamp, stamp))
+        assert sc.haptic_selfcheck(started) is None
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
@@ -175,3 +206,4 @@ if __name__ == "__main__":
                 failures += 1
                 print(f"FAIL {name}: {error}")
     sys.exit(1 if failures else 0)
+
