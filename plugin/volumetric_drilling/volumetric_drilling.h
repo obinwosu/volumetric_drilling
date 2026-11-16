@@ -232,7 +232,11 @@ protected:
     bool boneSolidAt(const cVector3d& pWorld);
     bool boneAlongRay(const cVector3d& from, const cVector3d& dir, double maxDist, double& tHit);
     bool drillClearOfBone(const cVector3d& tip);
-    bool drillTipNearBone(double depthHint, cVector3d& tipOut);
+    // centred: on the middle of the view (double-tap recenter); otherwise right of it
+    // (start-up placement, the suction starts near the middle).
+    bool drillTipNearBone(double depthHint, cVector3d& tipOut, bool centred = false);
+    // The middle of the main camera's view at the depth of the volume centre.
+    cVector3d viewCentreAtVolumeDepth();
     void requestSuctionReposition();
 
 private:
@@ -331,6 +335,9 @@ private:
     double m_leftPedalDownTime = -1.0;
     bool m_leftPedalLongFired = false;
     bool m_leftPedalZoomed = false;  // the microscope button was held during this press
+    // Middle pedal outside the pause menu: a tap steps to the next burr size (2026-11-16).
+    // Not when the press began in the menu (it selected there) or zoomed.
+    bool m_middlePedalSizeTap = false;
 
     // Study mode: /tmp/fivrs-rtx/study_drill_lock stops the drill (timed trial over).
     bool m_studyDrillLock = false;
@@ -406,6 +413,14 @@ private:
     double m_btn2LastClickTime = -1.0;
     bool m_suctionBtn2Prev = false;
     double m_suctionBtn2LastClickTime = -1.0;
+    // Double-tap filter (2026-11-16: one double-tap sometimes recentered twice). A press
+    // after a release shorter than kTapBounceSec is switch bounce, and presses before
+    // ...TapLockUntil (just after a recenter) start no new double-tap.
+    double m_btn2ReleaseTime = -1.0;
+    double m_btn2TapLockUntil = -1.0;
+    double m_suctionBtn2ReleaseTime = -1.0;
+    double m_suctionBtn2TapLockUntil = -1.0;
+    void stepBurrSizeUp();
     bool m_rtxView = false;
     bool m_rtxWindowSized = false;
     double m_rtxStatusTimer = 0.0;

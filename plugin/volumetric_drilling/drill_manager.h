@@ -140,9 +140,12 @@ public:
     void reset();
 
     // Teleport the drill into view, outside the volume AABB. Returns false if skipped.
-    bool snapToCameraView(const cVector3d& volumeOrigin,
+    // aimPoint: where the burr is aimed (a recenter passes the middle of the view).
+    // offCentre nudges the aim a little right and down of it.
+    bool snapToCameraView(const cVector3d& aimPoint,
                           const cVector3d& volumeDims,
-                          const cTransform& volumePose);
+                          const cTransform& volumePose,
+                          bool offCentre = true);
     // Same placement for the suction tip. Does not move the drill.
     bool snapSuctionToCameraView(const cVector3d& volumeOrigin,
                                  const cVector3d& volumeDims,

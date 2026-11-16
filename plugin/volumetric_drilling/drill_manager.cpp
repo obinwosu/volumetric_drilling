@@ -838,7 +838,8 @@ static cVector3d volumeLocalToWorld(const cVector3d& pLocal, const cTransform& v
 
 bool DrillManager::snapToCameraView(const cVector3d& volumeOrigin,
                                     const cVector3d& volumeDims,
-                                    const cTransform& volumePose)
+                                    const cTransform& volumePose,
+                                    bool offCentre)
 {
     if (!m_mainCamera){
         return false;
@@ -852,7 +853,10 @@ bool DrillManager::snapToCameraView(const cVector3d& volumeOrigin,
     cVector3d right = m_mainCamera->getRightVector();
     cVector3d up = m_mainCamera->getUpVector();
     // Aim slightly off-center so the burr sits in view without covering volume center.
-    cVector3d aim = volumeOrigin + right * (0.05 * volR) + up * (-0.04 * volR);
+    cVector3d aim = volumeOrigin;
+    if (offCentre){
+        aim += right * (0.05 * volR) + up * (-0.04 * volR);
+    }
     cVector3d worldDir = aim - camPos;
     if (worldDir.length() < 1e-6){
         worldDir = cVector3d(1.0, 0.0, 0.0);

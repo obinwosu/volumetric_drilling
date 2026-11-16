@@ -38,7 +38,7 @@ Soft tissue work (`scripts/soft_tissue/`: soft ear demo, fast C++ solver, atlas/
 
 - Do not regress suction, dust, drill pose, lighting, or voxel authority except as needed for the flake work below.
 - Spacebar must **not** activate the drill.
-- Suction is the rigid body `frazier_suction`. Button mappings stay unchanged, except the pause menu, which the user changed on 2026-11-08: tap Stylus 2 = down, tap Stylus 1 = up, left pedal = select, middle pedal = back / close (the drill then waits for the pedal to be released). Double-tap Stylus 1 still opens the menu. The study tutorial no longer asks for a burr change.
+- Suction is the rigid body `frazier_suction`. Button mappings stay unchanged, except the pause menu, which the user changed on 2026-11-08: tap Stylus 2 = down, tap Stylus 1 = up, left pedal = select, middle pedal = back / close (the drill then waits for the pedal to be released). Double-tap Stylus 1 still opens the menu. The study tutorial no longer asks for a burr change. 2026-11-16 (user): a tap of the middle pedal outside the pause menu steps to the next burr size (1 -> 2 -> 4 -> 6 -> 1 mm, on release; not with the microscope button held, which zooms out, and not for a press that began in the menu). Double-tap recenter puts the burr on the middle of the view (start-up placement stays right of centre); stylus taps ignore presses after a < 40 ms release (bounce) and for 0.45 s after a recenter, so one double-tap recenters once.
 - World down is `(0, 0, -1)`.
 - Do not change bone rendering or AMBF voxel removal except for the authorized flake fix.
 - Irrigation is a **film on bone**, not SPH. Do not port Mantaflow, SPlisHSPlasH, DualSPHysics, FluidX3D, Taichi, tyFlow, or Flowmap Generator, and do not silently substitute SPH.

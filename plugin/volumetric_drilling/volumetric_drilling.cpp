@@ -328,13 +328,13 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
 
     if (m_footpedal.init(footpedal_fd) != -1){
         cerr << "INFO! FOUND FOOTPEDAL INTERFACE " << footpedal_fd << endl;
-        cerr << "INFO! Pedal map (a/b/c or F17/F18/F19): left=tap next / hold pause menu / tap down in menu / hold to close menu, middle=select in menu / zoom out with microscope button, right=hold-to-run drill" << endl;
+        cerr << "INFO! Pedal map (a/b/c or F17/F18/F19): left=tap next / hold pause menu / tap down in menu / hold to close menu, middle=tap next burr size / select in menu / zoom out with microscope button, right=hold-to-run drill" << endl;
     }
     else{
         cerr << "WARNING! NO FOOTPEDAL /dev/input DEVICE OPEN "
              << "(using keyboard a/b/c, + key 1 cam-clutch)\n";
     }
-    cerr << "INFO! Pedals: hold right=drill; hold left=pause menu; key 1 (microscope) + left/middle = zoom in/out; Ctrl + stylus action button = orbit; in the pause menu tap left=down, hold left=close (Yes/No), middle=select (each list ends in Back); key 1=cam clutch" << endl;
+    cerr << "INFO! Pedals: hold right=drill; hold left=pause menu; tap middle=next burr size; key 1 (microscope) + left/middle = zoom in/out; Ctrl + stylus action button = orbit; in the pause menu tap left=down, hold left=close (Yes/No), middle=select (each list ends in Back); key 1=cam clutch" << endl;
 
     m_gazeMarkerController.init(m_worldPtr, &m_panelManager);
     cerr << "INFO! GAZE MARKER INITIALIZED \n";
@@ -1444,6 +1444,27 @@ void afVolmetricDrillingPlugin::makeVRWindowFullscreen(afCameraPtr vrCam, int mo
     cerr << "\t\t Setting the Window on the VR Monitor to fullscreen \n" ;
 }
 
+// A stylus button release shorter than this is contact bounce, not a tap.
+static const double kTapBounceSec = 0.04;
+
+void afVolmetricDrillingPlugin::stepBurrSizeUp()
+{
+    vector<int> order = burrSizeOrder();
+    if (order.empty()){
+        return;
+    }
+    int k = 0;
+    for (int i = 0; i < static_cast<int>(order.size()); i++){
+        if (order[i] == m_drillManager.m_activeDrillIdx){
+            k = (i + 1) % static_cast<int>(order.size());
+        }
+    }
+    m_drillManager.setActiveDrillIndex(order[k]);
+    if (m_drillManager.m_activeDrill){
+        showNotice("Burr size: " + m_drillManager.m_activeDrill->m_name);
+    }
+}
+
 void afVolmetricDrillingPlugin::updateButtons(){
     m_footpedal.poll();
 
@@ -1468,6 +1489,7 @@ void afVolmetricDrillingPlugin::updateButtons(){
     const bool leftEdge = (!m_xFootStylePrev && pedalLeftHeld);
     const bool leftRelease = (m_xFootStylePrev && !pedalLeftHeld);
     const bool middleEdge = (!m_pedalDrillPrev && pedalMiddleHeld);
+    const bool middleRelease = (m_pedalDrillPrev && !pedalMiddleHeld);
     m_xFootStylePrev = pedalLeftHeld;
     m_xFootSizePrev = pedalRightHeld;
     m_pedalDrillPrev = pedalMiddleHeld;
@@ -1525,6 +1547,21 @@ void afVolmetricDrillingPlugin::updateButtons(){
             }
         }
         m_leftPedalDownTime = -1.0;
+    }
+    // Middle pedal outside the pause menu: a tap (on release) steps to the next burr
+    // size, smallest to largest, then back to the smallest. Not with the microscope
+    // button (zoom out), and not for a press that began in the menu.
+    if (middleEdge){
+        m_middlePedalSizeTap = !m_vrHudVisible && !scopeHeld;
+    }
+    if (pedalMiddleHeld && scopeHeld){
+        m_middlePedalSizeTap = false;
+    }
+    if (middleRelease){
+        if (m_middlePedalSizeTap && !m_vrHudVisible){
+            stepBurrSizeUp();
+        }
+        m_middlePedalSizeTap = false;
     }
     // Middle pedal in the pause menu: select (Back and Resume are rows of the menu).
     if (middleEdge && m_vrHudVisible){
@@ -1611,10 +1648,15 @@ void afVolmetricDrillingPlugin::updateButtons(){
         const double doubleClickSec = 0.45;
         double now = glfwGetTime();
         bool suctionDoubleTapped = false;
-        if (suctionBtn2 && !m_suctionBtn2Prev){
+        if (!suctionBtn2 && m_suctionBtn2Prev){
+            m_suctionBtn2ReleaseTime = now;
+        }
+        const bool suctionBounce = m_suctionBtn2ReleaseTime >= 0.0 && (now - m_suctionBtn2ReleaseTime) < kTapBounceSec;
+        if (suctionBtn2 && !m_suctionBtn2Prev && !suctionBounce && now >= m_suctionBtn2TapLockUntil){
             if (m_suctionBtn2LastClickTime >= 0.0 && (now - m_suctionBtn2LastClickTime) <= doubleClickSec){
                 requestSuctionReposition();
                 m_suctionBtn2LastClickTime = -1.0;
+                m_suctionBtn2TapLockUntil = now + doubleClickSec;
                 suctionDoubleTapped = true;
             }
             else{
@@ -1674,10 +1716,15 @@ void afVolmetricDrillingPlugin::updateButtons(){
                 else{
                     // Double-tap the action button: snap drill burr into main_camera view.
                     bool btn2DoubleTapped = false;
-                    if (btn2 && !m_btn2Prev){
+                    if (!btn2 && m_btn2Prev){
+                        m_btn2ReleaseTime = now;
+                    }
+                    const bool bounce = m_btn2ReleaseTime >= 0.0 && (now - m_btn2ReleaseTime) < kTapBounceSec;
+                    if (btn2 && !m_btn2Prev && !bounce && now >= m_btn2TapLockUntil){
                         if (m_btn2LastClickTime >= 0.0 && (now - m_btn2LastClickTime) <= doubleClickSec){
                             requestDrillReposition();
                             m_btn2LastClickTime = -1.0;
+                            m_btn2TapLockUntil = now + doubleClickSec;
                             btn2DoubleTapped = true;
                         }
                         else{
@@ -2094,7 +2141,7 @@ bool afVolmetricDrillingPlugin::drillClearOfBone(const cVector3d& tip)
     return true;
 }
 
-bool afVolmetricDrillingPlugin::drillTipNearBone(double depthHint, cVector3d& tipOut)
+bool afVolmetricDrillingPlugin::drillTipNearBone(double depthHint, cVector3d& tipOut, bool centred)
 {
     if (!m_mainCamera || !m_volumeObject){
         return false;
@@ -2123,9 +2170,13 @@ bool afVolmetricDrillingPlugin::drillTipNearBone(double depthHint, cVector3d& ti
     const double burrR = m_drillManager.m_activeDrill ? m_drillManager.m_activeDrill->m_size * 0.5 : 0.02;
     const double gap = burrR + kBoneGapMm * m_drillManager.m_units_mmToSim;
     const double backStep = 0.5 * m_drillManager.m_units_mmToSim;
-    // Right of the centre first, as before (the burr does not cover the middle of the
-    // view), then closer in if the bone is not there.
-    const double fractions[4] = {0.5, 0.35, 0.2, 0.0};
+    // Start-up: right of the centre first (the suction starts near the middle), then
+    // closer in if the bone is not there. Recenter: the middle of the view, then just
+    // beside it if the shaft would sit in bone there (2026-11-15: it used the start-up
+    // list and landed a quarter of the screen right of centre).
+    const std::vector<double> fractions = centred
+        ? std::vector<double>{0.0, 0.08, -0.08}
+        : std::vector<double>{0.5, 0.35, 0.2, 0.0};
     for (double f : fractions){
         cVector3d dir = (camPos + look * depth + right * (halfWidth * f)) - camPos;
         dir.normalize();
@@ -2146,6 +2197,17 @@ bool afVolmetricDrillingPlugin::drillTipNearBone(double depthHint, cVector3d& ti
     return false;
 }
 
+cVector3d afVolmetricDrillingPlugin::viewCentreAtVolumeDepth()
+{
+    const cVector3d camPos = m_mainCamera->getLocalPos();
+    cVector3d look = m_mainCamera->getLookVector();
+    if (look.length() < 1e-6){
+        return m_volumeLookAt;
+    }
+    look.normalize();
+    return camPos + look * cMax(look.dot(m_volumeLookAt - camPos), 0.5);
+}
+
 void afVolmetricDrillingPlugin::requestDrillReposition(bool byUser)
 {
     if (!m_volumeObject || !m_mainCamera){
@@ -2155,12 +2217,15 @@ void afVolmetricDrillingPlugin::requestDrillReposition(bool byUser)
 
     cTransform poseFrom = m_drillManager.m_T_d;
     cVector3d nearBone;
-    if (drillTipNearBone(0.0, nearBone)){
+    if (drillTipNearBone(0.0, nearBone, true)){
         m_drillManager.placeDrillTip(nearBone);
     }
     else{
+        // No bone on the middle of the view: still the middle of the view, in front of
+        // the volume box (it used to aim at the volume centre, off-centre in most views).
         cVector3d dims = m_volumeObject->getDimensions();
-        if (!m_drillManager.snapToCameraView(m_volumeLookAt, dims, m_volumeObject->getLocalTransform())){
+        if (!m_drillManager.snapToCameraView(viewCentreAtVolumeDepth(), dims,
+                                             m_volumeObject->getLocalTransform(), false)){
             showNotice("Cannot reposition drill");
             return;
         }
@@ -3301,6 +3366,7 @@ string afVolmetricDrillingPlugin::controlHelpText(bool paused) const
     s +=
             "  Camera clutch          Hold 1 (microscope)  or  Alt (HMD)\n"
             "  Drill (hold-to-run)    Right pedal (c)\n"
+            "  Burr size (next)       Tap middle pedal (b)\n"
             "  Burr type / size       Pause menu (hold left pedal)\n"
             "  Suction size           F  (7 / 5 / 3 Fr)\n"
             "  Place WiVRn scene      Hold F10 (drag) / F11 lap / F12 look\n"
