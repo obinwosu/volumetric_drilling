@@ -82,7 +82,8 @@ def test_labels_use_anatomy_a_colors():
     hexes = {name: "%02x%02x%02x" % rgb for name, rgb in worker.LABELS.values()}
     assert hexes["Bone"] == "fff9db" and hexes["EAC"] == "ffe1d6"
     assert hexes["Malleus"] == "e900ff" and hexes["Incus"] == "00ff95" and hexes["Stapes"] == "3f00ff"
-    assert hexes["Sinus + Dura"] == "6eb8d1" and hexes["Facial Nerve"] == "f4d631"
+    assert hexes["Sigmoid Sinus"] == "2864a0" and hexes["Dura"] == "aad7e8"  # split, darker / lighter than 6eb8d1
+    assert hexes["Facial Nerve"] == "f4d631"
 
 
 if __name__ == "__main__":

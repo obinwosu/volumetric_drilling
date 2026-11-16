@@ -21,3 +21,8 @@ labels:
   ffe1d6: eac                      # 255,225,214  Outer ear Canal
   bdffa9: carotis_interna          # 189,255,169  Carotis Interna
   ffea87: sinus_dura               # 255,234,135  Sinus_Dura
+  # add_tumor_to_volume.py
+  be6eaa: vestibular_schwannoma    # 190,110,170  Vestibular schwannoma
+  # tbone nnU-Net sigmoid sinus and dura, split 2026-11-15 (were 6eb8d1 together)
+  2864a0: sigmoid_sinus            # 40,100,160  Sigmoid Sinus
+  aad7e8: dura                     # 170,215,232  Dura

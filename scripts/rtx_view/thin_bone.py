@@ -36,7 +36,7 @@ FAR_MM = 6.0
 FAR_VALUE = 99.0
 GROUPS = (
     ("nerve", ("facial_nerve", "chorda_tympani")),
-    ("dura", ("sinus_dura",)),
+    ("dura", ("sinus_dura", "dura", "sigmoid_sinus")),  # split volumes name them apart
     ("otic", ("inner_ear", "scala_tympani", "scala_vestibuli", "labyrinth")),
 )
 

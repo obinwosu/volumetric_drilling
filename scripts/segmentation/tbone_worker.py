@@ -48,7 +48,8 @@ METERS_PER_AU = 0.049664
 # Model label -> (name, color). Colors are tbone_colortable.csv as the JHU
 # anatomies A-I store them (channels truncated, e.g. malleus e900ff), so
 # materials in the tuner already match.
-# Sigmoid sinus and dura share one color there ("Sinus + Dura").
+# Sigmoid sinus and dura shared one color there ("Sinus + Dura", 6eb8d1); since 2026-11-15 they are
+# split (user's choice): dura a lighter blue, the sigmoid sinus a darker one.
 LABELS = {
     1: ("Bone", (255, 249, 219)),
     2: ("Malleus", (233, 0, 255)),
@@ -62,8 +63,8 @@ LABELS = {
     10: ("Facial Nerve", (244, 214, 49)),
     11: ("Chorda Tympani", (151, 131, 29)),
     12: ("ICA", (216, 100, 79)),
-    13: ("Sinus + Dura", (110, 184, 209)),
-    14: ("Sinus + Dura", (110, 184, 209)),
+    13: ("Sigmoid Sinus", (40, 100, 160)),
+    14: ("Dura", (170, 215, 232)),
     15: ("Vestibular Aqueduct", (91, 98, 123)),
     16: ("Mandible", (100, 0, 0)),
     17: ("EAC", (255, 225, 214)),
