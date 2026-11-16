@@ -176,6 +176,11 @@ volume33:
   icon_path: ./assets/left_dehiscence_ct.png
   name: "Left Dehiscence CT"
   description: 'Left Dehiscence CT: left ear, segmented from CT by tbone nnU-Net (fold 0, 0.196 mm), 2026-11-13.'
+volume34:
+  adf_path: ../../ADF/volume_left_dehiscence_ct_vs_0p196mm.yaml
+  icon_path: ./assets/left_dehiscence_ct_vs.png
+  name: "Left Dehiscence CT + VS"
+  description: 'Left Dehiscence CT with the vestibular schwannoma (CPA/IAC + middle fossa parts) from the registered C+ T1; temporal bone labels as Left Dehiscence CT inside its box, 2026-11-15.'
 volumes:
 - volume1
 - volume2
@@ -207,3 +212,5 @@ volumes:
 - volume31
 - volume32
 - volume33
+- volume34
+haptic_monitor: true
