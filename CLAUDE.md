@@ -151,7 +151,7 @@ Launcher tab **Add a volume** (`scripts/study_gui/add_volume_tab.py`) runs `scri
 - First volume: **Left Dehiscence CT** (volume33) from `~/Downloads/pcseg.zip` (unzipped to `~/Downloads/pcseg_dicom`). Orientation matches Anatomy D; not yet drilled in the simulator.
 - Test: `QT_QPA_PLATFORM=offscreen python3 scripts/study_gui/test_add_volume_tab.py`.
 
-## Register MRI -> CT (built 2026-11-15, not committed)
+## Register MRI -> CT (built 2026-11-15, committed dd1366f)
 
 Launcher tab **Register MRI** (`scripts/study_gui/register_mri_tab.py`) runs `scripts/registration/mri_ct_worker.py` in the tbone-seg venv (SimpleITK + torch; same `@progress/@result/@error` protocol as `tbone_worker.py`). Rigid only. Results: `resources/intermediate_volumes/registration/<stamp>/` (`ct.nii.gz`, `mri.nii.gz`, `mri_to_ct.tfm` = ITK CT point -> MRI point, `mri_on_ct.nii.gz`, previews, `registration.json`).
 
@@ -169,7 +169,15 @@ Launcher tab **Register MRI** (`scripts/study_gui/register_mri_tab.py`) runs `sc
 - **Tumor in the simulator** (2026-11-15): anatomy **"Left Dehiscence CT + VS"** (volume34, `ADF/volume_left_dehiscence_ct_vs_0p196mm.yaml`, 319x316x258 at 0.196 mm), made by `scripts/segmentation/add_tumor_to_volume.py` (tbone venv). The original 50 mm box held only half the tumor, so the box grows to ear box + tumor (62x62x51 mm). Inside the old box: the existing Left Dehiscence labels voxel for voxel (`--ear-box-from`; checked 96.8% identical, all differences are tumor except 8 voxels); outside: the tbone model on the bigger box (`--outside-from` reuses that run, `..._tumor_full_model`). Tumor label `be6eaa` = `vestibular_schwannoma` (added to `ADF/color/volume_labels.yaml`), 9.75 mL, smoothed sigma 1 mm (2.5 mm T1 slices terraced); it replaces empty, IAC, vestibular/cochlear nerves and the model's ~3 mm dura band, not bone/labyrinth/facial nerve/sinus/carotid/ossicles. `--keep-pose-of` moves the ADF position (8.7 mm) so the ear lies where the original anatomy has it (saved views still fit). Memory: the model's 18-class float32 output is ~220 bytes/voxel on the host; 208 M voxels OOM-killed the app's process (24.7 GB of 30), so the script segments in pieces of <= 80 M voxels with 8 mm overlap; run it under `systemd-run --user --scope -p MemoryMax=20G`. The tumor is ordinary voxels: drillable and touchable like bone in AMBF; in RTX it gets the fallback material (no tuned look yet).
 - Not built: using the registered MRI in the simulator beyond the tumor (e.g. nerves / soft tissue labels).
 
-## Haptic monitor (built 2026-11-14, not committed)
+## Lab machine: after pulling the 2026-11-15 push (aea62b9)
+
+1. `git pull` on `feature/graphics-compare`, then `git submodule update feedback_system`.
+2. Rebuild: `scripts/study_gui/rebuild.sh` (plugin: haptic monitor feed + RTX voxel sync fix; exits 1 on `COLCON_TRACE: unbound variable` after a good build), `scripts/build_openxr_eyepiece.sh`, `scripts/haptic_monitor/build_probe.sh`.
+3. Tumor tools (needs internet, ~10 GB disk, ~30 min for the Zenodo download): `scripts/segmentation/setup_tbone_seg.sh` if not done yet, then `scripts/segmentation/setup_tumor_seg.sh`. Weights are not in git (5.4 GB + 393 MB).
+4. 3D Slicer (optional, for Open in 3D Slicer): unpack Slicer 5.12.4 Linux from download.slicer.org into `~` (or set `slicer_path` in gui_setup.yaml).
+5. Nothing to build for the anatomies: Left Dehiscence CT (sinus/dura split) and Left Dehiscence CT + VS are in git. Making a new tumor anatomy with `add_tumor_to_volume.py` needs ~20 GB of host RAM even in pieces; registration and the tumor box fit the 5060.
+
+## Haptic monitor (built 2026-11-14, committed 2026-11-15)
 
 Separate window, toggled from the launcher's Advanced tab (**Haptic device** box, saved as `haptic_monitor:` in `gui_setup.yaml`; `scripts/study_gui/haptic_monitor_toggle.py`). Window: `scripts/haptic_monitor/haptic_monitor.py` (also runs on its own).
 
