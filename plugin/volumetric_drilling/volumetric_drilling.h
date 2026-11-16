@@ -47,6 +47,7 @@
 #include "camera_panel_manager.h"
 #include "wave_generator.h"
 #include "haptic_safety.h"
+#include "haptic_monitor_feed.h"
 #include "pause_pointer.h"
 #include "gaze_marker_controller_jagged.h" // change bewteen gaze_marker_controller_smooth vs. gaze_marker_controller_jagged
 #include "drill_manager.h"
@@ -413,6 +414,8 @@ private:
     double m_hapticHoldSeconds = 0.0;
     // Rate limit + oscillation cutoff on the drill force (haptic_safety.h).
     HapticSafety m_hapticSafety;
+    // Device data + health log for the haptic monitor window (haptic_monitor_feed.h).
+    HapticMonitorFeed m_hapticMonitorFeed;
     cVector3d m_heldSuctionForce = cVector3d(0.0, 0.0, 0.0);
     double m_suctionHoldSeconds = 0.0;
 

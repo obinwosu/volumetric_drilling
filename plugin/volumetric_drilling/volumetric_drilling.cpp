@@ -422,6 +422,7 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
     m_panelManager.setVisible(m_calibrationWarningLabel, false);
     m_isCountdownActive = false;
     m_countdownTimer = 0.0;
+    m_hapticMonitorFeed.start();
     return 1;
 }
 
@@ -1154,6 +1155,11 @@ void afVolmetricDrillingPlugin::physicsUpdate(double dt){
             m_drillManager.m_suctionDevice->setForce(cVector3d(0.0, 0.0, 0.0));
         }
         m_suctionHoldSeconds = 0.0;
+        {
+            const double zero[3] = {0.0, 0.0, 0.0};
+            m_hapticMonitorFeed.physicsTick(dt, zero, zero, zero, true, false, false, false,
+                                            false, m_hapticSafety.trips(), m_drillManager.m_suctionTracked);
+        }
         if (m_drillManager.m_audioSource && m_drillManager.m_audioState == AudioState::PLAYING){
             m_drillManager.m_audioSource->stop();
             m_drillManager.m_audioState = AudioState::STOPPED;
@@ -1197,7 +1203,14 @@ void afVolmetricDrillingPlugin::physicsUpdate(double dt){
         if (m_storedColor != m_zeroColor){
             if (m_drillManager.m_isOn){
                 int removalCount = cMin(m_drillManager.m_activeDrill->getVoxelRemovalThreshold(), (int)contact->m_events.size());
-                m_drillManager.m_drillingPub->clearVoxelMsg();
+                // In RTX mode the graphics thread (serviceRtxFlush) owns the
+                // voxel message. Clearing it here raced with that flush and
+                // sometimes published a batch empty: the RTX view then kept
+                // bone AMBF had deleted, as floating pieces the drill could
+                // not touch.
+                if (!m_rtxView){
+                    m_drillManager.m_drillingPub->clearVoxelMsg();
+                }
                 m_mutexVoxel.acquire();
                 for (int cIdx = 0 ; cIdx < removalCount ; cIdx++){
                     cVector3d ct(contact->m_events[cIdx].m_voxelIndexX, contact->m_events[cIdx].m_voxelIndexY, contact->m_events[cIdx].m_voxelIndexZ);
@@ -1276,6 +1289,7 @@ void afVolmetricDrillingPlugin::physicsUpdate(double dt){
     }
 
     // Every drill force passes the safety guard. What is published and heard is what was sent.
+    const cVector3d requestedForce = force;
     force = m_hapticSafety.filter(force, dt);
     if (m_hapticSafety.takeJustTripped()){
         cerr << "WARNING! HAPTIC SAFETY: unstable bone contact, drill force faded to zero (trip "
@@ -1283,6 +1297,7 @@ void afVolmetricDrillingPlugin::physicsUpdate(double dt){
              << HapticSafety::kRearmSeconds << " s." << endl;
     }
     m_drillManager.m_toolCursorList[0]->setDeviceLocalForce(force);
+    cVector3d monitorSuctionForce(0.0, 0.0, 0.0);
     if (m_drillManager.m_suctionTracked && m_drillManager.m_suctionDevice && m_mainCamera){
         // Same proxy-force path as the drill: world force, then into the stylus frame.
         m_drillManager.computeSuctionInteractionForces();
@@ -1308,6 +1323,16 @@ void afVolmetricDrillingPlugin::physicsUpdate(double dt){
             }
         }
         m_drillManager.m_suctionDevice->setForce(suctionForce);
+        monitorSuctionForce = suctionForce;
+    }
+    {
+        const double requested[3] = {requestedForce.x(), requestedForce.y(), requestedForce.z()};
+        const double sent[3] = {force.x(), force.y(), force.z()};
+        const double suction[3] = {monitorSuctionForce.x(), monitorSuctionForce.y(), monitorSuctionForce.z()};
+        m_hapticMonitorFeed.physicsTick(dt, requested, sent, suction, false, skipContact,
+                                        anyCursorInContact, m_drillManager.m_isOn,
+                                        m_hapticSafety.tripped(), m_hapticSafety.trips(),
+                                        m_drillManager.m_suctionTracked);
     }
     m_drillManager.m_drillingPub->publishForceFeedback(force, force, m_worldPtr->getCurrentTimeStamp());
     double maxF = m_drillManager.m_hapticDevice->getSpecifications().m_maxLinearForce;
@@ -4704,6 +4729,7 @@ void afVolmetricDrillingPlugin::reset(){
 
 bool afVolmetricDrillingPlugin::close()
 {
+    m_hapticMonitorFeed.stop();
     m_drillManager.cleanup();
     return true;
 }
