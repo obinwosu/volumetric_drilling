@@ -988,6 +988,7 @@ class Ui(QtWidgets.QWidget):
             # With the simulator closed the haptic monitor owns the Touch; free it first.
             self.haptic_monitor.release_for_simulator()
             self._ambf_process.start(ambf_bin, self._current_args)
+            self._start_motor_check_watch()
             if use_rtx:
                 # AMBF's window is left as it opens. Minimizing it before its first
                 # frame stopped its graphics loop (no headset, no camera) until it
@@ -1557,6 +1558,48 @@ class Ui(QtWidgets.QWidget):
 
     def get_time_as_str(self):
         return "[" + datetime.datetime.now().strftime("%H:%M:%S") + "] - "
+
+    def _start_motor_check_watch(self):
+        """Report libhdPhantom's Touch motor self-check (study_checks.haptic_selfcheck).
+
+        The HID drill Touch can open with dead motors and no error; the library taps
+        the stylus, re-opens it if it did not move, and writes the verdict. A launch
+        that still has dead motors gets a warning box; the proctor restarts it.
+        """
+        import study_checks
+        started = time.time()
+        timer = getattr(self, "_motor_check_timer", None)
+        if timer is None:
+            timer = self._motor_check_timer = QTimer(self)
+            timer.setInterval(1000)
+            timer.timeout.connect(self._poll_motor_check)
+        self._motor_check_started = started
+        self._motor_check_said = None
+        self._motor_check_checker = study_checks.haptic_selfcheck
+        timer.start()
+
+    def _poll_motor_check(self):
+        elapsed = time.time() - self._motor_check_started
+        if self._ambf_process.state() != QProcess.Running or elapsed > 600:
+            self._motor_check_timer.stop()
+            return
+        result = self._motor_check_checker(self._motor_check_started)
+        if result is None or result == self._motor_check_said:
+            return
+        self._motor_check_said = result
+        state, detail = result
+        if state == "fail":
+            self.print_info(f"WARNING! Force feedback: {detail}")
+            box = QMessageBox(QMessageBox.Warning, "No force feedback",
+                              f"The haptic self-check found dead motors.\n\n{detail}.", QMessageBox.Ok, self)
+            box.setModal(False)
+            box.show()
+            self._motor_check_timer.stop()
+        elif state == "ok":
+            self.print_info(f"INFO! Force feedback: {detail}")
+            self._motor_check_timer.stop()
+        else:
+            self.print_info(f"INFO! Force feedback: {detail}")
 
     def print_info(self, msg):
         self.textEdit_info.insertPlainText(self.get_time_as_str() + msg + "\n")

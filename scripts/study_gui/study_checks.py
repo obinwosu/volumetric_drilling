@@ -259,6 +259,49 @@ def _headset_link(ambf_text: str, elapsed: float):
     return FAIL, f"WiVRn has not let the simulator in after {elapsed:.0f} s: {RESTART_WIVRN}"
 
 
+HAPTIC_SELFCHECK = "haptic_selfcheck.json"
+RESTART_FOR_FORCE = "close the simulator and start it again (lay the stylus free on the desk first)"
+
+
+def haptic_selfcheck(started_wall: float):
+    """(state, detail) for the Touch motor self-check libhdPhantom runs at launch.
+
+    The HID Touch can open with its motors off and report nothing (no HD error,
+    force output "on"). libhdPhantom taps each free, still stylus with 0.8 N and
+    reads the encoders back, re-opening a device that did not move; it writes
+    RUNTIME/haptic_selfcheck.json. None when no check ran for this launch (an old
+    libhdPhantom, no Touch, or the check turned off).
+    """
+    import json
+    path = RUNTIME / HAPTIC_SELFCHECK
+    if _age(path, started_wall - 1.0) is None:
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    devices = data.get("devices") or []
+    names = {0: "drill", 1: "suction"}
+    dead = [d for d in devices if d.get("result") == "dead"]
+    final_dead = [d for d in dead if data.get("status") == "dead"]
+    if final_dead:
+        which = " and ".join(f"{names.get(d.get('index'), 'device %s' % d.get('index'))} Touch" for d in final_dead)
+        return FAIL, f"NO FORCE: {which} motors did not move after re-opening: {RESTART_FOR_FORCE}"
+    if data.get("status") == "recovering" or dead:
+        return WAIT, "motors did not move on open: re-opening the Touch"
+    docked = [d for d in devices if d.get("result") == "docked"]
+    if docked:
+        return WAIT, "stylus in the inkwell: motors are checked once it is lifted"
+    held = [d for d in devices if d.get("result") == "held"]
+    if held:
+        return INFO, "stylus was never still, so the motors could not be checked"
+    if devices and all(d.get("result") == "ok" for d in devices):
+        reopened = sum(int(d.get("reopens", 0)) for d in devices)
+        note = f" (after {reopened} re-open)" if reopened else ""
+        return OK, f"motors checked{note}"
+    return WAIT, "checking the motors"
+
+
 def launch_status(ambf_state: str, rtx_running: bool, started_wall: float, headset: bool = True):
     """Rows for the launch in progress: simulator, renderer, headset image, live input."""
     rows = []
@@ -302,6 +345,9 @@ def launch_status(ambf_state: str, rtx_running: bool, started_wall: float, heads
             stalled = elapsed if rtx_age is None else rtx_age
             state, detail = FAIL, f"stopped responding {stalled:.0f} s ago: {RESTART_SIM} (details in {view_log})"
         rows.append(Check("RTX view", state, detail))
+    motors = haptic_selfcheck(started_wall)
+    if motors is not None:
+        rows.append(Check("Force feedback (Touch motors)", *motors))
     state_live = _recent(RUNTIME / "drill_state.json", 3.0)
     rows.append(Check("Drill and stylus input", OK if state_live else WAIT,
                       "live" if state_live else "waiting for the simulator's first frames"))
