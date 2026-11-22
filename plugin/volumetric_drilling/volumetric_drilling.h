@@ -48,6 +48,7 @@
 #include "wave_generator.h"
 #include "haptic_safety.h"
 #include "haptic_monitor_feed.h"
+#include "haptic_tuning.h"
 #include "pause_pointer.h"
 #include "gaze_marker_controller_jagged.h" // change bewteen gaze_marker_controller_smooth vs. gaze_marker_controller_jagged
 #include "drill_manager.h"
@@ -431,6 +432,17 @@ private:
     HapticSafety m_hapticSafety;
     // Device data + health log for the haptic monitor window (haptic_monitor_feed.h).
     HapticMonitorFeed m_hapticMonitorFeed;
+    // Live force settings, only with FIVRS_HAPTIC_TUNER=1 (haptic_tuning.h).
+    haptic_tuning::Link m_tuningLink;
+    haptic_tuning::CutBudget m_tuningCut;
+    haptic_tuning::Hum m_tuningHum;
+    haptic_tuning::ForceGate m_tuningGate;
+    haptic_tuning::SustainedLimit m_tuningLimit;
+    std::vector<int> m_tuningOrder;
+    double m_tuningBaseStiffness = 0.0;
+    double m_tuningStiffnessMult = 1.0;
+    double m_tuningVoxelMm3 = 0.0;
+    double m_tuningClock = 0.0;
     cVector3d m_heldSuctionForce = cVector3d(0.0, 0.0, 0.0);
     double m_suctionHoldSeconds = 0.0;
 

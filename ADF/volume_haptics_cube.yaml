@@ -1,0 +1,27 @@
+# AMBF Version: (0.1)
+# Written by scripts/haptics_tuner/make_bone_cube.py
+bodies: []
+joints: []
+volumes: [VOLUME mastoidectomy_volume_low]
+high resolution path: ./meshes/high_res/
+low resolution path: ./meshes/low_res/
+ignore inter-collision: true
+namespace: /ambf/env/
+
+VOLUME mastoidectomy_volume_low:
+  name: mastoidectomy_volume_low
+  laterality: right
+  location:
+    position: {x: -6.040592783505154, y: 0.0, z: 0.0}
+    orientation: {r: 1.57079, p: 1.4, y: 0}
+  scale: 1.0
+  dimensions: {x: 0.342380, y: 0.342380, z: 0.342380}
+  images:
+    path: ../resources/volumes/haptics_cube_0p250mm
+    prefix: plane00
+    format: png
+    count: 136
+  shaders:
+    path: ./shaders/dvr/
+    vertex: shader.vs
+    fragment: shader.fs

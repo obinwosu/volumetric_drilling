@@ -1,0 +1,40 @@
+{
+  "1.5bonestiff_0.5Nhum": {
+    "cut_curve": 1.0,
+    "cut_full_n": 1.6,
+    "cut_gate": 0.0,
+    "cut_start_n": 0.4,
+    "hum_amp": 0.502,
+    "hum_direction": 0.0,
+    "hum_down": 0.0,
+    "hum_hz": 79.6,
+    "hum_load_amp": 0.0,
+    "hum_load_pitch": 0.0,
+    "hum_on": 1.0,
+    "hum_up": 0.0,
+    "rate_1": 4.0,
+    "rate_2": 12.0,
+    "rate_4": 40.0,
+    "rate_6": 80.0,
+    "stiffness": 1.49
+  },
+  "1.5bonestiff_0.6Nhum": {
+    "cut_curve": 1.0,
+    "cut_full_n": 1.6,
+    "cut_gate": 0.0,
+    "cut_start_n": 0.4,
+    "hum_amp": 0.6,
+    "hum_direction": 0.0,
+    "hum_down": 0.0,
+    "hum_hz": 79.6,
+    "hum_load_amp": 0.0,
+    "hum_load_pitch": 0.0,
+    "hum_on": 1.0,
+    "hum_up": 0.0,
+    "rate_1": 4.0,
+    "rate_2": 12.0,
+    "rate_4": 40.0,
+    "rate_6": 80.0,
+    "stiffness": 1.49
+  }
+}

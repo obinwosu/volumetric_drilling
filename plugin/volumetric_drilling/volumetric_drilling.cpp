@@ -44,6 +44,7 @@
 //==============================================================================
 
 #include "volumetric_drilling.h"
+#include <numeric>
 #include <algorithm>
 #include <boost/program_options.hpp>
 #include <atomic>
@@ -261,6 +262,25 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
 
     // Set voxels surface contact properties
     m_voxelObj->m_material->setStiffness(3.0*maxStiffness); // increasing haptic feedback (2.0 --> 3.0)
+    m_tuningBaseStiffness = 3.0*maxStiffness;
+    {
+        const char* tuner = getenv("FIVRS_HAPTIC_TUNER");
+        if (tuner && string(tuner) == "1"){
+            cMultiImagePtr image = dynamic_pointer_cast<cMultiImage>(m_voxelObj->m_texture->m_image);
+            if (image && image->getWidth() > 0 && image->getHeight() > 0 && image->getImageCount() > 0){
+                const cVector3d size = m_maxVolCorner - m_minVolCorner;
+                const double mm = m_drillManager.m_units_mmToSim;
+                m_tuningVoxelMm3 = (size.x() / image->getWidth() / mm)
+                                 * (size.y() / image->getHeight() / mm)
+                                 * (size.z() / image->getImageCount() / mm);
+            }
+            if (m_tuningVoxelMm3 > 0.0 && m_tuningLink.open()){
+                cerr << "INFO! Haptics tuner connected, voxel volume " << m_tuningVoxelMm3 << " mm3" << endl;
+            } else {
+                cerr << "WARNING! Haptics tuner requested but its shared files are missing; using stock forces" << endl;
+            }
+        }
+    }
     m_voxelObj->m_material->setDamping(0.0);
     m_voxelObj->m_material->setDynamicFriction(0.0);
     m_voxelObj->setUseMaterial(true);
@@ -1151,6 +1171,8 @@ void afVolmetricDrillingPlugin::physicsUpdate(double dt){
             m_drillManager.m_toolCursorList[0]->setDeviceLocalForce(0.0, 0.0, 0.0);
         }
         m_hapticSafety.reset();
+        m_tuningHum.reset();
+        m_tuningCut.idle();
         if (m_drillManager.m_suctionDevice){
             m_drillManager.m_suctionDevice->setForce(cVector3d(0.0, 0.0, 0.0));
         }
@@ -1183,12 +1205,27 @@ void afVolmetricDrillingPlugin::physicsUpdate(double dt){
     m_drillManager.tickVolumeContactSuppression(anyCursorInContact);
     const bool skipContact = m_drillManager.isVolumeContactSuppressed();
 
+    const bool tuned = m_tuningLink.isOpen();
+    haptic_tuning::Params tuning;
+    if (tuned){
+        tuning = m_tuningLink.read();
+        if (tuning.stiffnessMult != m_tuningStiffnessMult){
+            m_tuningStiffnessMult = tuning.stiffnessMult;
+            m_voxelObj->m_material->setStiffness(m_tuningBaseStiffness * m_tuningStiffnessMult);
+        }
+    }
+
     // Sample the wall before this step deletes it. Clearing the contacted voxels
     // first made the restoring force fall to zero on the same step, so the
     // drill felt like it punched through and caught again.
     for(int i = 0 ; i < m_drillManager.m_toolCursorList.size() ; i++){
         m_drillManager.m_toolCursorList[i]->computeInteractionForces();
     }
+    // The burr's own push on the bone, before any hum.
+    const double tipForceN = m_drillManager.m_toolCursorList[0]->getDeviceLocalForce().length();
+    const double burrMm = m_drillManager.m_activeDrill
+        ? m_drillManager.m_activeDrill->m_size / m_drillManager.m_units_mmToSim : 0.0;
+    int tunedRemoved = -1;  // stays -1 when the burr is not cutting this tick
 
     if (!skipContact && m_drillManager.m_toolCursorList[0]->isInContact(m_voxelObj) && m_drillManager.m_targetToolCursorIdx == 0 /*&& (userSwitches == 2)*/)
     {
@@ -1203,6 +1240,26 @@ void afVolmetricDrillingPlugin::physicsUpdate(double dt){
         if (m_storedColor != m_zeroColor){
             if (m_drillManager.m_isOn){
                 int removalCount = cMin(m_drillManager.m_activeDrill->getVoxelRemovalThreshold(), (int)contact->m_events.size());
+                const bool forceGated = tuned && tuning.cutGate > 0.5;
+                if (forceGated){
+                    removalCount = m_tuningCut.allow(tuning, tipForceN, burrMm, m_tuningVoxelMm3, dt,
+                                                     (int)contact->m_events.size());
+                    // A few voxels a tick: take those nearest the contact point, so
+                    // the cut does not follow the order the voxels were scanned in.
+                    m_tuningOrder.resize(contact->m_events.size());
+                    std::iota(m_tuningOrder.begin(), m_tuningOrder.end(), 0);
+                    const auto& events = contact->m_events;
+                    const auto distance = [&](int k){
+                        const double dx = double(events[k].m_voxelIndexX) - orig.x();
+                        const double dy = double(events[k].m_voxelIndexY) - orig.y();
+                        const double dz = double(events[k].m_voxelIndexZ) - orig.z();
+                        return dx * dx + dy * dy + dz * dz;
+                    };
+                    std::partial_sort(m_tuningOrder.begin(), m_tuningOrder.begin() + removalCount, m_tuningOrder.end(),
+                                      [&](int a, int b){ return distance(a) < distance(b); });
+                    m_tuningCut.spend(removalCount);
+                    tunedRemoved = removalCount;
+                }
                 // In RTX mode the graphics thread (serviceRtxFlush) owns the
                 // voxel message. Clearing it here raced with that flush and
                 // sometimes published a batch empty: the RTX view then kept
@@ -1212,7 +1269,8 @@ void afVolmetricDrillingPlugin::physicsUpdate(double dt){
                     m_drillManager.m_drillingPub->clearVoxelMsg();
                 }
                 m_mutexVoxel.acquire();
-                for (int cIdx = 0 ; cIdx < removalCount ; cIdx++){
+                for (int removeIdx = 0 ; removeIdx < removalCount ; removeIdx++){
+                    const int cIdx = forceGated ? m_tuningOrder[removeIdx] : removeIdx;
                     cVector3d ct(contact->m_events[cIdx].m_voxelIndexX, contact->m_events[cIdx].m_voxelIndexY, contact->m_events[cIdx].m_voxelIndexZ);
                     cColorb colorb;
                     m_voxelObj->m_texture->m_image->getVoxelColor(uint(ct.x()), uint(ct.y()), uint(ct.z()), colorb);
@@ -1268,7 +1326,8 @@ void afVolmetricDrillingPlugin::physicsUpdate(double dt){
             force = m_heldHapticForce * (m_hapticHoldSeconds / kHoldSeconds);
             m_hapticHoldSeconds = cMax(0.0, m_hapticHoldSeconds - dt);
         }
-        if (m_drillManager.m_isOn){
+        // With the tuner the hum is added after the safety guard, below.
+        if (m_drillManager.m_isOn && !tuned){
             force += (cVector3d(1.0, 1.0, 1.0) * m_waveGenerator.generate(dt));
         }
         double maxF = m_drillManager.m_hapticDevice->getSpecifications().m_maxLinearForce;
@@ -1288,6 +1347,14 @@ void afVolmetricDrillingPlugin::physicsUpdate(double dt){
         }
     }
 
+    bool tunedForceOpen = true;
+    if (tuned){
+        tunedForceOpen = m_tuningGate.update(tuning.forceEnable > 0.5, force.length(), dt);
+        if (!tunedForceOpen){
+            force.zero();
+        }
+    }
+
     // Every drill force passes the safety guard. What is published and heard is what was sent.
     const cVector3d requestedForce = force;
     force = m_hapticSafety.filter(force, dt);
@@ -1295,6 +1362,30 @@ void afVolmetricDrillingPlugin::physicsUpdate(double dt){
         cerr << "WARNING! HAPTIC SAFETY: unstable bone contact, drill force faded to zero (trip "
              << m_hapticSafety.trips() << "). It returns once the drill is out of contact for "
              << HapticSafety::kRearmSeconds << " s." << endl;
+    }
+    if (tuned){
+        if (tunedRemoved < 0){
+            m_tuningCut.idle();
+        }
+        const cVector3d stylusAxis = m_drillManager.m_T_i.getLocalRot().getCol0();
+        const double shaft[3] = {stylusAxis.x(), stylusAxis.y(), stylusAxis.z()};
+        double hum[3];
+        m_tuningHum.generate(tuning, dt, m_drillManager.m_isOn && !skipContact && tunedForceOpen,
+                             m_hapticSafety.tripped(), shaft, tipForceN, hum);
+        force += cVector3d(hum[0], hum[1], hum[2]);
+        const double deviceMax = m_drillManager.m_hapticDevice->getSpecifications().m_maxLinearForce;
+        if (deviceMax > 0.5 && force.length() > deviceMax){
+            force.mul(deviceMax / force.length());
+        }
+        force.mul(m_tuningLimit.update(force.length(), dt));
+        m_tuningClock += dt;
+        const int flags = (m_drillManager.m_isOn ? 1 : 0) | (anyCursorInContact ? 2 : 0)
+                        | (m_hapticSafety.tripped() ? 4 : 0) | (tuning.cutGate > 0.5 ? 8 : 0)
+                        | (tunedForceOpen ? 0 : 16) | (m_tuningLimit.limiting() ? 32 : 0);
+        const float row[haptic_tuning::kTelemetryFields] = {
+            float(m_tuningClock), float(tipForceN), float(m_tuningHum.lastN()), float(force.length()),
+            float(m_tuningCut.fraction()), float(cMax(tunedRemoved, 0)), float(flags), float(burrMm)};
+        m_tuningLink.log(row);
     }
     m_drillManager.m_toolCursorList[0]->setDeviceLocalForce(force);
     cVector3d monitorSuctionForce(0.0, 0.0, 0.0);

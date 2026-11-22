@@ -245,6 +245,16 @@ User wants A+C after finishing D:
 
 This is an explicit exception to “do not change bone rendering / voxel authority.” Do not also change irrigation, DLSS, suction, or lighting.
 
+## Haptics tuner (branch `haptics-compare`, built 2026-11-22, not yet run on the Touch)
+
+Lives only in the worktree `../volumetric_drilling_haptics_compare`. Build with `scripts/haptics_tuner/build.sh` (into `.haptics/`, never the shared `install/`), run `python3 scripts/haptics_tuner/haptics_tuner.py`. It launches AMBF + RTX on a 32 mm bone cube (`make_bone_cube.py`, `launch_haptics.yaml`) with `FIVRS_HAPTIC_TUNER=1`; without that variable the plugin keeps stock forces.
+
+- `plugin/volumetric_drilling/haptic_tuning.h`: force-gated removal (mm3/s per burr), stiffness multiplier, hum. Settings are read each physics tick from `/dev/shm/fivrs_haptic_tuning`, plots come from `/dev/shm/fivrs_haptic_telemetry`; layout mirrored in `scripts/haptics_tuner/tuning_shm.py`.
+- The hum is added **after** `HapticSafety`, because the guard reads a hum of about 0.6 N as unstable contact and cuts all force. It has its own 0.6 N cap and stops if the guard trips. Contact force still goes through the guard.
+- Touch start-up is the main simulator's: libhdPhantom's warm-up and self-check run by themselves and the tuner only displays the result (user, 2026-11-22: never gate force on it). Force starts once the request has been near zero for 0.25 s, so a burr starting in bone cannot push on a docked stylus. A force held above about 1.5 N RMS is eased to the 0.88 N continuous rating.
+- Not built yet: drag, chatter, burr skating, motion scale.
+- Tests: `g++ -std=c++17 -I plugin/volumetric_drilling scripts/haptics_tuner/test_haptic_tuning.cpp -o <tmp> && <tmp>`, `QT_QPA_PLATFORM=offscreen python3 scripts/haptics_tuner/test_haptics_tuner.py`.
+
 ## Key files
 
 ```

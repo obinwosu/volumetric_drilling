@@ -64,3 +64,6 @@ scripts/fluid/_build/
 # Soft tissue work lives on feature/soft-tissue, not this branch
 scripts/soft_tissue/
 resources/soft_tissue/
+
+# Haptics tuner: its own build and install
+.haptics/
