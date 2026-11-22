@@ -179,8 +179,18 @@ volume33:
 volume34:
   adf_path: ../../ADF/volume_left_dehiscence_ct_vs_0p196mm.yaml
   icon_path: ./assets/left_dehiscence_ct_vs.png
-  name: "Left Dehiscence CT + VS"
+  name: "pc11162026"
   description: 'Left Dehiscence CT with the vestibular schwannoma (CPA/IAC + middle fossa parts) from the registered C+ T1; temporal bone labels as Left Dehiscence CT inside its box, 2026-11-15.'
+volume35:
+  adf_path: ../../ADF/volume_right_dehiscence_ct_0p196mm.yaml
+  icon_path: ./assets/right_dehiscence_ct.png
+  name: "Right Dehiscence CT"
+  description: 'Right Dehiscence CT: right ear, segmented from CT by tbone nnU-Net (fold 0, 0.196 mm), 2026-11-21.'
+volume36:
+  adf_path: ../../ADF/volume_right_dehiscence_ct_vs_0p196mm.yaml
+  icon_path: ./assets/right_dehiscence_ct_vs.png
+  name: "pc11232026"
+  description: 'Right Dehiscence CT with the vestibular schwannoma (CPA/IAC) from the registered T2 SPACE, checked against the post-contrast T1; temporal bone labels as Right Dehiscence CT inside its box, 2026-11-21.'
 volumes:
 - volume1
 - volume2
@@ -213,4 +223,6 @@ volumes:
 - volume32
 - volume33
 - volume34
+- volume35
+- volume36
 haptic_monitor: true

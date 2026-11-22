@@ -1,0 +1,27 @@
+# AMBF Version: (0.1)
+bodies: []
+joints: []
+volumes: [VOLUME mastoidectomy_volume_low]
+high resolution path: ./meshes/high_res/
+low resolution path: ./meshes/low_res/
+ignore inter-collision: true
+namespace: /ambf/env/
+
+VOLUME mastoidectomy_volume_low:
+  name: mastoidectomy_volume_low
+  laterality: right
+  location:
+    position: {x: -6.094715509, y: -0.042440328, z: 0.084312732}  # keeps the ear where volume_right_dehiscence_ct_0p196mm.yaml has it
+    orientation: {r: 2.812019809, p: 1.336970603, y: 1.348463284}
+  scale: 1.0
+  # Physical size in AU (1 AU = 49.664 mm): x = image columns, y = image rows, z = slices.
+  dimensions: {x: 1.006363, y: 1.089240, z: 1.006363}
+  images:
+    path: ../resources/volumes/right_dehiscence_ct_vs_0p196mm
+    prefix: plane00
+    format: png
+    count: 255
+  shaders:
+    path: ./shaders/dvr/
+    vertex: shader.vs
+    fragment: shader.fs
