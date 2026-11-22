@@ -11,8 +11,8 @@ VOLUME mastoidectomy_volume_low:
   name: mastoidectomy_volume_low
   laterality: right
   location:
-    position: {x: -6.040592783505154, y: 0.0, z: 0.0}  # placed 745mm away from camera given 1AU = 0.049664m
-    orientation: {r: 1.57079, p: 1.4, y: 0}
+    position: {x: -6.116133927, y: -0.035728344, z: -0.027963403}  # placed 745mm away from camera given 1AU = 0.049664m
+    orientation: {r: -0.042038994, p: 1.149422128, y: -1.463591253}
     # orientation: {r: 0.0, p: 3.14, y: 1.5}
   scale: 1.0
   dimensions: {x: 1.0, y: 1.0, z: 1.0}

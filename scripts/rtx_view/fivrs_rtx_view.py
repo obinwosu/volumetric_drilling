@@ -46,6 +46,7 @@ import rtx_eyes
 import rtx_record
 import thin_bone
 import rtx_materials
+import specimen_look
 from fluid.cannula import SIZES as CANNULA_SIZES, load_obj as load_cannula_obj, mesh_path as cannula_mesh_path
 from fluid.irrigation_bench import (
     DRAW_SPHERES,
@@ -2693,6 +2694,7 @@ def main():
 
     print("Initializing RTX View", flush=True)
     print("Loading anatomy slices", flush=True)
+    specimen_look.activate(args.anatomy_adf)  # before any material loads; UR5 specimens only
     intact_occupied, colors = _load_occupancy(pathlib.Path(args.anatomy_adf), keep_air_labels=True)
     occupied, cleared = air_labels.drop_air_labels(intact_occupied, colors)
     print(f"Air labels cleared {cleared} voxels", flush=True)
@@ -2961,6 +2963,7 @@ def main():
             document,
             np.asarray(bridge.volume["dimensions"], np.float64) / np.asarray(occupied.shape, np.float64) / MM_TO_SIM,
             cortex_masks.named_rgb(document, "bone", "fff9db"),
+            capsule=thin_bone.load_capsule(args.anatomy_adf),
         )
     except Exception as exc:
         print(f"Thin bone shading off: {exc}", flush=True)

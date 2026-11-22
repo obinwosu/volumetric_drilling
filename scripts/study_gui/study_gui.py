@@ -13,7 +13,11 @@ import study_chooser
 import proctor_pause
 import add_volume_tab
 import register_mri_tab
+import expert_drilling_tab
+import review_tab
+import reviewable_session
 import haptic_monitor_toggle
+import haptics_preset
 
 import datetime
 from enum import Enum
@@ -361,6 +365,7 @@ class Ui(QtWidgets.QWidget):
         self.button_toggle_vol_smooth.clicked.connect(self.study_manager.toggle_volume_smoothening)
         self._build_sim_options_group()
         self._build_haptic_monitor_group()
+        self._build_haptics_preset_group()
 
         self.textEdit_info = self.findChild(QtWidgets.QPlainTextEdit, "textEdit_info")
         self.textEdit_debug = self.findChild(QtWidgets.QPlainTextEdit, "textEdit_debug")
@@ -417,6 +422,8 @@ class Ui(QtWidgets.QWidget):
 
         # Study tab: tutorial + timed trial for the resident study (study_mode.py).
         self.study_mode = None
+        # The Expert drilling tab's launch settings, while (and after) it starts the simulator.
+        self.expert_launch = None
         self.study_panel = study_mode.StudyPanel(self)
         # Graphics study: tutorial, then the same task with two renderers, NASA-TLX after each.
         self.graphics_panel = graphics_study_mode.GraphicsStudyPanel(self)
@@ -441,6 +448,15 @@ class Ui(QtWidgets.QWidget):
                 save=self.gui_configuration.save_value,
                 tumor_python=self.gui_configuration.yaml_data.get("nninteractive_python") or None)
             tabs.addTab(self.register_mri_panel, "Register MRI")
+            # "UR5": recorded expert drillings of the cadaveric specimens, for the robot policy.
+            self.expert_panel = expert_drilling_tab.ExpertDrillingPanel(
+                self, save=self.gui_configuration.save_value)
+            tabs.addTab(self.expert_panel, "UR5")
+            # "Review": any recorded session: video, curves, 3D. Loads when first opened.
+            self.review_panel = review_tab.ReviewPanel(self)
+            tabs.addTab(self.review_panel, "Review")
+        # Main tab's "Generate reviewable session" box.
+        self.reviewable = reviewable_session.ReviewableSession(self)
 
         # Pops up while the participant's pause menu is open (proctor_pause.py).
         self.proctor_pause = proctor_pause.ProctorPauseWindow(self)
@@ -726,6 +742,14 @@ class Ui(QtWidgets.QWidget):
         layout.insertWidget(layout.indexOf(sim_box) + 2, box)
         QTimer.singleShot(0, self.haptic_monitor.restore)
 
+    def _build_haptics_preset_group(self):
+        """Haptics box under the haptic device box (haptics_preset.py)."""
+        self.haptics_preset = haptics_preset.HapticsPresetPicker(self.gui_configuration, print_info=self.print_info)
+        box = self.haptics_preset.build_group(self)
+        sim_box = self.findChild(QtWidgets.QGroupBox, "groupBox_sim_controls")
+        layout = sim_box.parentWidget().layout()
+        layout.insertWidget(layout.indexOf(sim_box) + 3, box)
+
     def _sim_option_widgets(self):
         return (self.combo_render_preset, self.combo_dlss, self.combo_samples, self.combo_bounces,
                 self.check_irrigation, self.check_bone_dust, self.check_suction)
@@ -771,6 +795,8 @@ class Ui(QtWidgets.QWidget):
         performance, whatever the tab shows; samples, bounces and bone dust follow the tab.
         It also reads the headset eyes back while the next frame renders (frame rate
         only; the image is the same)."""
+        if self.expert_launch:
+            return dict(self.expert_launch["options"])
         options = dict(self.gui_configuration.sim_options)
         if self.study_mode:
             options["irrigation"] = False
@@ -778,7 +804,17 @@ class Ui(QtWidgets.QWidget):
             options["dlss"] = "ultra_performance"
             options["eye_pipeline"] = True
             options["preset"] = gui_setup.matching_preset(options)
+        reviewable = getattr(self, "reviewable", None)
+        if reviewable is not None and reviewable.wanted() and self._reviewable_video() == "mono":
+            options["record_hz"] = reviewable_session.VIDEO_HZ
+            options["record_width"] = 1280
         return options
+
+    def _reviewable_video(self) -> str:
+        """Video of a reviewable Main session: the RTX window, or both headset eyes."""
+        if not self.check_rtx_view.isChecked():
+            return "none"
+        return "stereo" if self.check_openxr_eyepiece.isChecked() else "mono"
 
     def study_render_settings(self) -> dict:
         """What a study launch renders with, for the session's metadata."""
@@ -799,8 +835,29 @@ class Ui(QtWidgets.QWidget):
         for k, v in self.gui_param_dialogs.items():
             v.setText(self.gui_configuration.params[k].get_as_str())
         self._show_sim_options()
+        self.haptics_preset.refresh()
 
     # ---- Simulation launch ----
+    def _launch_check(self, key, widget):
+        """A Main-tab checkbox, or the Expert drilling tab's value for its launch."""
+        if self.expert_launch:
+            return bool(self.expert_launch["checks"].get(key))
+        return bool(widget is not None and widget.isChecked())
+
+    def start_expert_simulation(self, request):
+        """Start the simulator with the Expert drilling tab's settings. The Main tab's own
+        anatomy and options are left as they are."""
+        kept = (self.active_volume_adf, self.active_volume_name, self.active_volume_info)
+        self.expert_launch = request
+        self.active_volume_adf, self.active_volume_name, self.active_volume_info = (
+            request["adf"], request["name"], request["info"])
+        try:
+            self.pressed_start_simulation()
+        finally:
+            self.active_volume_adf, self.active_volume_name, self.active_volume_info = kept
+        if self._ambf_process.state() == QProcess.NotRunning:
+            self.expert_launch = None
+
     def pressed_start_simulation(self):
         if self._ambf_process.state() != QProcess.Running:
             if not self.active_volume_adf:
@@ -809,15 +866,8 @@ class Ui(QtWidgets.QWidget):
             self._current_args = []
             # Base: drills(0) + gaze_marker(7). World main_camera is the on-screen view.
             # OpenXR eyepiece (WiVRn) = ADF 15. Legacy OpenVR/SteamVR = ADF 14.
-            use_openxr = bool(
-                self.check_openxr_eyepiece is not None
-                and self.check_openxr_eyepiece.isChecked()
-            )
-            use_openvr = bool(
-                not use_openxr
-                and self.check_openvr_hmd is not None
-                and self.check_openvr_hmd.isChecked()
-            )
+            use_openxr = self._launch_check("openxr", self.check_openxr_eyepiece)
+            use_openvr = not use_openxr and self._launch_check("openvr", self.check_openvr_hmd)
             launch_file_adf_indices = "0,7"
             if use_openxr:
                 launch_file_adf_indices = launch_file_adf_indices + ",15"
@@ -825,7 +875,7 @@ class Ui(QtWidgets.QWidget):
                 launch_file_adf_indices = launch_file_adf_indices + ",14"
             use_hmd = use_openxr or use_openvr
             use_wivrn = use_openxr
-            use_rtx = bool(self.check_rtx_view is not None and self.check_rtx_view.isChecked())
+            use_rtx = self._launch_check("rtx", self.check_rtx_view)
             # Graphics study arms (graphics_study_mode.py): "rtx", "chai" (today's CHAI3D
             # look) or "upstream" (AMBF's look before the FIVRS changes). The CHAI3D arms
             # keep the plugin's RTX bridge on (drill state, bone restore, study lock) with
@@ -844,12 +894,14 @@ class Ui(QtWidgets.QWidget):
             # The stream cameras open hidden AMBF windows. On AMBF 3 those freeze
             # AMBF's event loop on its first frame, so nothing moves. The RTX view
             # and the headset do not use them.
-            streams = self.check_stream_depth.isChecked() or self.check_stream_stereo.isChecked()
+            stream_depth = self._launch_check("stream_depth", self.check_stream_depth)
+            stream_stereo = self._launch_check("stream_stereo", self.check_stream_stereo)
+            streams = stream_depth or stream_stereo
             if streams and (use_hmd or use_rtx):
                 self.print_info("Stream depth / stereo are skipped with the RTX view or headset.")
-            if not (use_hmd or use_rtx) and self.check_stream_depth.isChecked():
+            if not (use_hmd or use_rtx) and stream_depth:
                 launch_file_adf_indices = launch_file_adf_indices + ",4"
-            if not (use_hmd or use_rtx) and self.check_stream_stereo.isChecked():
+            if not (use_hmd or use_rtx) and stream_stereo:
                 launch_file_adf_indices = launch_file_adf_indices + ",5"
             args = [
                 "--launch_file",
@@ -863,17 +915,19 @@ class Ui(QtWidgets.QWidget):
                 "--fp",
                 str(self.gui_configuration.footpedal_device.get()),
                 "--sb",
-                str(self.get_starting_burr_mm()),
+                str(self.expert_launch["burr"] if self.expert_launch else self.get_starting_burr_mm()),
                 "--anatomy_adf",
                 volume_adf,
                 "--session_user",
                 # Study mode shows the Study ID, never the name.
-                (self.study_mode or {}).get("study_id") or self.active_participant_name() or "(none)",
+                (self.study_mode or {}).get("study_id") or (self.expert_launch or {}).get("user")
+                or self.active_participant_name() or "(none)",
                 "--session_anatomy",
                 self.active_volume_name or "",
                 "--startup_view",
                 # The studies always start on their own view, whatever Main shows.
-                (self.study_mode or {}).get("startup_view") or self.selected_startup_view_id(),
+                (self.study_mode or {}).get("startup_view") or (self.expert_launch or {}).get("view")
+                or self.selected_startup_view_id(),
             ]
             if use_rtx or chai_eyes:
                 args.extend(["--rtx_view", "1"])
@@ -881,13 +935,13 @@ class Ui(QtWidgets.QWidget):
             spacenav = getattr(self.gui_configuration, "spacenav_plugin", "") or ""
             if spacenav and pathlib.Path(spacenav).expanduser().exists():
                 self.add_plugin(str(pathlib.Path(spacenav).expanduser().resolve()))
-            if self.check_video_record.isChecked():
+            if self._launch_check("video", self.check_video_record):
                 # In-plugin VideoRecordingController handles recording; optional
                 # external AMBF video plugin can still be attached if configured.
                 ext_vid = getattr(self.gui_configuration, "external_video_recording_plugin", "") or ""
                 if ext_vid and pathlib.Path(ext_vid).expanduser().exists():
                     self.add_plugin(str(pathlib.Path(ext_vid).expanduser().resolve()))
-            if self.check_pupil_capture.isChecked() and self._pupil_process.state() != QProcess.Running:
+            if self._launch_check("pupil", self.check_pupil_capture) and self._pupil_process.state() != QProcess.Running:
                 self.start_pupil_capture()
             print("--fp", str(self.gui_configuration.footpedal_device.get()))
             print(f"Starting simulation with arguments: {self._current_args}")
@@ -913,6 +967,8 @@ class Ui(QtWidgets.QWidget):
             if home_lib not in ld.split(":"):
                 ld = f"{home_lib}:{ld}" if ld else home_lib
             env.insert("LD_LIBRARY_PATH", ld)
+            # Studies and UR5 recordings always run on the stock forces.
+            self.haptics_preset.prepare_launch(env, allowed=not self.study_mode and not self.expert_launch)
             # AMBF + VR on NVIDIA. Avoid PRIME offload when the desktop is
             # already driven by NVIDIA (causes see-through/frozen GL windows).
             if use_hmd:
@@ -987,6 +1043,7 @@ class Ui(QtWidgets.QWidget):
             self._ambf_log_path.write_text(f"{self.get_time_as_str()}AMBF [{mode}] {' '.join(self._current_args)}\n")
             # With the simulator closed the haptic monitor owns the Touch; free it first.
             self.haptic_monitor.release_for_simulator()
+            self.reviewable.before_launch()  # the drill waits for the recorder
             self._ambf_process.start(ambf_bin, self._current_args)
             self._start_motor_check_watch()
             if use_rtx:
@@ -997,6 +1054,7 @@ class Ui(QtWidgets.QWidget):
                 self._start_rtx_view(repo_root, headset=use_openxr)
             if not self._ambf_process.waitForStarted(5000):
                 self.print_info(f"ERROR! Failed to start AMBF: {ambf_bin}")
+                self.reviewable.launch_failed()
                 self._stop_rtx_process()
                 self.button_start_simulation.setText("Start Simulation")
                 self._set_sim_running_style(False)
@@ -1012,9 +1070,17 @@ class Ui(QtWidgets.QWidget):
                 self._start_fluid(repo_root)
             self.button_start_simulation.setText("Close Simulation")
             self._set_sim_running_style(True)
+            self.reviewable.launched({
+                "adf": volume_adf, "name": self.active_volume_name, "user": self.active_participant_name(),
+                "laterality": read_adf_laterality(volume_adf), "burr": self.get_starting_burr_mm(),
+                "view": self.selected_startup_view_id(), "rtx": use_rtx, "video": self._reviewable_video(),
+                "options": options,
+                "checks": {"openxr": use_openxr, "openvr": use_openvr, "rtx": use_rtx}})
         else:
             if self._recording_study:
                 self.print_info("Must stop logging study data first!")
+            elif self.reviewable.active():
+                self.reviewable.end(close_after=True)
             else:
                 self.close_simulation()
 
@@ -1085,6 +1151,8 @@ class Ui(QtWidgets.QWidget):
             + ("export FIVRS_BLOOM=0 && " if options.get("bloom") is False else "")
             + (f"export FIVRS_EXPOSURE={float(options['exposure']):.2f} && " if options.get("exposure") else "")
             + ("export FIVRS_EYE_PIPELINE=1 && " if options.get("eye_pipeline") else "")
+            + (f"export FIVRS_RECORD_HZ={int(options['record_hz'])} FIVRS_RECORD_WIDTH={int(options['record_width'])} && "
+               if options.get("record_hz") else "")
             + f"exec \"{venv_python}\" \"{script}\" --anatomy-adf \"{self.active_volume_adf}\""
             + (" --headset" if headset else "")
             + (" --no-stream" if self.study_mode else "")
@@ -1302,6 +1370,10 @@ class Ui(QtWidgets.QWidget):
     def _rtx_finished(self, code, status):
         self._rtx_loading_done("exited")
         self._close_rtx_splash()
+        if getattr(self, "expert_panel", None) is not None:
+            self.expert_panel.rtx_view_closed()  # ends a UR5 session: save or discard
+        if getattr(self, "reviewable", None) is not None:
+            self.reviewable.end()  # AMBF is still up, so the final volume can be checked
         log_file = self._rtx_log_file
         if log_file is not None:
             how = "crashed" if status == QProcess.CrashExit else "normal exit"
@@ -1337,6 +1409,12 @@ class Ui(QtWidgets.QWidget):
         graphics_panel = getattr(self, "graphics_panel", None)
         if graphics_panel is not None:
             graphics_panel.simulator_closed()
+        expert_panel = getattr(self, "expert_panel", None)
+        if expert_panel is not None:
+            expert_panel.simulator_closed()
+        if getattr(self, "reviewable", None) is not None:
+            self.reviewable.end()
+        self.expert_launch = None
         if self._recording_study:
             self._stop_study_logging(save_metadata=True)
             self._updating_log_checkbox = True
@@ -1544,6 +1622,12 @@ class Ui(QtWidgets.QWidget):
 
     def closeEvent(self, event):
         self.print_info("Terminate Called")
+        if getattr(self, "expert_panel", None) is not None:
+            self.expert_panel.shutdown()
+        if getattr(self, "reviewable", None) is not None:
+            self.reviewable.shutdown()
+        if getattr(self, "review_panel", None) is not None:
+            self.review_panel.shutdown()
         if self._recording_study:
             self._stop_study_logging(save_metadata=True)
         self._stop_fluid()

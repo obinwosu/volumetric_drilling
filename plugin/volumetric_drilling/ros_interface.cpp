@@ -85,6 +85,8 @@ void DrillingPublisher::init(string a_namespace, string a_plugin){
 
     ambf_ral::create_publisher<AMBF_RAL_MSG(geometry_msgs, WrenchStamped)>
       (m_forcefeedbackPub, m_rosNode, a_namespace + "/" + a_plugin + "/drill_force_feedback", 1, false);
+    ambf_ral::create_publisher<AMBF_RAL_MSG(geometry_msgs, PoseStamped)>
+      (m_drillPosePub, m_rosNode, a_namespace + "/" + a_plugin + "/drill_pose_physics", 64, false);
     ambf_ral::create_publisher<AMBF_RAL_MSG(volumetric_drilling_msgs, DrillReposition)>
       (m_drillRepositionPub, m_rosNode, a_namespace + "/" + a_plugin + "/drill_reposition", 1, true);
     ambf_ral::create_subscriber<AMBF_RAL_MSG(volumetric_drilling_msgs, Index), DrillingPublisher>
@@ -296,6 +298,28 @@ static void fillPoseMsg(geometry_msgs::msg::Pose& poseMsg, const cTransform& T)
     poseMsg.orientation.y = quat.y;
     poseMsg.orientation.z = quat.z;
     poseMsg.orientation.w = quat.w;
+}
+
+void DrillingPublisher::publishDrillPose(const cTransform& pose, double time)
+{
+    #if AMBF_ROS1
+        if (m_drillPosePub->getNumSubscribers() == 0){
+            return;
+        }
+        fillPoseMsg(m_drill_pose_msg.pose, pose);
+        m_drill_pose_msg.header.stamp.fromSec(time);
+        m_drillPosePub->publish(m_drill_pose_msg);
+    #elif AMBF_ROS2
+        if (m_drillPosePub->get_subscription_count() == 0){
+            return;
+        }
+        fillPoseMsg(m_drill_pose_msg.pose, pose);
+        int32_t sec  = static_cast<int32_t>(time);
+        uint32_t nsec = static_cast<uint32_t>((time - sec) * 1e9);
+        m_drill_pose_msg.header.stamp.sec = sec;
+        m_drill_pose_msg.header.stamp.nanosec = nsec;
+        m_drillPosePub->publish(m_drill_pose_msg);
+    #endif
 }
 
 void DrillingPublisher::publishDrillReposition(const cTransform& poseFrom, const cTransform& poseTo, double time)

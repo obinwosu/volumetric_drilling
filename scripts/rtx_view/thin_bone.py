@@ -16,17 +16,20 @@ This is RTX only: AMBF voxels and haptics are unchanged.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import time
 
 import numpy as np
+import yaml
 from scipy.spatial import cKDTree
 
 import rtx_materials
+import specimen_look
 
 HERE = pathlib.Path(__file__).resolve().parent
 MDL_PATH = HERE / "mdl" / "ThinBone.mdl"
-CONFIG_PATH = HERE / "tuner_thin_bone.json"
+CONFIG_PATH = pathlib.Path(os.environ.get("FIVRS_THIN_BONE_CONFIG") or HERE / "tuner_thin_bone.json")
 MM_TO_SIM = 0.01007
 PRIMVAR = "thin_bone"
 # Search radius. Anything farther reads as FAR_VALUE, which no depth or
@@ -70,7 +73,7 @@ def load_parameters() -> dict:
                 params[key] = bool(value)
             elif key in params:
                 params[key] = value
-    return params
+    return specimen_look.apply_thin_bone(params)
 
 
 def save_parameters(params: dict):
@@ -121,10 +124,32 @@ def _touching(mask, bone):
     return mask & out
 
 
+def load_capsule(anatomy_adf):
+    """A UR5 specimen's otic capsule: mm through bone from the hollow inner ear, per voxel.
+
+    From otic_capsule.npz beside the slices (scripts/expert_drilling/otic_capsule.py). None for
+    every other anatomy, which keeps the straight-line distance to its inner ear label.
+    The rule comes from the UR5 look (specimen_look.py); FIVRS_OTIC_RULE overrides it for previews.
+    """
+    adf = pathlib.Path(anatomy_adf)
+    doc = yaml.safe_load(adf.read_text())
+    path = (adf.parent / doc[doc["volumes"][0]]["images"]["path"]).resolve() / "otic_capsule.npz"
+    if not path.is_file():
+        return None
+    rule = os.environ.get("FIVRS_OTIC_RULE") or specimen_look.rule() or "through_bone"
+    with np.load(path) as data:
+        codes = data[rule if rule in data else "through_bone"]
+    field = codes.astype(np.float32) * 0.01
+    field[codes == 65535] = FAR_VALUE
+    print(f"Otic capsule: {rule}, {int((codes != 65535).sum())} voxels within {FAR_MM:g} mm through bone", flush=True)
+    return field
+
+
 class ThinBoneIndex:
     """Per-group KD-trees in millimetres. ``sample`` takes voxel-index points."""
 
-    def __init__(self, trees: dict, mm_per_voxel, bone_packed: int, counts: dict):
+    def __init__(self, trees: dict, mm_per_voxel, bone_packed: int, counts: dict, capsule=None):
+        self.capsule = capsule
         self.trees = trees
         self.mm_per_voxel = np.asarray(mm_per_voxel, np.float64)
         self.half_voxel_mm = 0.5 * float(np.mean(self.mm_per_voxel))
@@ -146,10 +171,27 @@ class ThinBoneIndex:
             # Vertices sit half a voxel off the structure's voxel centres.
             left = np.clip(distance - self.half_voxel_mm - float(preview_mm), 0.0, None)
             out[:, column] = np.where(np.isfinite(distance), left, FAR_VALUE).astype(np.float32)
+        if self.capsule is not None:
+            out[:, 2] = self._capsule_mm(np.asarray(index_pts, np.float64).reshape(-1, 3), preview_mm)
         return out
 
+    def _capsule_mm(self, points, preview_mm):
+        """The through-bone distance of the nearest bone voxel around each surface vertex."""
+        field = self.capsule
+        limit = np.array(field.shape) - 1
+        low = np.floor(points).astype(np.intp)
+        best = np.full(len(points), FAR_VALUE, np.float32)
+        nearest = np.full(len(points), np.inf)
+        for corner in np.ndindex(2, 2, 2):
+            voxel = np.clip(low + np.array(corner), 0, limit)
+            value = field[voxel[:, 0], voxel[:, 1], voxel[:, 2]]
+            squared = ((points - voxel) ** 2).sum(axis=1)
+            take = (value < FAR_VALUE) & (squared < nearest)
+            best[take], nearest[take] = value[take], squared[take]
+        return np.where(best < FAR_VALUE, np.clip(best - float(preview_mm), 0.0, None), FAR_VALUE).astype(np.float32)
 
-def build_index(occupied, colors, document, mm_per_voxel, bone_rgb) -> ThinBoneIndex:
+
+def build_index(occupied, colors, document, mm_per_voxel, bone_rgb, capsule=None) -> ThinBoneIndex:
     """KD-trees of each group's voxels that touch bone, from the intact volume.
 
     Each label is cropped to its own box before the neighbour test, so the
@@ -183,7 +225,7 @@ def build_index(occupied, colors, document, mm_per_voxel, bone_rgb) -> ThinBoneI
         if len(points):
             trees[group] = cKDTree(points * mm)
     bone_packed = bone_rgb[0] | (bone_rgb[1] << 8) | (bone_rgb[2] << 16)
-    index = ThinBoneIndex(trees, mm, bone_packed, counts)
+    index = ThinBoneIndex(trees, mm, bone_packed, counts, capsule)
     summary = ", ".join(f"{group} {counts[group]}" for group, _names in GROUPS)
     print(f"Thin bone index ({summary} voxels touching bone) in {time.perf_counter() - started:.1f} s", flush=True)
     return index

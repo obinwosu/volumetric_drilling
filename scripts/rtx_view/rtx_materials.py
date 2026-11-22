@@ -9,12 +9,15 @@ a structure without renaming it. Lighting stays in tuner_light.json.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 
 import numpy as np
 
+import specimen_look
+
 HERE = pathlib.Path(__file__).resolve().parent
-MATERIALS_PATH = HERE / "tuner_materials.json"
+MATERIALS_PATH = pathlib.Path(os.environ.get("FIVRS_MATERIALS_PATH") or HERE / "tuner_materials.json")  # env: previews
 LABELS_PATH = HERE.parents[1] / "ADF" / "color" / "volume_labels.yaml"
 
 # Segmentation color the plugin treats as bone. Official names are keyed by
@@ -433,7 +436,7 @@ def load_document() -> dict:
             slots[alias] = dict(slots[hex_id])
         elif alias in slots and hex_id not in slots:
             slots[hex_id] = dict(slots[alias])
-    return document
+    return specimen_look.apply_materials(document)
 
 
 def save_document(document: dict) -> None:

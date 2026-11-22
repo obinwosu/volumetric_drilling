@@ -38,7 +38,7 @@ Soft tissue work (`scripts/soft_tissue/`: soft ear demo, fast C++ solver, atlas/
 
 - Do not regress suction, dust, drill pose, lighting, or voxel authority except as needed for the flake work below.
 - Spacebar must **not** activate the drill.
-- Suction is the rigid body `frazier_suction`. Button mappings stay unchanged, except the pause menu, which the user changed on 2026-11-08: tap Stylus 2 = down, tap Stylus 1 = up, left pedal = select, middle pedal = back / close (the drill then waits for the pedal to be released). Double-tap Stylus 1 still opens the menu. The study tutorial no longer asks for a burr change. 2026-11-16 (user): a tap of the middle pedal outside the pause menu steps to the next burr size (1 -> 2 -> 4 -> 6 -> 1 mm, on release; not with the microscope button held, which zooms out, and not for a press that began in the menu). Double-tap recenter puts the burr on the middle of the view (start-up placement stays right of centre); stylus taps ignore presses after a < 40 ms release (bounce) and for 0.45 s after a recenter, so one double-tap recenters once.
+- Suction is the rigid body `frazier_suction`. Button mappings stay unchanged, except the pause menu, which the user changed on 2026-11-08: tap Stylus 2 = down, tap Stylus 1 = up, left pedal = select, middle pedal = back / close (the drill then waits for the pedal to be released). Double-tap Stylus 1 still opens the menu. The study tutorial no longer asks for a burr change. 2026-11-16 (user): a tap of the middle pedal outside the pause menu steps to the next burr size (1 -> 2 -> 4 -> 6 -> 1 mm, on release; not with the microscope button held, which zooms out, and not for a press that began in the menu). Double-tap recenter puts the burr on the middle of the view (start-up placement stays right of centre); stylus taps ignore presses after a < 40 ms release (bounce) and for 0.45 s after a recenter, so one double-tap recenters once. 2026-11-21 (user): Ctrl + hold Stylus 2 / 1 = zoom in / out, hold Stylus 1 = pan camera, Shift + hold Stylus 2 = orbit around the burr (was Ctrl), Shift + left drag = pan, middle or Shift + middle drag = orbit the volume.
 - World down is `(0, 0, -1)`.
 - Do not change bone rendering or AMBF voxel removal except for the authorized flake fix.
 - Irrigation is a **film on bone**, not SPH. Do not port Mantaflow, SPlisHSPlasH, DualSPHysics, FluidX3D, Taichi, tyFlow, or Flowmap Generator, and do not silently substitute SPH.
@@ -133,6 +133,32 @@ Launcher tab **Graphics study** (`scripts/study_gui/graphics_study_mode.py`, log
 - One file: `ADF/world/canonical_views.yaml`. The tuner (`camera_views.save_views`), the pause menu (`saveCurrentIntoView`) and the launcher's **Saved Views** list (was "Canonical view") all use it. "Default" = the view whose id is the anatomy's laterality (`left` / `right`); the list shows its label and re-reads the file each time it is opened.
 - Bug fixed: the RTX desktop card's last command in `/tmp/fivrs-rtx/pause_menu.txt` (from 2026-10-31: `1 apply right_transtemporal`) replayed on every launch and replaced the startup view with "Right mastoid". The plugin now deletes that file at startup.
 - Anatomies can be renamed in the launcher (button under the list, or right-click): `add_volume_tab.rename_volume` changes only that entry's `name:` line in `gui_setup.yaml`.
+
+## UR5 expert drilling recordings (built 2026-11-21, for training a robot drilling policy)
+
+Launcher tab **UR5** (`scripts/study_gui/expert_drilling_tab.py`), own settings (saved as `expert_drilling:` in `gui_setup.yaml`), default Fastest + drill only. Specimens: `scripts/expert_drilling/specimens.yaml`, made by `prepare_specimens.py` from `~/Downloads/ur5_specimens123` at the native 0.35 mm (`T_lps_voxel` maps a voxel to the source segmentation). Side and pose come from fitting the inner ear to RT143 / LT143 (4/4 known anatomies right); not confirmed by hand. Volumes are in git-ignored `resources/volumes/ur5_specimen*`: commit with `git add -f`.
+
+Sessions: `<recording base>/expert_drillings/<Last_First>/<Specimen>/session_NNN/` (`session.json`, `ground_truth.h5`, `video.h5`) + `sessions.csv`. Layout in `scripts/expert_drilling/expert_dataset.py`; `ExpertSession.occupancy_at(t)` rebuilds the voxels. On stop the replay is compared with AMBF's real final volume (`summary.replay_check`). Plugin additions for it: `drill_pose_physics` topic (1 kHz, only with a subscriber), `recorder_dump.request`, `volume_reset_count` + `sim_time` in `drill_state.json`.
+
+Burrs: the simulator's sizes (1, 2, 4, 6 mm) are used as they are (user, 2026-11-21: do not rescale or raise this again). Each session logs the starting burr and every change of size, type and removal limit (`derived/burr_timeline`, `summary.burr_sequence`), and the burr behind each voxel and stroke. The force topic's torque field is a copy of the force, so only force is recorded. In RTX mode the voxel topic's colors are black; labels come from the recorded volume.
+
+Every UR5 session is recorded (user, 2026-11-21: no record button). Start simulator locks the drill (`study_drill_lock`, content `ur5`) until the recorder holds the starting volume; closing the RTX view or simulator asks Save / Discard (Discard = system Trash; closing the box or the launcher saves).
+
+**Add specimens from CT** (UR5 tab, `scripts/study_gui/ur5_ct_dialog.py` + `scripts/segmentation/ur5_ct_worker.py`, tbone venv, run under `systemd-run` MemoryMax=12G): splits a scan into bones, segments bone + inner ear (two passes: pose from the first), previews, adds the accepted bones. Build on this machine and export the volumes to others. An uncapped 56 mm box OOM-killed the desktop app on 2026-11-21. TB12 vs hand labels: inner ear Dice 0.77 / 0.84, bone 0.80 / 0.75. TB345: the bone matching hand Specimen 3 failed (inner ear Dice 0.33, poor shape fit), so Specimen 3 stays hand-labelled. **Specimen 4 (worker bone 2) and Specimen 5 (worker bone 1) are automatic; Specimen 5's inner ear is flagged as a poor fit, and which TB number each is has not been confirmed by the user.** All five ADFs now use the shared ear pose below (the earlier shift onto the default view axis was undone).
+
+**One ear pose per side** (user, 2026-11-21): `scripts/segmentation/align_ear_pose.py` (`middle_ear_newton/.venv/bin/python`; report only without `--apply`) rigidly fits each inner ear to Anatomy A (right) or Anatomy D (left) and rewrites only the ADF's position and orientation, so one saved view fits a whole side. Originals: `resources/intermediate_volumes/adf_before_ear_pose/`. New CT volumes are aligned by `tbone_worker.py`. Skipped: volumes whose slices are not on this machine (run the tool where they are), AMBF Delta (no full inner ear label), Anatomy 512 (no laterality). The on-screen pause card now sets burr size and type through `proctor_menu.txt` (`pause_menu.py`; no plugin rebuild).
+
+**Hollow inner ear + otic capsule** (user, 2026-11-21: the inner ear label is the membranous labyrinth, so it is empty space): `scripts/expert_drilling/otic_capsule.py` clears it from UR5 volumes and writes `otic_capsule.npz` beside the slices (the mask, plus per-voxel mm from the cavity wall **through bone only**, never across air: `through_bone`, `dense_bone`). `thin_bone.load_capsule` feeds that to the existing otic tint; other anatomies are unchanged. Recordings keep the mask as `volume/inner_ear`. Pre-hollow slices: `resources/intermediate_volumes/ur5_before_hollow/`. Bone IDs: Specimen N = TBN, matched with `~/seg_tb3_tb4_tb5.seg.nrrd` (quick thresholds: matching only, never validation).
+
+**UR5 look** (user's choice, 2026-11-21): whiter bone, Warm cream capsule, dense capsule only, 2.5 mm, hollow labyrinth. Values in `scripts/rtx_view/ur5_specimen_look.json`; `specimen_look.py` lays them over the tuner values in the live RTX view only for volumes with `otic_capsule.npz`, and never saves them. Other anatomies and the tuner are unchanged. Test: `middle_ear_newton/.venv/bin/python scripts/rtx_view/test_specimen_look.py`.
+
+**Development session** toggle (on by default while the pipeline is being built): saves to `<recording base>/expert_drillings_dev/` with its own numbering and `sessions.csv`. Turn it off for real expert data.
+
+**Review tab** (user, 2026-11-21): the review app now lives in the launcher (`scripts/study_gui/review_tab.py`; loads when first opened, pauses when left). **Generate reviewable session** on Main's Recording row (`reviewable_session.py`, off by default, not used by studies or UR5) runs the UR5 recorder on any anatomy and saves to `<recording base>/reviewable_sessions/<person>/<anatomy>/session_NNN/` without asking; a recorder failure releases the drill. Not yet run on a live simulator. Test: `QT_QPA_PLATFORM=offscreen python3 scripts/study_gui/test_reviewable_session.py`.
+
+Session review app (also standalone from the dock): `python3 scripts/session_review/review_app.py [session folder]`, or **Review sessions** on the UR5 tab. System Python (PyQt5, VTK, OpenCV) + h5py from the feedback venv. `session_data.py` is the GUI-free reader. `make_demo_session.py` writes a synthetic session. Dock icon: `scripts/session_review/install_dock_icon.sh` (run once per machine, also on the lab machine).
+
+Tests: `feedback_system/.venv/bin/python scripts/expert_drilling/test_expert_recording.py`, `QT_QPA_PLATFORM=offscreen python3 scripts/study_gui/test_expert_drilling_tab.py`, `QT_QPA_PLATFORM=offscreen python3 scripts/session_review/test_session_review.py`.
 
 ## Add a volume: CT -> segmentation -> anatomy (built 2026-11-13)
 
@@ -245,15 +271,28 @@ User wants A+C after finishing D:
 
 This is an explicit exception to “do not change bone rendering / voxel authority.” Do not also change irrigation, DLSS, suction, or lighting.
 
-## Haptics tuner (branch `haptics-compare`, built 2026-11-22, not yet run on the Touch)
+## Haptics tuner (built 2026-11-22, merged into `feature/graphics-compare`)
 
-Lives only in the worktree `../volumetric_drilling_haptics_compare`. Build with `scripts/haptics_tuner/build.sh` (into `.haptics/`, never the shared `install/`), run `python3 scripts/haptics_tuner/haptics_tuner.py`. It launches AMBF + RTX on a 32 mm bone cube (`make_bone_cube.py`, `launch_haptics.yaml`) with `FIVRS_HAPTIC_TUNER=1`; without that variable the plugin keeps stock forces.
+Build the standalone tuner with `scripts/haptics_tuner/build.sh` (into `.haptics/`, never the shared `install/`), run `python3 scripts/haptics_tuner/haptics_tuner.py`. It launches AMBF + RTX on a 32 mm bone cube (`make_bone_cube.py`, `launch_haptics.yaml`) with `FIVRS_HAPTIC_TUNER=1`; without that variable the plugin keeps stock forces.
 
 - `plugin/volumetric_drilling/haptic_tuning.h`: force-gated removal (mm3/s per burr), stiffness multiplier, hum. Settings are read each physics tick from `/dev/shm/fivrs_haptic_tuning`, plots come from `/dev/shm/fivrs_haptic_telemetry`; layout mirrored in `scripts/haptics_tuner/tuning_shm.py`.
 - The hum is added **after** `HapticSafety`, because the guard reads a hum of about 0.6 N as unstable contact and cuts all force. It has its own 0.6 N cap and stops if the guard trips. Contact force still goes through the guard.
 - Touch start-up is the main simulator's: libhdPhantom's warm-up and self-check run by themselves and the tuner only displays the result (user, 2026-11-22: never gate force on it). Force starts once the request has been near zero for 0.25 s, so a burr starting in bone cannot push on a docked stylus. A force held above about 1.5 N RMS is eased to the 0.88 N continuous rating.
+- Launcher: Advanced tab **Haptics** box (`scripts/study_gui/haptics_preset.py`, saved as `haptics_preset` in `gui_setup.yaml`) starts Main launches with a tuner preset. Stock leaves `FIVRS_HAPTIC_TUNER` unset. Studies and UR5 recordings always use Stock. Test: `QT_QPA_PLATFORM=offscreen python3 scripts/study_gui/test_haptics_preset.py`.
 - Not built yet: drag, chatter, burr skating, motion scale.
 - Tests: `g++ -std=c++17 -I plugin/volumetric_drilling scripts/haptics_tuner/test_haptic_tuning.cpp -o <tmp> && <tmp>`, `QT_QPA_PLATFORM=offscreen python3 scripts/haptics_tuner/test_haptics_tuner.py`.
+
+## Lab machines: differences to rectify (noted 2026-11-22)
+
+The lab machines have local changes that were not on GitHub when this was written. The user will push them from the lab. **Before that push, pull this branch on the lab and merge; do not overwrite either side.** Then bring the good lab changes to every machine.
+
+- **Bring everywhere: mesh update / first-cut lag.** The lab fixed a short lag right when drilling starts, related to how voxels removed on the GPU are written back to the CPU. It also gained FPS. The user does not remember the exact change, so read the lab diff (`scripts/rtx_view/surface.py`, `warp_mesh.py`, `fivrs_rtx_view.py` are the likely places).
+- **Default graphics everywhere: Fastest.** DLSS ultra performance, 1 sample, 2 light bounces, no irrigation, no bone dust, no suction (`SIM_OPTION_DEFAULTS` in `gui_setup.py`). The lab should always run this. A `sim_options` block saved in a machine's `gui_setup.yaml` still overrides the default, so check the lab's.
+- **RTX 3080 lab machine:** has its own always-fastest tweaks (compare with the default above and drop what is now redundant) and changes to how the models run on the **Add a volume** tab because of its memory. Keep those for low-memory GPUs, ideally chosen from available memory rather than per machine.
+- **UR5 tab:** the lab machines do not have it, but it arrives with this push. Decide whether to hide it there.
+- `scripts/study_gui/gui_setup.yaml` is machine-specific and was deliberately left out of the 2026-11-22 push.
+
+**This repo is public.** Do not commit patient scans or anything derived from them or named after them without the user's explicit decision. Held back locally on 2026-11-22: the Right Dehiscence ADFs and icons, their volumes, and this machine's anatomy labels in `gui_setup.yaml`. UR5 specimen volumes also stay local (git-ignored) until the user decides.
 
 ## Key files
 

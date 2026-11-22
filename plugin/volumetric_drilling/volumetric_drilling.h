@@ -353,6 +353,8 @@ private:
     int m_endTrialCount = 0;      // End trial confirmed in the pause menu (study session)
     bool m_rightArrowPrev = false;
     long m_drillRecenterCount = 0;
+    // Bone resets so far, written to drill_state.json: a recording must see each one to replay.
+    long m_volumeResetCount = 0;
 
     WaveGenerator m_waveGenerator;
 
@@ -373,9 +375,10 @@ private:
     double m_activeCameraRollDeg = 0.0;
     bool m_customViewActive = false;
     bool m_arcballMouseDown = false;
-    // Shift + middle drag pans (AMBF's own Shift pan is 10x slow and was bent by the
-    // arcball up fix). The pose is kept here so AMBF's change can be undone first.
+    // Shift + left drag pans; Shift + middle drag orbits the volume (AMBF's own Shift +
+    // middle is a slow pan). The pose is kept here so AMBF's change can be undone first.
     bool m_shiftPanDown = false;
+    bool m_shiftOrbitDown = false;
     cTransform m_shiftPanPose;
     double m_shiftPanX = 0.0;
     double m_shiftPanY = 0.0;

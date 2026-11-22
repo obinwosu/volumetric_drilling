@@ -55,6 +55,7 @@
 #include <geometry_msgs/WrenchStamped.h>
 #include <geometry_msgs/Twist.h>
 #include <geometry_msgs/Pose.h>
+#include <geometry_msgs/PoseStamped.h>
 #include <std_msgs/ColorRGBA.h>
 #include <volumetric_drilling_msgs/Voxels.h>
 #include <volumetric_drilling_msgs/DrillSize.h>
@@ -73,6 +74,7 @@
 #include "geometry_msgs/msg/wrench_stamped.hpp"
 #include "geometry_msgs/msg/twist.hpp"
 #include "geometry_msgs/msg/pose.hpp"
+#include "geometry_msgs/msg/pose_stamped.hpp"
 #include "std_msgs/msg/color_rgba.hpp"
 #endif
 
@@ -109,6 +111,8 @@ public:
     uint64_t removedCount() const { return m_removedCount; }
 
     void publishForceFeedback(cVector3d& force, cVector3d& moment, double time);
+    // Drill pose every physics step, only while something (the expert recorder) listens.
+    void publishDrillPose(const cTransform& pose, double time);
 
     void publishDrillReposition(const cTransform& poseFrom, const cTransform& poseTo, double time);
 
@@ -125,6 +129,7 @@ private:
     std::shared_ptr<ros::Publisher> m_drillSizePub;
     std::shared_ptr<ros::Publisher> m_volumeInfoPub;
     std::shared_ptr<ros::Publisher> m_forcefeedbackPub;
+    std::shared_ptr<ros::Publisher> m_drillPosePub;
     std::shared_ptr<ros::Publisher> m_drillRepositionPub;
     std::shared_ptr<ros::Subscriber> m_removeVoxelsSub;
     std::shared_ptr<ros::Subscriber> m_cameraNudgeSub;
@@ -133,6 +138,7 @@ private:
     volumetric_drilling_msgs::DrillSize m_drill_size_msg;
     volumetric_drilling_msgs::VolumeInfo m_volume_info_msg;
     geometry_msgs::WrenchStamped m_force_feedback_msg;
+    geometry_msgs::PoseStamped m_drill_pose_msg;
     volumetric_drilling_msgs::DrillReposition m_drill_reposition_msg;
 
     #elif AMBF_ROS2
@@ -140,6 +146,7 @@ private:
     rclcpp::Publisher<volumetric_drilling_msgs::msg::DrillSize>::SharedPtr m_drillSizePub;
     rclcpp::Publisher<volumetric_drilling_msgs::msg::VolumeInfo>::SharedPtr m_volumeInfoPub;
     rclcpp::Publisher<geometry_msgs::msg::WrenchStamped>::SharedPtr m_forcefeedbackPub;
+    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr m_drillPosePub;
     rclcpp::Publisher<volumetric_drilling_msgs::msg::DrillReposition>::SharedPtr m_drillRepositionPub;
     rclcpp::Subscription<volumetric_drilling_msgs::msg::Index>::SharedPtr m_removeVoxelsSub;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr m_cameraNudgeSub;
@@ -148,6 +155,7 @@ private:
     volumetric_drilling_msgs::msg::DrillSize m_drill_size_msg;
     volumetric_drilling_msgs::msg::VolumeInfo m_volume_info_msg;
     geometry_msgs::msg::WrenchStamped m_force_feedback_msg;
+    geometry_msgs::msg::PoseStamped m_drill_pose_msg;
     volumetric_drilling_msgs::msg::DrillReposition m_drill_reposition_msg;
 
     #endif

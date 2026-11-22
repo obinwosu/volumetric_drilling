@@ -1,0 +1,206 @@
+# Written by prepare_specimens.py and ur5_ct_worker.py. Listed in the launcher's UR5 tab.
+specimens:
+- name: Specimen 1
+  description: 'Cadaveric temporal bone 1: bone + inner ear, right ear, 0.35 mm voxels.'
+  adf_path: ADF/volume_ur5_specimen1_0p350mm.yaml
+  icon_path: scripts/study_gui/assets/ur5_specimen1.png
+  laterality: right
+  laterality_source: inner ear fit to the reference anatomies; not confirmed by hand
+  laterality_fit_mm:
+    right: 0.349
+    left: 0.812
+  voxel_mm: 0.34999999849923763
+  voxel_shape_xyz:
+  - 152
+  - 111
+  - 110
+  voxels:
+    bone: 225956
+    inner_ear: 6623
+  labels:
+    bone: fff9db
+    inner_ear: 5b7b5b
+  source_file: seg_TB_bone1.seg.nrrd
+  source_sha256: a265051779045517ecd01fb83d34376784979e28397e3f0430821f4707599deb
+  T_lps_voxel:
+  - - 0.0
+    - -0.34999999954482497
+    - -1.784999974716944e-05
+    - 71.9079340881622
+  - - -0.3499999999999998
+    - 0.0
+    - 0.0
+    - 17.629102
+  - - 0.0
+    - 1.7849999976786063e-05
+    - -0.3499999950425382
+    - 18.032400693900623
+  - - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
+  bone_id: TB1
+- name: Specimen 2
+  description: 'Cadaveric temporal bone 2: bone + inner ear, left ear, 0.35 mm voxels.'
+  adf_path: ADF/volume_ur5_specimen2_0p350mm.yaml
+  icon_path: scripts/study_gui/assets/ur5_specimen2.png
+  laterality: left
+  laterality_source: inner ear fit to the reference anatomies; not confirmed by hand
+  laterality_fit_mm:
+    left: 0.419
+    right: 0.811
+  voxel_mm: 0.34999999849923763
+  voxel_shape_xyz:
+  - 155
+  - 114
+  - 137
+  voxels:
+    bone: 207044
+    inner_ear: 4320
+  labels:
+    bone: fff9db
+    inner_ear: 5b7b5b
+  source_file: seg_TB_bone2.seg.nrrd
+  source_sha256: 0919698616ac1f322a46135300877204034b4c1439bc182a3e83e66f70f931eb
+  T_lps_voxel:
+  - - 0.0
+    - -0.34999999954482497
+    - -1.784999974716944e-05
+    - 72.26196818764987
+  - - -0.3499999999999998
+    - 0.0
+    - 0.0
+    - 15.179102
+  - - 0.0
+    - 1.7849999976786063e-05
+    - -0.3499999950425382
+    - 97.13238172351429
+  - - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
+  bone_id: TB2
+- name: Specimen 3
+  description: 'Cadaveric temporal bone 3: bone + inner ear, left ear, 0.35 mm voxels.'
+  adf_path: ADF/volume_ur5_specimen3_0p350mm.yaml
+  icon_path: scripts/study_gui/assets/ur5_specimen3.png
+  laterality: left
+  laterality_source: inner ear fit to the reference anatomies; not confirmed by hand
+  laterality_fit_mm:
+    left: 0.407
+    right: 0.801
+  voxel_mm: 0.3499999972478016
+  voxel_shape_xyz:
+  - 117
+  - 97
+  - 185
+  voxels:
+    bone: 204921
+    inner_ear: 4670
+  labels:
+    bone: fff9db
+    inner_ear: 5b7b5b
+  source_file: seg_TB_bone3.seg.nrrd
+  source_sha256: 402465390475f096f13c864545c4b3969730b657997b499f9497dbe701874fd6
+  T_lps_voxel:
+  - - 0.0
+    - -0.34999999992282504
+    - 7.329166666666017e-06
+    - 100.89753615686544
+  - - -0.35000000000000003
+    - 0.0
+    - 0.0
+    - 62.71739699999995
+  - - 0.0
+    - -7.349999998379326e-06
+    - -0.3499999916666667
+    - 107.5499447833331
+  - - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
+  bone_id: TB3
+- name: Specimen 4
+  description: 'Specimen 4: bone + inner ear, left ear, 0.35 mm voxels.'
+  adf_path: ADF/volume_ur5_specimen_4_0p350mm.yaml
+  icon_path: scripts/study_gui/assets/ur5_specimen_4.png
+  laterality: left
+  laterality_source: inner ear fit to the reference anatomies; not confirmed by hand
+  laterality_fit_mm:
+    left: 0.557
+    right: 0.921
+  voxel_mm: 0.3499999940395355
+  voxel_shape_xyz:
+  - 109
+  - 100
+  - 134
+  voxels:
+    bone: 185738
+    inner_ear: 2819
+  labels:
+    bone: fff9db
+    inner_ear: 5b7b5b
+  source_file: TB345_CT.nrrd
+  source_sha256: 1e0ff6801c5a6bd0be50dfa13a066629f366343fa04a2e45fb1d93549b11b1a8
+  T_lps_voxel:
+  - - 0.0
+    - -0.34999999396236053
+    - 7.350000030981436e-06
+    - 102.64777113985022
+  - - -0.3499999940395355
+    - 0.0
+    - 0.0
+    - 12.317397594451904
+  - - 0.0
+    - -7.350000030981436e-06
+    - -0.34999999396236053
+    - 96.34998186518288
+  - - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
+  segmentation: 'automatic: tbone nnU-Net fold 0, bone + inner ear (ur5_ct_worker.py)'
+  source_bone: 2
+  bone_id: TB4
+- name: Specimen 5
+  description: 'Specimen 5: bone + inner ear, left ear, 0.35 mm voxels.'
+  adf_path: ADF/volume_ur5_specimen_5_0p350mm.yaml
+  icon_path: scripts/study_gui/assets/ur5_specimen_5.png
+  laterality: left
+  laterality_source: inner ear fit to the reference anatomies; not confirmed by hand
+  laterality_fit_mm:
+    left: 0.829
+    right: 0.978
+  voxel_mm: 0.3499999940395355
+  voxel_shape_xyz:
+  - 95
+  - 90
+  - 102
+  voxels:
+    bone: 149535
+    inner_ear: 1719
+  labels:
+    bone: fff9db
+    inner_ear: 5b7b5b
+  source_file: TB345_CT.nrrd
+  source_sha256: 1e0ff6801c5a6bd0be50dfa13a066629f366343fa04a2e45fb1d93549b11b1a8
+  T_lps_voxel:
+  - - 0.0
+    - -0.34999999396236053
+    - 7.350000030981436e-06
+    - 103.34786667777534
+  - - -0.3499999940395355
+    - 0.0
+    - 0.0
+    - -31.78260165452957
+  - - 0.0
+    - -7.350000030981436e-06
+    - -0.34999999396236053
+    - 91.79999664367226
+  - - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
+  segmentation: 'automatic: tbone nnU-Net fold 0, bone + inner ear (ur5_ct_worker.py)'
+  source_bone: 1
+  bone_id: TB5

@@ -11,8 +11,8 @@ VOLUME mastoidectomy_volume_low:
   name: mastoidectomy_volume_low
   laterality: left
   location:
-    position: {x: -5.944945679, y: 0.005768253, z: 0.145914031}  # keeps the ear where volume_left_dehiscence_ct_0p196mm.yaml has it
-    orientation: {r: 1.57079, p: 1.8, y: 3.14}
+    position: {x: -6.205730941, y: 0.030171767, z: -0.122123707}  # keeps the ear where volume_left_dehiscence_ct_0p196mm.yaml has it
+    orientation: {r: -2.830803770, p: 1.107516900, y: -1.285596708}
   scale: 1.0
   # Physical size in AU (1 AU = 49.664 mm): x = image columns, y = image rows, z = slices.
   dimensions: {x: 1.247101, y: 1.258940, z: 1.018202}

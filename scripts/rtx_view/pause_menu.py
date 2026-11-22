@@ -14,6 +14,12 @@ import camera_views
 
 RUNTIME = pathlib.Path("/tmp/fivrs-rtx")
 COMMAND_PATH = RUNTIME / "pause_menu.txt"
+# Burr changes use the proctor window's command file. It acts on an open simulator menu only, so
+# each change starts with "open" (nothing happens if the pedal already opened it).
+BURR_COMMAND_PATH = RUNTIME / "proctor_menu.txt"
+BURR_SIZES_MM = (1, 2, 4, 6)  # the plugin's "burr_size <k>" counts smallest first
+BURR_STYLES = (("cutting", "Cutting"), ("diamond", "Diamond"))
+BURR_QUEUE_TIMEOUT_S = 2.0
 
 
 def visible_views(views, laterality: str) -> list[dict]:
@@ -58,6 +64,66 @@ def _send(viewer, verb: str, view_id: str = "") -> None:
     temporary.replace(COMMAND_PATH)
 
 
+def burr_commands(kind: str, value) -> list[str]:
+    """The simulator commands for one burr choice: kind "size" (mm) or "style"."""
+    if kind == "size":
+        return ["open\n", f"burr_size {BURR_SIZES_MM.index(int(value))}\n"]
+    if value not in {key for key, _ in BURR_STYLES}:
+        raise ValueError(f"Unknown burr type {value}")
+    return ["open\n", f"burr_type {value}\n"]
+
+
+def _choose_burr(viewer, kind: str, value) -> None:
+    viewer._burr_queue = burr_commands(kind, value)  # the latest choice replaces one still waiting
+    viewer._burr_queue_at = time.perf_counter()
+    viewer._pause_status = f"Burr: {value} mm" if kind == "size" else f"Burr: {value}"
+    pump_burr(viewer)
+
+
+def pump_burr(viewer) -> None:
+    """Hand over one command at a time: the simulator removes the file when it has read it."""
+    queue = getattr(viewer, "_burr_queue", None)
+    if not queue:
+        return
+    if time.perf_counter() - float(getattr(viewer, "_burr_queue_at", 0.0)) > BURR_QUEUE_TIMEOUT_S:
+        viewer._burr_queue = []
+        viewer._pause_status = "The simulator did not take the burr change."
+        return
+    if BURR_COMMAND_PATH.exists():
+        return
+    RUNTIME.mkdir(parents=True, exist_ok=True)
+    partial = BURR_COMMAND_PATH.with_suffix(".txt.card")
+    partial.write_text(queue.pop(0))
+    partial.replace(BURR_COMMAND_PATH)
+
+
+def _burr_button(imgui, label: str, current: bool, width: float) -> bool:
+    if current:
+        imgui.push_style_color(imgui.Col_.button, imgui.ImVec4(0.18, 0.56, 0.75, 1.0))
+    clicked = imgui.button(label, imgui.ImVec2(width, 0))
+    if current:
+        imgui.pop_style_color()
+    return clicked
+
+
+def _draw_burr(imgui, viewer, session: dict) -> None:
+    imgui.text("Burr size")
+    imgui.same_line(110)
+    for k, size in enumerate(BURR_SIZES_MM):
+        if k:
+            imgui.same_line()
+        if _burr_button(imgui, f"{size} mm##burr_size", session.get("size_mm") == size, 68):
+            _choose_burr(viewer, "size", size)
+    imgui.text("Burr type")
+    imgui.same_line(110)
+    for k, (key, label) in enumerate(BURR_STYLES):
+        if k:
+            imgui.same_line()
+        if _burr_button(imgui, f"{label}##burr_type", session.get("style") == key, 150):
+            _choose_burr(viewer, "style", key)
+    imgui.separator()
+
+
 def toggle(viewer) -> None:
     opening = not is_open(viewer)
     viewer._pause_open = opening
@@ -78,11 +144,14 @@ def sync(viewer, state: dict | None) -> None:
         value = state.get(key)
         if isinstance(value, str):
             session[key] = value
-    if not session.get("drill"):
-        size = state.get("size_mm")
-        style = state.get("style")
-        if size:
-            session["drill"] = f"{int(size)} mm {style or ''}".strip()
+    size = state.get("size_mm")
+    style = state.get("style")
+    if size:
+        session["size_mm"] = int(size)
+    if isinstance(style, str):
+        session["style"] = style
+    if size and not isinstance(state.get("drill"), str):
+        session["drill"] = f"{int(size)} mm {style or ''}".strip()
     reported = state.get("paused")
     if not isinstance(reported, bool):
         return
@@ -168,10 +237,11 @@ def _save_new(viewer) -> None:
 
 
 def _draw(imgui, viewer) -> None:
+    pump_burr(viewer)
     if not is_open(viewer):
         return
     io = imgui.get_io()
-    width, height = 460.0, 620.0
+    width, height = 460.0, 720.0
     display = io.display_size
     imgui.set_next_window_pos(
         imgui.ImVec2((display[0] - width) * 0.5, (display[1] - height) * 0.5),
@@ -202,6 +272,7 @@ def _draw(imgui, viewer) -> None:
         wrote_session = True
     if wrote_session:
         imgui.separator()
+    _draw_burr(imgui, viewer, session)
 
     imgui.text("Views")
     views = visible_views(_reload_views(viewer), session.get("laterality") or "")

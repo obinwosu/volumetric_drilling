@@ -49,7 +49,8 @@ def _resolve_config_value(raw, *, as_path=True):
     return text
 
 
-# Advanced-tab simulation options. The defaults match the full lab setup.
+# Advanced-tab simulation options. The default is the fastest graphics, with no
+# suction or irrigation, on every machine (user, 2026-11-22).
 DLSS_LEVELS = ("quality", "balanced", "performance", "ultra_performance")
 SAMPLE_CHOICES = (1, 2, 4)
 # 0 = the tuner's irrigation panel value (tuner_irrigation.json max_bounces).
@@ -60,7 +61,7 @@ PRESETS = {
     "balanced": {"dlss": "performance", "samples": 1, "bounces": 0, "irrigation": True, "bone_dust": False},
     "beautiful": {"dlss": "quality", "samples": 2, "bounces": 8, "irrigation": True, "bone_dust": True},
 }
-SIM_OPTION_DEFAULTS = {"preset": "balanced", **PRESETS["balanced"], "suction": True}
+SIM_OPTION_DEFAULTS = {"preset": "fastest", **PRESETS["fastest"], "suction": False}
 
 
 def matching_preset(options):
@@ -154,14 +155,18 @@ class GUIConfiguration:
     def save_value(self, key, value):
         """Write one top-level key to the file, leaving everything else in it as is
         (unlike save(), which also writes unsaved parameter and render changes).
-        Only that key's line changes (or one line is appended), so the rest of the file
-        keeps its order and formatting."""
+        Only that key's lines change (or are appended), so the rest of the file keeps its
+        order and formatting."""
         self.yaml_data[key] = value
-        line = yaml.safe_dump({key: value}, default_flow_style=False)
+        line = yaml.safe_dump({key: value}, default_flow_style=False, allow_unicode=True)
         lines = self.yaml_file_path.read_text().splitlines(keepends=True)
         for index, text in enumerate(lines):
             if text.startswith(f"{key}:"):
-                lines[index] = line
+                # A block value: its indented (or list) lines below the key go too.
+                end = index + 1
+                while end < len(lines) and lines[end].startswith((" ", "\t", "- ")):
+                    end += 1
+                lines[index:end] = [line]
                 break
         else:
             if lines and not lines[-1].endswith("\n"):

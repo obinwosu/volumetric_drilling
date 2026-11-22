@@ -756,6 +756,7 @@ def _author_scene(viewer, lights, camera, close_all=False):
                     document,
                     np.asarray(dimensions, np.float64) / np.asarray(occupied.shape, np.float64) / thin_bone.MM_TO_SIM,
                     bone_rgb,
+                    capsule=thin_bone.load_capsule(ADF),
                 )
                 viewer._thin_cache_index = bone_mesh["index"]
                 viewer._thin_bone_hook = lambda prim_, name_, tris_, mask_, hidden_: thin_bone.attach_subset(

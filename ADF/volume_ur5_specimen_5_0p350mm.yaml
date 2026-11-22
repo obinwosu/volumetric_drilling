@@ -1,0 +1,27 @@
+# AMBF Version: (0.1)
+bodies: []
+joints: []
+volumes: [VOLUME mastoidectomy_volume_low]
+high resolution path: ./meshes/high_res/
+low resolution path: ./meshes/low_res/
+ignore inter-collision: true
+namespace: /ambf/env/
+
+VOLUME mastoidectomy_volume_low:
+  name: mastoidectomy_volume_low
+  laterality: left
+  location:
+    position: {x: -6.303326606, y: 0.021189772, z: 0.011487384}  # inner ear on the left reference anatomy's
+    orientation: {r: -2.884124816, p: -1.128031493, y: -2.294686763}
+  scale: 1.0
+  # Physical size in AU (1 AU = 49.664 mm): x = image columns, y = image rows, z = slices.
+  dimensions: {x: 0.669499, y: 0.634262, z: 0.718831}
+  images:
+    path: ../resources/volumes/ur5_specimen_5_0p350mm
+    prefix: plane00
+    format: png
+    count: 102
+  shaders:
+    path: ./shaders/dvr/
+    vertex: shader.vs
+    fragment: shader.fs

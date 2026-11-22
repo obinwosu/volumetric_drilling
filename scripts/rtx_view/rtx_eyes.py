@@ -14,7 +14,8 @@ Shared memory layout (little endian), read by ambf_openxr_eyepiece.cpp:
     16  4  width
     20  4  height
     24  4  vertical field of view of each eye, radians
-    28 36  reserved
+    28  4  distance from the scope to the point both eyes aim at, simulator units (recordings)
+    32 32  reserved
     64     left image, then right image: RGBA8, bottom row first (OpenGL)
 """
 
@@ -105,7 +106,7 @@ class EyeShare:
             for k in range(2)
         ]
 
-    def write(self, left: np.ndarray, right: np.ndarray, fov_y: float = 0.0) -> None:
+    def write(self, left: np.ndarray, right: np.ndarray, fov_y: float = 0.0, focus: float = 0.0) -> None:
         """left, right: (H, W, 4) uint8, top row first as the renderer returns them."""
         height, width = left.shape[:2]
         if right.shape[:2] != (height, width):
@@ -116,6 +117,7 @@ class EyeShare:
         self._seq += 1  # odd: writing
         m[8:16] = np.uint64(self._seq).tobytes()
         m[24:28] = np.float32(fov_y).tobytes()
+        m[28:32] = np.float32(focus).tobytes()
         # One copy per eye, straight into the shared file, flipped to bottom row first.
         for target, image in zip(self._eye_views, (left, right)):
             np.copyto(target, image[::-1, :, :4], casting="unsafe")
@@ -371,5 +373,5 @@ class Eyes:
                     self._overlay_warned = True
         self._time("text", t0)
         t0 = time.perf_counter()
-        self.share.write(left, right, fov)
+        self.share.write(left, right, fov, self.focus_used or 0.0)
         self._time("write", t0)

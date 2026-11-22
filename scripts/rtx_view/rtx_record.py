@@ -39,9 +39,9 @@ VERSION = 1
 HEADER = 64
 SLOT_HEADER = 80
 SLOTS = 32
-RATE_HZ = 10.0
+RATE_HZ = float(os.environ.get("FIVRS_RECORD_HZ", "10"))
 # The window renders 1280 x 720; every second pixel keeps files near the expert recordings' size.
-MAX_WIDTH = 640
+MAX_WIDTH = int(os.environ.get("FIVRS_RECORD_WIDTH", "640"))
 
 
 def _slot_size(width: int, height: int) -> int:

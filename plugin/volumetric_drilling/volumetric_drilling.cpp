@@ -354,7 +354,7 @@ int afVolmetricDrillingPlugin::init(int argc, char **argv, const afWorldPtr a_af
         cerr << "WARNING! NO FOOTPEDAL /dev/input DEVICE OPEN "
              << "(using keyboard a/b/c, + key 1 cam-clutch)\n";
     }
-    cerr << "INFO! Pedals: hold right=drill; hold left=pause menu; tap middle=next burr size; key 1 (microscope) + left/middle = zoom in/out; Ctrl + stylus action button = orbit; in the pause menu tap left=down, hold left=close (Yes/No), middle=select (each list ends in Back); key 1=cam clutch" << endl;
+    cerr << "INFO! Pedals: hold right=drill; hold left=pause menu; tap middle=next burr size; key 1 (microscope) + left/middle = zoom in/out; Ctrl + stylus 2 / 1 = zoom in / out; hold stylus 1 = pan camera; Shift + stylus 2 = orbit burr; in the pause menu tap left=down, hold left=close (Yes/No), middle=select (each list ends in Back); key 1=cam clutch" << endl;
 
     m_gazeMarkerController.init(m_worldPtr, &m_panelManager);
     cerr << "INFO! GAZE MARKER INITIALIZED \n";
@@ -564,6 +564,12 @@ void afVolmetricDrillingPlugin::publishDrillVisualState()
             << camText
             << deviceText
             << ",\"recenter_count\":" << m_drillRecenterCount
+            << ",\"volume_reset_count\":" << m_volumeResetCount
+            << ",\"voxel_removal_limit\":"
+            << (m_drillManager.m_activeDrill ? m_drillManager.m_activeDrill->getVoxelRemovalThreshold() : 0)
+            << ",\"burr_diameter_sim\":"
+            << (m_drillManager.m_activeDrill ? m_drillManager.m_activeDrill->m_size : 0.0)
+            << ",\"sim_time\":" << std::setprecision(17) << m_worldPtr->getCurrentTimeStamp() << std::setprecision(8)
             << ",\"drill_locked\":" << (m_studyDrillLock ? "true" : "false")
             << ",\"removed_voxels\":"
             << (m_drillManager.m_drillingPub ? m_drillManager.m_drillingPub->removedCount() : 0)
@@ -644,6 +650,18 @@ void afVolmetricDrillingPlugin::publishRtxStatus(double now)
                 << "  \"removed\": " << removed << ",\n"
                 << "  \"wall_time\": " << std::setprecision(17) << now << "\n"
                 << "}\n";
+        }
+    }
+
+    // Expert drilling recorder: its own copy of the voxels. Not occupancy.bin, which the
+    // RTX view reads and deletes for its own resync.
+    const fs::path recorderRequest = dir / "recorder_dump.request";
+    if (fs::exists(recorderRequest)){
+        const fs::path partial = dir / "recorder_dump.part";
+        if (dumpOccupancy(partial.string())){
+            std::error_code dumpError;
+            fs::rename(partial, dir / "recorder_dump.bin", dumpError);
+            fs::remove(recorderRequest, dumpError);
         }
     }
 
@@ -822,6 +840,7 @@ void afVolmetricDrillingPlugin::serviceRtxRestore()
     // updateSceneObjects runs before this graphics update, so the texture
     // copy lands at the start of the next frame. The dump waits for that.
     m_volumeObject->reset();
+    m_volumeResetCount += 1;  // recordings start a new voxel epoch here
     m_rtxRestoreWait = 1;
 }
 
@@ -1426,6 +1445,10 @@ void afVolmetricDrillingPlugin::physicsUpdate(double dt){
                                         m_drillManager.m_suctionTracked);
     }
     m_drillManager.m_drillingPub->publishForceFeedback(force, force, m_worldPtr->getCurrentTimeStamp());
+    if (m_drillManager.m_activeDrill && m_drillManager.m_activeDrill->m_rigidBody){
+        m_drillManager.m_drillingPub->publishDrillPose(
+            m_drillManager.m_activeDrill->m_rigidBody->getLocalTransform(), m_worldPtr->getCurrentTimeStamp());
+    }
     double maxF = m_drillManager.m_hapticDevice->getSpecifications().m_maxLinearForce;
     double force_mag = cClamp(force.length(), 0.0, maxF);
     m_drillManager.setAudioPitch(3.0 - force_mag / maxF);
@@ -1728,6 +1751,7 @@ void afVolmetricDrillingPlugin::updateButtons(){
     m_drillManager.m_camClutch = false;
     m_drillManager.m_deviceClutch = false;
     m_drillManager.m_camOrbitBurr = false;
+    m_drillManager.m_camPanStylus = false;
     m_drillManager.m_suctionClutch = false;
     if (m_drillManager.m_suctionTracked && m_drillManager.m_suctionDevice
         && m_drillManager.m_suctionDevice->isDeviceAvailable()){
@@ -1776,22 +1800,39 @@ void afVolmetricDrillingPlugin::updateButtons(){
     }
 
     if (m_drillManager.m_hapticDevice->isDeviceAvailable()){
-        // Only the stylus "action button" (switch index 0: the upper button, nearer the
-        // back of the stylus) is used. The button nearer the tip is broken on this rig's
-        // Touch. The camera clutch is the microscope button.
+        // Stylus 2 = the action button (switch index 0, nearer the back of the stylus).
+        // Stylus 1 = switch index 1, nearer the tip.
         bool btn2 = false;
+        bool btn1 = false;
         m_drillManager.m_hapticDevice->getUserSwitch(0, btn2);
+        m_drillManager.m_hapticDevice->getUserSwitch(1, btn1);
 
-        // Orbit around the burr: Ctrl (or Shift) + hold the action button. Zoom is on the
-        // microscope button + pedals (above).
+        // User's mapping, 2026-11-21: Ctrl + hold stylus 2 / 1 zooms in / out, hold stylus 1
+        // pans the camera, Shift + hold stylus 2 orbits around the burr.
         const bool ctrlHeld = isCtrlHeld();
         const bool shiftHeld = isShiftHeld();
+        if (!m_vrHudVisible){
+            if (ctrlHeld){
+                const double zoomRate = 1.015;
+                if (btn2 && !btn1){
+                    zoomCamera(1.0 / zoomRate);
+                }
+                if (btn1 && !btn2){
+                    zoomCamera(zoomRate);
+                }
+                // The burr stays put while zooming.
+                m_drillManager.m_deviceClutch |= (btn1 || btn2);
+            }
+            else if (!shiftHeld){
+                m_drillManager.m_camPanStylus = btn1;
+            }
+        }
         {
             const double doubleClickSec = 0.45;
             double now = glfwGetTime();
 
             if ((ctrlHeld || shiftHeld) && !m_vrHudVisible){
-                m_drillManager.m_camOrbitBurr |= btn2;
+                m_drillManager.m_camOrbitBurr |= (btn2 && !ctrlHeld);
                 m_btn2Prev = btn2;
                 m_btn2LastClickTime = -1.0;
             }
@@ -3464,8 +3505,10 @@ string afVolmetricDrillingPlugin::controlHelpText(bool paused) const
             "  Device clutch          Hold stylus action button\n"
             "  Look                   Arrow Keys\n"
             "  Roll                   Ctrl + Mouse Wheel\n"
-            "  Zoom in / out          Microscope button (1) + left / middle pedal (a / b)\n"
-            "  Orbit around burr      Ctrl + hold action button\n"
+            "  Zoom in / out          Ctrl + hold stylus 2 / 1, or microscope button (1) + left / middle pedal\n"
+            "  Pan camera             Hold stylus 1  or  Shift + left mouse drag\n"
+            "  Orbit volume           Middle mouse drag  or  Shift + middle mouse drag\n"
+            "  Orbit around burr      Shift + hold stylus 2\n"
             "  Recenter drill         Double-tap action button  or  F9\n"
             "  Recenter suction       Double-tap action button on the suction device\n"
             "  Left / Right view      F3 / F4\n"
@@ -3869,6 +3912,29 @@ void afVolmetricDrillingPlugin::applyLateralityStartupView()
 
 void afVolmetricDrillingPlugin::mousePosUpdate(GLFWwindow *a_window, double x_pos, double y_pos)
 {
+    if (m_mainCamera && m_shiftOrbitDown && !m_vrHudVisible){
+        // AMBF pans on Shift + middle drag: undo that, then orbit the view around the volume.
+        m_mainCamera->setLocalTransform(m_shiftPanPose);
+        const double radPerPixel = 0.005;
+        cVector3d right = m_mainCamera->getRightVector();
+        cVector3d up = m_mainCamera->getUpVector();
+        if (right.length() > 1e-6 && up.length() > 1e-6){
+            right.normalize();
+            up.normalize();
+            cMatrix3d yaw, pitch;
+            yaw.setAxisAngleRotationRad(up, -(x_pos - m_shiftPanX) * radPerPixel);
+            pitch.setAxisAngleRotationRad(right, -(y_pos - m_shiftPanY) * radPerPixel);
+            const cMatrix3d turn = yaw * pitch;
+            const cVector3d position = m_volumeLookAt + turn * (m_mainCamera->getLocalPos() - m_volumeLookAt);
+            const cVector3d look = turn * m_mainCamera->getLookVector();
+            m_mainCamera->setView(position, position + look, turn * up);
+            m_customViewActive = true;
+        }
+        m_shiftPanX = x_pos;
+        m_shiftPanY = y_pos;
+        m_shiftPanPose = m_mainCamera->getLocalTransform();
+        return;
+    }
     if (m_mainCamera && m_shiftPanDown && !m_vrHudVisible){
         // Undo whatever AMBF did with this drag, then pan by the mouse travel so the
         // bone follows the cursor: world units per pixel at the bone's distance.
@@ -4384,6 +4450,7 @@ void afVolmetricDrillingPlugin::keyboardUpdate(GLFWwindow *a_window, int a_key, 
         else if (a_key == GLFW_KEY_N){
             cerr << "INFO! RESETTING THE VOLUME" << endl;
             m_volumeObject->reset();
+            m_volumeResetCount += 1;  // recordings start a new voxel epoch here
         }
 
         else if (a_key == GLFW_KEY_G){
@@ -4842,12 +4909,20 @@ void afVolmetricDrillingPlugin::mouseBtnsUpdate(GLFWwindow *a_window, int a_butt
     (void)a_modes;
     if (a_button == GLFW_MOUSE_BUTTON_MIDDLE){
         const bool pressed = (a_action == GLFW_PRESS);
-        // Middle drag orbits (AMBF arcball); Shift + middle drag pans.
-        m_shiftPanDown = pressed && isShiftHeld() && m_mainCamera;
-        m_arcballMouseDown = pressed && !m_shiftPanDown;
+        // Middle drag orbits (AMBF arcball). With Shift, AMBF would pan, so the plugin orbits.
+        m_shiftOrbitDown = pressed && isShiftHeld() && m_mainCamera;
+        m_arcballMouseDown = pressed && !m_shiftOrbitDown;
         if (m_arcballMouseDown && m_mainCamera){
             m_preservedUp = m_mainCamera->getUpVector();
         }
+        if (m_shiftOrbitDown){
+            m_shiftPanPose = m_mainCamera->getLocalTransform();
+            glfwGetCursorPos(a_window, &m_shiftPanX, &m_shiftPanY);
+        }
+    }
+    else if (a_button == GLFW_MOUSE_BUTTON_LEFT){
+        // Shift + left drag pans.
+        m_shiftPanDown = (a_action == GLFW_PRESS) && isShiftHeld() && m_mainCamera;
         if (m_shiftPanDown){
             m_shiftPanPose = m_mainCamera->getLocalTransform();
             glfwGetCursorPos(a_window, &m_shiftPanX, &m_shiftPanY);
@@ -4880,6 +4955,8 @@ void afVolmetricDrillingPlugin::reset(){
     m_activeCameraRollDeg = 0.0;
     m_customViewActive = false;
     m_arcballMouseDown = false;
+    m_shiftPanDown = false;
+    m_shiftOrbitDown = false;
     m_rightMouseDown = false;
     m_drillManager.reset();
 }

@@ -277,6 +277,8 @@ public:
 
     // Shift + stylus button 2: orbit camera around the drill burr.
     bool m_camOrbitBurr = false;
+    // Stylus 1 held: the stylus pans the camera; the burr stays where it is.
+    bool m_camPanStylus = false;
 
     cLabel* m_sizeLabel;
 

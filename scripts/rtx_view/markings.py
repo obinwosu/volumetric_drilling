@@ -8,16 +8,19 @@ rewrite the channels. Look sliders rewrite the shader inputs.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 
 import numpy as np
+
+import specimen_look
 from scipy.spatial import cKDTree
 
 import rtx_materials
 
 HERE = pathlib.Path(__file__).resolve().parent
 MDL_PATH = HERE / "mdl" / "Markings.mdl"
-CONFIG_PATH = HERE / "tuner_markings.json"
+CONFIG_PATH = pathlib.Path(os.environ.get("FIVRS_MARKINGS_CONFIG") or HERE / "tuner_markings.json")  # env: previews
 # Same millimetre scale as cortex_masks.MM_TO_SIM.
 MM_TO_SIM = 0.01007
 SEGMENT = "cortex_markings"
@@ -101,7 +104,7 @@ def load_parameters() -> dict:
                 params[key] = bool(value)
             elif key in params:
                 params[key] = value
-    return params
+    return specimen_look.apply_markings(params)
 
 
 def save_parameters(params: dict):

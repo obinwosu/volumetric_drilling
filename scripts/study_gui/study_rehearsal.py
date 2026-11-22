@@ -275,7 +275,7 @@ class SimulatorStandIn(QtWidgets.QWidget):
         self._button(grid, 0, 1, "Hold action button (reposition)", toggle="device_clutch")
         self._button(grid, 1, 0, "Double-tap action button", "Recenter (not in the pause menu)",
                      click=self._double_tap_2)
-        self._button(grid, 1, 1, "Hold Ctrl + action button (orbit)", toggle="orbit")
+        self._button(grid, 1, 1, "Hold Shift + stylus 2 (orbit)", toggle="orbit")
         controls.addWidget(stylus)
 
         scope = QtWidgets.QGroupBox("Microscope and headset")

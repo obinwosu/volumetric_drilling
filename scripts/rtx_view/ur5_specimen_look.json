@@ -1,0 +1,7 @@
+{
+  "bone_color": [0.93267, 0.88844, 0.78901],
+  "capsule_color": [0.94, 0.86, 0.66],
+  "capsule_band_mm": 2.5,
+  "capsule_strength": 1.0,
+  "capsule_rule": "dense_bone"
+}

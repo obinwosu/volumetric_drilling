@@ -31,7 +31,7 @@ views:
     laterality: right
     valid: true
     t: [-5.47248, -3.86139, -10.2426]
-    q: [-0.5442447, 0.57093463, 0.27879633, 0.54781531]
+    q: [-0.54424257, 0.5709324, 0.27879524, 0.54781745]
   - id: right_rsc
     label: "Right RSC"
     laterality: right
@@ -43,7 +43,7 @@ views:
     laterality: right
     valid: true
     t: [-4.41979, 1.00525, -0.577387]
-    q: [-0.35760113, 0.0075831828, 0.19358807, 0.91355766]
+    q: [-0.35760113, 0.0075831829, 0.19358807, 0.91355765]
   - id: right_transtemporal_2
     label: delta_mastoid
     laterality: right
@@ -55,4 +55,10 @@ views:
     laterality: left
     valid: true
     t: [-3.36188, -1.11554, 0.282328]
-    q: [0.57961685, -0.085152678, -0.10931697, 0.80302121]
+    q: [0.57961682, -0.085152674, -0.10931696, 0.80302125]
+  - id: left_specimen3_view
+    label: specimen3_view
+    laterality: left
+    valid: true
+    t: [-3.3744672, -0.95865641, 0.62792679]
+    q: [0.4288348, -0.042399209, -0.12667919, 0.8934514]

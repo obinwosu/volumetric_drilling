@@ -483,12 +483,12 @@ void DrillManager::update(double dt)
             ws = 1.0;
         }
         m_V_i = T_c_w.getLocalRot() * (m_V_i / ws);
-        m_T_d.setLocalPos(m_T_d.getLocalPos() + (m_V_i * 0.8 * !m_deviceClutch * !m_camClutch * !m_camOrbitBurr));
+        m_T_d.setLocalPos(m_T_d.getLocalPos() + (m_V_i * 0.8 * !m_deviceClutch * !m_camClutch * !m_camOrbitBurr * !m_camPanStylus));
         m_T_d.setLocalRot(T_c_w.getLocalRot() *  m_T_i.getLocalRot());
 
 
         // set zero forces when manipulating objects
-        if (m_deviceClutch || m_camClutch || m_camOrbitBurr){
+        if (m_deviceClutch || m_camClutch || m_camOrbitBurr || m_camPanStylus){
             if (m_camOrbitBurr){
                 cVector3d pivot = m_T_d.getLocalPos();
                 cMultiMesh* tip = (m_burrStyle == BurrStyle::DIAMOND) ? m_diamondBurrMesh : m_burrMesh;
@@ -539,6 +539,16 @@ void DrillManager::update(double dt)
                             m_mainCamera->setView(newPos, newLook, newUp);
                         }
                     }
+                }
+            }
+            else if (m_camPanStylus){
+                // The scene follows the hand, as with Shift + left drag. No motion along the view.
+                cVector3d right = m_mainCamera->getRightVector();
+                cVector3d up = m_mainCamera->getUpVector();
+                if (right.length() > 1e-6 && up.length() > 1e-6){
+                    right.normalize();
+                    up.normalize();
+                    m_mainCamera->setLocalPos(T_c_w.getLocalPos() - right * m_V_i.dot(right) - up * m_V_i.dot(up));
                 }
             }
             else if (m_camClutch && !m_vrHmdOwnsCamClutch){

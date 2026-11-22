@@ -27,6 +27,7 @@ import json
 import os
 import pathlib
 import re
+import subprocess
 import sys
 import time
 import traceback
@@ -449,6 +450,9 @@ def write_volume(labels_zyx: np.ndarray, spacing_mm: float, name: str, lateralit
     # write_adf poses a right ear; a left ear takes the LT anatomies' pose.
     text = adf.read_text().replace(f"orientation: {ORIENTATION['right']}", f"orientation: {ORIENTATION[laterality]}")
     adf.write_text(text)
+    # Same inner ear pose as every other ear of this side, so saved views fit. Never fatal.
+    subprocess.run([sys.executable, str(repo / "scripts" / "segmentation" / "align_ear_pose.py"), "--apply", str(adf)],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180, check=False)
     conv.write_icon(composed, present, icon)
     # No write_label_names: the tuner (tuner_materials.json "names") already names these colors.
     counts = {s["name"]: s["count"] for s in present}
