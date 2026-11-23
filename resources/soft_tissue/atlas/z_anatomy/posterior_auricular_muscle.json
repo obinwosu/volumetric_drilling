@@ -1,0 +1,50 @@
+{
+ "params": {
+  "LENGTH_MM": 28.3,
+  "WIDTH_MM": 5.7,
+  "THICKNESS_MM": 1.5,
+  "FASCICLES": 2,
+  "GAP_MM": 0.6,
+  "END_THICKNESS": 0.35,
+  "END_WIDTH": 0.7,
+  "CLEARANCE_MM": 0.3,
+  "N_ALONG": 48,
+  "N_AROUND": 16
+ },
+ "sides": {
+  "l": {
+   "origin_mm": [
+    56.37699890136719,
+    38.26199722290039,
+    1570.5089111328125
+   ],
+   "insertion_mm": [
+    67.36923217773438,
+    13.104655265808105,
+    1570.5684814453125
+   ],
+   "path_length_mm": 27.659030339039983,
+   "min_distance_to_bone_mm": 0.29930032906122506,
+   "min_distance_to_bone_incl_origin_mm": 0.28154204483143985,
+   "verts": 1572,
+   "tris": 3136
+  },
+  "r": {
+   "origin_mm": [
+    -56.37699890136719,
+    38.26199722290039,
+    1570.5089111328125
+   ],
+   "insertion_mm": [
+    -67.36933898925781,
+    13.104655265808105,
+    1570.5684814453125
+   ],
+   "path_length_mm": 27.659058069877172,
+   "min_distance_to_bone_mm": 0.3021380689460784,
+   "min_distance_to_bone_incl_origin_mm": 0.281539250863716,
+   "verts": 1572,
+   "tris": 3136
+  }
+ }
+}

@@ -1,0 +1,642 @@
+{
+ "unit_scale": 1.0,
+ "length_unit": "CENTIMETERS",
+ "objects": {
+  "temporalis_muscle_l.obj": {
+   "source": "Temporalis muscle.l",
+   "verts": 5126,
+   "tris": 10260,
+   "boundary_edges": 0,
+   "nonmanifold_edges": 0,
+   "watertight": true,
+   "bbox_min": [
+    0.03776046633720398,
+    -0.06337818503379822,
+    1.5460234880447388
+   ],
+   "bbox_max": [
+    0.07683270424604416,
+    0.05053059011697769,
+    1.6619880199432373
+   ],
+   "size": [
+    0.03907223790884018,
+    0.11390877515077591,
+    0.11596453189849854
+   ],
+   "modifiers": []
+  },
+  "temporalis_muscle_r.obj": {
+   "source": "Temporalis muscle.r",
+   "verts": 5126,
+   "tris": 10260,
+   "boundary_edges": 0,
+   "nonmanifold_edges": 0,
+   "watertight": true,
+   "bbox_min": [
+    -0.07683267444372177,
+    -0.06337818503379822,
+    1.5460234880447388
+   ],
+   "bbox_max": [
+    -0.03776043653488159,
+    0.05053059011697769,
+    1.6619880199432373
+   ],
+   "size": [
+    0.03907223790884018,
+    0.11390877515077591,
+    0.11596453189849854
+   ],
+   "modifiers": []
+  },
+  "temporoparietalis_muscle_l.obj": {
+   "source": "Temporoparietalis muscle.l",
+   "verts": 5974,
+   "tris": 11972,
+   "boundary_edges": 0,
+   "nonmanifold_edges": 0,
+   "watertight": true,
+   "bbox_min": [
+    0.04220317304134369,
+    -0.04492449760437012,
+    1.574838638305664
+   ],
+   "bbox_max": [
+    0.08040960878133774,
+    0.07189983874559402,
+    1.6777032613754272
+   ],
+   "size": [
+    0.03820643573999405,
+    0.11682433634996414,
+    0.10286462306976318
+   ],
+   "modifiers": []
+  },
+  "temporoparietalis_muscle_r.obj": {
+   "source": "Temporoparietalis muscle.r",
+   "verts": 5974,
+   "tris": 11972,
+   "boundary_edges": 0,
+   "nonmanifold_edges": 0,
+   "watertight": true,
+   "bbox_min": [
+    -0.08040962368249893,
+    -0.04492449760437012,
+    1.574838638305664
+   ],
+   "bbox_max": [
+    -0.04220318794250488,
+    0.07189983874559402,
+    1.6777032613754272
+   ],
+   "size": [
+    0.03820643573999405,
+    0.11682433634996414,
+    0.10286462306976318
+   ],
+   "modifiers": []
+  },
+  "superficial_layer_of_temporal_fascia_l.obj": {
+   "source": "Superficial layer of temporal fascia.l",
+   "verts": 378,
+   "tris": 685,
+   "boundary_edges": 69,
+   "nonmanifold_edges": 69,
+   "watertight": false,
+   "bbox_min": [
+    0.04859016090631485,
+    -0.062289703637361526,
+    1.5786505937576294
+   ],
+   "bbox_max": [
+    0.07705853879451752,
+    0.05152169242501259,
+    1.6631340980529785
+   ],
+   "size": [
+    0.028468377888202667,
+    0.11381139606237411,
+    0.08448350429534912
+   ],
+   "modifiers": []
+  },
+  "superficial_layer_of_temporal_fascia_r.obj": {
+   "source": "Superficial layer of temporal fascia.r",
+   "verts": 378,
+   "tris": 685,
+   "boundary_edges": 69,
+   "nonmanifold_edges": 69,
+   "watertight": false,
+   "bbox_min": [
+    -0.07705850899219513,
+    -0.062289703637361526,
+    1.5786505937576294
+   ],
+   "bbox_max": [
+    -0.04859013110399246,
+    0.05152169242501259,
+    1.6631340980529785
+   ],
+   "size": [
+    0.028468377888202667,
+    0.11381139606237411,
+    0.08448350429534912
+   ],
+   "modifiers": []
+  },
+  "temporal_bone_l.obj": {
+   "source": "Temporal bone.l",
+   "verts": 7051,
+   "tris": 14094,
+   "boundary_edges": 0,
+   "nonmanifold_edges": 0,
+   "watertight": true,
+   "bbox_min": [
+    0.009648576378822327,
+    -0.0447830855846405,
+    1.5487265586853027
+   ],
+   "bbox_max": [
+    0.07242035865783691,
+    0.05156397819519043,
+    1.623145580291748
+   ],
+   "size": [
+    0.06277178227901459,
+    0.09634706377983093,
+    0.07441902160644531
+   ],
+   "modifiers": []
+  },
+  "temporal_bone_r.obj": {
+   "source": "Temporal bone.r",
+   "verts": 7051,
+   "tris": 14094,
+   "boundary_edges": 0,
+   "nonmanifold_edges": 0,
+   "watertight": true,
+   "bbox_min": [
+    -0.07242035865783691,
+    -0.0447830855846405,
+    1.5487265586853027
+   ],
+   "bbox_max": [
+    -0.009648576378822327,
+    0.05156397819519043,
+    1.623145580291748
+   ],
+   "size": [
+    0.06277178227901459,
+    0.09634706377983093,
+    0.07441902160644531
+   ],
+   "modifiers": []
+  },
+  "parietal_bone_l.obj": {
+   "source": "Parietal bone.l",
+   "verts": 3443,
+   "tris": 6886,
+   "boundary_edges": 0,
+   "nonmanifold_edges": 0,
+   "watertight": true,
+   "bbox_min": [
+    -0.007425185292959213,
+    -0.042743049561977386,
+    1.5896923542022705
+   ],
+   "bbox_max": [
+    0.0742856115102768,
+    0.10056015849113464,
+    1.7053675651550293
+   ],
+   "size": [
+    0.0817108005285263,
+    0.14330321550369263,
+    0.11567521095275879
+   ],
+   "modifiers": []
+  },
+  "parietal_bone_r.obj": {
+   "source": "Parietal bone.r",
+   "verts": 3386,
+   "tris": 6780,
+   "boundary_edges": 0,
+   "nonmanifold_edges": 0,
+   "watertight": true,
+   "bbox_min": [
+    -0.07439018785953522,
+    -0.03906109184026718,
+    1.589820146560669
+   ],
+   "bbox_max": [
+    0.0056159887462854385,
+    0.10030511766672134,
+    1.7054541110992432
+   ],
+   "size": [
+    0.0800061747431755,
+    0.13936620950698853,
+    0.11563396453857422
+   ],
+   "modifiers": []
+  },
+  "zygomatic_bone_l.obj": {
+   "source": "Zygomatic bone.l",
+   "verts": 666,
+   "tris": 1328,
+   "boundary_edges": 0,
+   "nonmanifold_edges": 0,
+   "watertight": true,
+   "bbox_min": [
+    0.031617116183042526,
+    -0.07167743891477585,
+    1.5537165403366089
+   ],
+   "bbox_max": [
+    0.06232469528913498,
+    -0.0327085480093956,
+    1.608465552330017
+   ],
+   "size": [
+    0.030707579106092453,
+    0.03896889090538025,
+    0.0547490119934082
+   ],
+   "modifiers": []
+  },
+  "zygomatic_bone_r.obj": {
+   "source": "Zygomatic bone.r",
+   "verts": 666,
+   "tris": 1328,
+   "boundary_edges": 0,
+   "nonmanifold_edges": 0,
+   "watertight": true,
+   "bbox_min": [
+    -0.06232469528913498,
+    -0.07167743891477585,
+    1.5537165403366089
+   ],
+   "bbox_max": [
+    -0.031617116183042526,
+    -0.0327085480093956,
+    1.608465552330017
+   ],
+   "size": [
+    0.030707579106092453,
+    0.03896889090538025,
+    0.0547490119934082
+   ],
+   "modifiers": []
+  },
+  "occipitalis_muscle_l.obj": {
+   "source": "Occipitalis muscle.l",
+   "verts": 1297,
+   "tris": 2602,
+   "boundary_edges": 0,
+   "nonmanifold_edges": 0,
+   "watertight": true,
+   "bbox_min": [
+    0.014848500490188599,
+    0.058132342994213104,
+    1.5851560831069946
+   ],
+   "bbox_max": [
+    0.06143605336546898,
+    0.10470566153526306,
+    1.6182012557983398
+   ],
+   "size": [
+    0.04658755287528038,
+    0.04657331854104996,
+    0.033045172691345215
+   ],
+   "modifiers": []
+  },
+  "occipitalis_muscle_r.obj": {
+   "source": "Occipitalis muscle.r",
+   "verts": 1297,
+   "tris": 2602,
+   "boundary_edges": 0,
+   "nonmanifold_edges": 0,
+   "watertight": true,
+   "bbox_min": [
+    -0.06143606826663017,
+    0.058132342994213104,
+    1.5851560831069946
+   ],
+   "bbox_max": [
+    -0.014848515391349792,
+    0.10470566153526306,
+    1.6182012557983398
+   ],
+   "size": [
+    0.04658755287528038,
+    0.04657331854104996,
+    0.033045172691345215
+   ],
+   "modifiers": []
+  },
+  "mastoid_region_l.obj": {
+   "source": "Mastoid region.l",
+   "verts": 60,
+   "tris": 116,
+   "boundary_edges": 0,
+   "nonmanifold_edges": 0,
+   "watertight": true,
+   "bbox_min": [
+    0.05708590894937515,
+    0.018678249791264534,
+    1.5570341348648071
+   ],
+   "bbox_max": [
+    0.07267769426107407,
+    0.056012481451034546,
+    1.6147063970565796
+   ],
+   "size": [
+    0.015591785311698914,
+    0.03733423352241516,
+    0.05767226219177246
+   ],
+   "modifiers": [
+    "SOLIDIFY"
+   ]
+  },
+  "mastoid_region_r.obj": {
+   "source": "Mastoid region.r",
+   "verts": 60,
+   "tris": 116,
+   "boundary_edges": 0,
+   "nonmanifold_edges": 0,
+   "watertight": true,
+   "bbox_min": [
+    -0.07267772406339645,
+    0.018678249791264534,
+    1.5570341348648071
+   ],
+   "bbox_max": [
+    -0.05708593875169754,
+    0.056012481451034546,
+    1.6147063970565796
+   ],
+   "size": [
+    0.015591785311698914,
+    0.03733423352241516,
+    0.05767226219177246
+   ],
+   "modifiers": [
+    "SOLIDIFY"
+   ]
+  },
+  "posterior_auricular_groove_l.obj": {
+   "source": "Posterior auricular groove.l",
+   "verts": 94,
+   "tris": 184,
+   "boundary_edges": 0,
+   "nonmanifold_edges": 0,
+   "watertight": true,
+   "bbox_min": [
+    0.05611105635762215,
+    -0.0014945613220334053,
+    1.5618239641189575
+   ],
+   "bbox_max": [
+    0.07616899162530899,
+    0.020731350407004356,
+    1.6044343709945679
+   ],
+   "size": [
+    0.020057935267686844,
+    0.022225912660360336,
+    0.04261040687561035
+   ],
+   "modifiers": [
+    "SOLIDIFY"
+   ]
+  },
+  "posterior_auricular_groove_r.obj": {
+   "source": "Posterior auricular groove.r",
+   "verts": 94,
+   "tris": 184,
+   "boundary_edges": 0,
+   "nonmanifold_edges": 0,
+   "watertight": true,
+   "bbox_min": [
+    -0.07616902142763138,
+    -0.0014945613220334053,
+    1.5618239641189575
+   ],
+   "bbox_max": [
+    -0.056111086159944534,
+    0.020731350407004356,
+    1.6044343709945679
+   ],
+   "size": [
+    0.020057935267686844,
+    0.022225912660360336,
+    0.04261040687561035
+   ],
+   "modifiers": [
+    "SOLIDIFY"
+   ]
+  },
+  "eminentia_conchae_l.obj": {
+   "source": "Eminentia conchae.l",
+   "verts": 45,
+   "tris": 61,
+   "boundary_edges": 27,
+   "nonmanifold_edges": 27,
+   "watertight": false,
+   "bbox_min": [
+    0.060555651783943176,
+    0.004102814011275768,
+    1.5582664012908936
+   ],
+   "bbox_max": [
+    0.0795370414853096,
+    0.01878773421049118,
+    1.5937055349349976
+   ],
+   "size": [
+    0.018981389701366425,
+    0.014684920199215412,
+    0.035439133644104004
+   ],
+   "modifiers": []
+  },
+  "eminentia_conchae_r.obj": {
+   "source": "Eminentia conchae.r",
+   "verts": 45,
+   "tris": 61,
+   "boundary_edges": 27,
+   "nonmanifold_edges": 27,
+   "watertight": false,
+   "bbox_min": [
+    -0.07953707128763199,
+    0.004102814011275768,
+    1.5582664012908936
+   ],
+   "bbox_max": [
+    -0.060555681586265564,
+    0.01878773421049118,
+    1.5937055349349976
+   ],
+   "size": [
+    0.018981389701366425,
+    0.014684920199215412,
+    0.035439133644104004
+   ],
+   "modifiers": []
+  },
+  "helix_l.obj": {
+   "source": "Helix.l",
+   "verts": 289,
+   "tris": 473,
+   "boundary_edges": 107,
+   "nonmanifold_edges": 107,
+   "watertight": false,
+   "bbox_min": [
+    0.07168739289045334,
+    -0.005208115093410015,
+    1.5583189725875854
+   ],
+   "bbox_max": [
+    0.09336995333433151,
+    0.02160400152206421,
+    1.6066418886184692
+   ],
+   "size": [
+    0.021682560443878174,
+    0.0268121175467968,
+    0.04832291603088379
+   ],
+   "modifiers": []
+  },
+  "helix_r.obj": {
+   "source": "Helix.r",
+   "verts": 289,
+   "tris": 473,
+   "boundary_edges": 107,
+   "nonmanifold_edges": 107,
+   "watertight": false,
+   "bbox_min": [
+    -0.0933699831366539,
+    -0.005208115093410015,
+    1.5583189725875854
+   ],
+   "bbox_max": [
+    -0.07168742269277573,
+    0.02160400152206421,
+    1.6066418886184692
+   ],
+   "size": [
+    0.021682560443878174,
+    0.0268121175467968,
+    0.04832291603088379
+   ],
+   "modifiers": []
+  },
+  "concha_of_auricle_l.obj": {
+   "source": "Concha of auricle.l",
+   "verts": 51,
+   "tris": 64,
+   "boundary_edges": 36,
+   "nonmanifold_edges": 36,
+   "watertight": false,
+   "bbox_min": [
+    0.0673697292804718,
+    0.0030873711220920086,
+    1.5701667070388794
+   ],
+   "bbox_max": [
+    0.0795370414853096,
+    0.013520385138690472,
+    1.5860954523086548
+   ],
+   "size": [
+    0.012167312204837799,
+    0.01043301448225975,
+    0.01592874526977539
+   ],
+   "modifiers": []
+  },
+  "concha_of_auricle_r.obj": {
+   "source": "Concha of auricle.r",
+   "verts": 51,
+   "tris": 64,
+   "boundary_edges": 36,
+   "nonmanifold_edges": 36,
+   "watertight": false,
+   "bbox_min": [
+    -0.07953707128763199,
+    0.0030873711220920086,
+    1.5701667070388794
+   ],
+   "bbox_max": [
+    -0.06736975908279419,
+    0.013520385138690472,
+    1.5860954523086548
+   ],
+   "size": [
+    0.012167312204837799,
+    0.01043301448225975,
+    0.01592874526977539
+   ],
+   "modifiers": []
+  },
+  "auricular_region_l.obj": {
+   "source": "Auricular region.l",
+   "verts": 148,
+   "tris": 296,
+   "boundary_edges": 0,
+   "nonmanifold_edges": 0,
+   "watertight": true,
+   "bbox_min": [
+    0.054610252380371094,
+    -0.016237132251262665,
+    1.547898292541504
+   ],
+   "bbox_max": [
+    0.07836082577705383,
+    0.027194786816835403,
+    1.6117181777954102
+   ],
+   "size": [
+    0.02375057339668274,
+    0.04343191906809807,
+    0.06381988525390625
+   ],
+   "modifiers": [
+    "SOLIDIFY"
+   ]
+  },
+  "auricular_region_r.obj": {
+   "source": "Auricular region.r",
+   "verts": 148,
+   "tris": 296,
+   "boundary_edges": 0,
+   "nonmanifold_edges": 0,
+   "watertight": true,
+   "bbox_min": [
+    -0.07836085557937622,
+    -0.016237132251262665,
+    1.547898292541504
+   ],
+   "bbox_max": [
+    -0.05461028218269348,
+    0.027194786816835403,
+    1.6117181777954102
+   ],
+   "size": [
+    0.02375057339668274,
+    0.04343191906809807,
+    0.06381988525390625
+   ],
+   "modifiers": [
+    "SOLIDIFY"
+   ]
+  }
+ }
+}

@@ -1,0 +1,219 @@
+{
+  "volume": "ADF/volume_256_RT143.yaml",
+  "ear_obj": "/home/obihome/ros_ambf_ws/src/volumetric_drilling/resources/soft_tissue/auricle/ct_right_ear.ply",
+  "ear": {
+    "pivot_obj_mm": [
+      -72.07354545593262,
+      20.983335733413696,
+      -110.18238830566406
+    ],
+    "base": [
+      [
+        0.025159295582369904,
+        0.9600398033964328,
+        -0.27873031005179466
+      ],
+      [
+        -0.9411920125998032,
+        0.11672111818249288,
+        0.3170706167226095
+      ],
+      [
+        0.3369341260013318,
+        0.25436146812366006,
+        0.9065184158475914
+      ]
+    ],
+    "mirror": false,
+    "move_mm": [
+      -8.913999557495117,
+      4.704999923706055,
+      5.230000019073486
+    ],
+    "turn_deg": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "scale": 1.0019999742507935,
+    "ear_to_volume_mm": [
+      [
+        0.025209613525702744,
+        0.9619598582829625,
+        -0.27928776349481393,
+        -13.55780856886642
+      ],
+      [
+        -0.9430743723900553,
+        0.11695455741338169,
+        0.3177047497917379,
+        13.303788816331647
+      ],
+      [
+        0.33760798557754806,
+        0.2548701845103014,
+        0.9083314293371567,
+        138.4419734453877
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "ear_to_world_au": [
+      [
+        -0.01862647943641647,
+        0.0056128381678401396,
+        0.005348300175028464,
+        -6.400708165843482
+      ],
+      [
+        -0.006797961344412804,
+        -0.0051318750917707665,
+        -0.018289493783549198,
+        -2.2875734209838425
+      ],
+      [
+        -0.0037277323697359277,
+        -0.01868726595840877,
+        0.006629035045578465,
+        0.7222924359912888
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ]
+  },
+  "volume_mm_to_world_au": [
+    [
+      0.003422340989453951,
+      0.019842335091187522,
+      1.2553838439542345e-07,
+      -6.618304337308805
+    ],
+    [
+      0.0,
+      1.273919719851093e-07,
+      -0.02013530927794752,
+      0.49999683659254457
+    ],
+    [
+      -0.01984233509158465,
+      0.003422340989385456,
+      2.1652449506736576e-08,
+      0.4077407558721843
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "frame": {
+    "anterior": [
+      -0.8028928703317564,
+      0.03252249246534867,
+      -0.5952355216670748
+    ],
+    "superior": [
+      -0.4736184330689195,
+      0.5715616783430855,
+      0.6700767327007981
+    ],
+    "lateral": [
+      0.3620063792639224,
+      0.8199143463395901,
+      -0.44349954457558166
+    ],
+    "canal_lateral_end_mm": [
+      28.761059309733618,
+      42.03568688221466,
+      13.236131816738968
+    ]
+  },
+  "muscle": {
+    "outline_mm": [],
+    "max_mm": 8.0,
+    "taper_mm": 10.0
+  },
+  "thickness_mm": {
+    "periosteum": 0.3,
+    "temporalis_muscle": 0.0,
+    "temporalis_fascia": 1.46,
+    "loose_areolar": 1.0,
+    "subcutaneous_fat": 1.375,
+    "skin": 1.5
+  },
+  "auricle_ramp": {
+    "on": true,
+    "near_mm": 8.0,
+    "far_mm": 20.0,
+    "near": {
+      "skin": 1.0,
+      "subcutaneous_fat": 0.0,
+      "loose_areolar": 0.3,
+      "periosteum": 0.3
+    },
+    "sources": {
+      "skin": "estimate (user): skin around the concha and meatus is thin",
+      "subcutaneous_fat": "user: essentially no fat around the auricle",
+      "loose_areolar": "estimate: little loose tissue under the auricle",
+      "periosteum": "unchanged: periosteum lies on the bone everywhere"
+    }
+  },
+  "cut": {
+    "depth_mm": 2.5,
+    "tilt1_deg": 0.0,
+    "tilt2_deg": 0.0,
+    "bend1_mm": 0.0,
+    "bend2_mm": 0.0,
+    "enabled": false
+  },
+  "mesh_cuts": [],
+  "ct_flatten": [],
+  "blender": {
+    "use": true,
+    "framework_max_mm": 0.0,
+    "edited": "/home/obihome/ros_ambf_ws/src/volumetric_drilling/resources/soft_tissue/auricle/ct_right_ear_edited.ply"
+  },
+  "ear_marks": {},
+  "meatus": {
+    "enabled": true,
+    "flare_anterior_deg": 10.0,
+    "flare_posterior_deg": 45.0,
+    "flare_len_mm": 6.0,
+    "drop_inferior_mm": 3.0,
+    "drop_anterior_mm": 2.0,
+    "widen_mm": 0.5,
+    "depth_mm": 0.0
+  },
+  "ct_meatus": {
+    "opened": true,
+    "skin_mm": 1.600000023841858,
+    "blend_mm": 1.5,
+    "flare_len_mm": 12.0,
+    "flare_tan": 0.4,
+    "lining_mm": 0.2,
+    "mouth_mm": 6.0,
+    "meshes": [
+      "ct_ear_opened.ply",
+      "canal_skin.ply"
+    ]
+  },
+  "layer_sources": {
+    "periosteum": "estimate 0.1-0.5 mm (mastoid periosteum)",
+    "temporalis_muscle": "picked outline; thickness and taper from the viewer",
+    "temporalis_fascia": "tissue_params temporalis_fascia (Zwirner 2021)",
+    "loose_areolar": "estimate: thin over the mastoid; temporoparietal fascia is 2-3 mm higher up",
+    "subcutaneous_fat": "half the 2.75 mm that fills Wrobel's 5.25 mm: periauricular fat is sparse (user); none at the canal",
+    "skin": "tissue_params skin (estimate)"
+  },
+  "framework_cover_mm": 0.9500000000000001,
+  "saved": "2026-11-09 18:20:14"
+}

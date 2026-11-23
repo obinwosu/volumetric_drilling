@@ -1,0 +1,225 @@
+{
+  "units": "volume mm",
+  "meshes": {
+    "bone": {
+      "file": "bone.ply",
+      "what": "bone",
+      "rgb": [
+        225,
+        222,
+        212
+      ],
+      "vertices": 266894,
+      "triangles": 534564
+    },
+    "envelope_skin": {
+      "file": "envelope_skin.ply",
+      "what": "periauricular skin (envelope)",
+      "rgb": [
+        214,
+        170,
+        150
+      ],
+      "vertices": 23599,
+      "triangles": 44619
+    },
+    "periosteum": {
+      "file": "periosteum.ply",
+      "what": "periosteum (envelope)",
+      "rgb": [
+        185,
+        140,
+        235
+      ],
+      "vertices": 21487,
+      "triangles": 40934
+    },
+    "temporalis_muscle": {
+      "file": "temporalis_muscle.ply",
+      "what": "temporalis_muscle",
+      "rgb": [
+        205,
+        45,
+        55
+      ],
+      "vertices": 8577,
+      "triangles": 16523
+    },
+    "temporalis_fascia": {
+      "file": "temporalis_fascia.ply",
+      "what": "temporalis_fascia",
+      "rgb": [
+        190,
+        215,
+        255
+      ],
+      "vertices": 9333,
+      "triangles": 17894
+    },
+    "auricular_muscles": {
+      "file": "auricular_muscles.ply",
+      "what": "auricular_muscles",
+      "rgb": [
+        190,
+        60,
+        55
+      ],
+      "vertices": 4545,
+      "triangles": 8551
+    },
+    "tpf": {
+      "file": "tpf.ply",
+      "what": "tpf",
+      "rgb": [
+        235,
+        200,
+        185
+      ],
+      "vertices": 26431,
+      "triangles": 50900
+    },
+    "subcutaneous_fat": {
+      "file": "subcutaneous_fat.ply",
+      "what": "subcutaneous fat (envelope)",
+      "rgb": [
+        255,
+        190,
+        40
+      ],
+      "vertices": 11287,
+      "triangles": 21542
+    },
+    "cartilage": {
+      "file": "cartilage.ply",
+      "what": "auricular cartilage",
+      "rgb": [
+        90,
+        150,
+        255
+      ],
+      "vertices": 75181,
+      "triangles": 141259
+    },
+    "auricle_skin": {
+      "file": "auricle_skin.ply",
+      "what": "auricle skin (open ear, as edited in Blender, closed underneath)",
+      "rgb": [
+        240,
+        205,
+        190
+      ],
+      "vertices": 72861,
+      "triangles": 142358
+    },
+    "canal_skin": {
+      "file": "canal_skin.ply",
+      "what": "ear canal skin, open at the eardrum",
+      "rgb": [
+        230,
+        120,
+        130
+      ],
+      "vertices": 4585,
+      "triangles": 8908
+    },
+    "solid_bone": {
+      "file": "solid_bone.ply",
+      "what": "solid_bone",
+      "rgb": [
+        160,
+        160,
+        160
+      ],
+      "vertices": 215598,
+      "triangles": 431364
+    },
+    "solid_face_deep": {
+      "file": "solid_face_deep.ply",
+      "what": "solid_face_deep",
+      "rgb": [
+        160,
+        160,
+        160
+      ],
+      "vertices": 74190,
+      "triangles": 148328
+    },
+    "solid_periosteum": {
+      "file": "solid_periosteum.ply",
+      "what": "solid_periosteum",
+      "rgb": [
+        160,
+        160,
+        160
+      ],
+      "vertices": 42974,
+      "triangles": 85420
+    },
+    "solid_temporalis_muscle": {
+      "file": "solid_temporalis_muscle.ply",
+      "what": "solid_temporalis_muscle",
+      "rgb": [
+        160,
+        160,
+        160
+      ],
+      "vertices": 16664,
+      "triangles": 33276
+    },
+    "solid_temporalis_fascia": {
+      "file": "solid_temporalis_fascia.ply",
+      "what": "solid_temporalis_fascia",
+      "rgb": [
+        160,
+        160,
+        160
+      ],
+      "vertices": 18024,
+      "triangles": 35964
+    },
+    "solid_auricular_muscles": {
+      "file": "solid_auricular_muscles.ply",
+      "what": "solid_auricular_muscles",
+      "rgb": [
+        160,
+        160,
+        160
+      ],
+      "vertices": 8620,
+      "triangles": 17232
+    },
+    "solid_tpf": {
+      "file": "solid_tpf.ply",
+      "what": "solid_tpf",
+      "rgb": [
+        160,
+        160,
+        160
+      ],
+      "vertices": 52200,
+      "triangles": 104272
+    },
+    "solid_subcutaneous_fat": {
+      "file": "solid_subcutaneous_fat.ply",
+      "what": "solid_subcutaneous_fat",
+      "rgb": [
+        160,
+        160,
+        160
+      ],
+      "vertices": 21696,
+      "triangles": 43360
+    },
+    "solid_skin": {
+      "file": "solid_skin.ply",
+      "what": "solid_skin",
+      "rgb": [
+        160,
+        160,
+        160
+      ],
+      "vertices": 46366,
+      "triangles": 92576
+    }
+  }
+}
