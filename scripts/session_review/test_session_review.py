@@ -94,6 +94,64 @@ def test_everything_on_one_session():
         window.close()
 
 
+def test_every_structure_replays_and_the_menu_toggles_it():
+    with tempfile.TemporaryDirectory() as tmp:
+        folder = pathlib.Path(tmp) / "expert_drillings_dev" / "A_B" / "Specimen_1" / "session_001"
+        demo.build(folder, SPECIMEN)
+        with data.h5py.File(folder / "ground_truth.h5", "r+") as h5:  # label half the bone a nerve
+            for name in [n for n in h5["volume"] if n.startswith("epoch_")]:
+                rgba = h5["volume"][name]["rgba"][()]
+                half = rgba[..., 3] > data.SOLID_ALPHA
+                half[: rgba.shape[0] // 2] = False
+                rgba[half, :3] = (0xf4, 0xd6, 0x31)
+                h5["volume"][name]["rgba"][...] = rgba
+        session = data.ReviewSession(folder)
+        voxels = session.voxels
+        table = voxels.structures_at(1.0)
+        assert [e["name"] for e in table] == ["Bone", "Facial nerve"]
+        for t in (0.0, 5.0, 12.0, 20.0, 21.5, 25.9, 8.0):
+            ids, labels = voxels.structure_ids_at(t), voxels.labels_at(t)
+            assert np.array_equal(ids > 0, labels > 0), t  # same voxels as the replay
+        a, b = voxels.position_at(1.0), voxels.position_at(12.0)
+        changed = voxels.structures_changed(a, b)
+        before, after = voxels.structure_ids_at(1.0), voxels.structure_ids_at(12.0)
+        assert changed == {int(k) for k in np.unique(before[before != after])}
+        assert voxels.structures_changed(a, a) == set()
+        session.close()
+
+        menu = review_app.StructureMenu()
+        menu.set_structures(table)
+        fired = []
+        menu.changed.connect(lambda: fired.append(1))
+        key = table[-1]["hex"]
+        menu.boxes[key].setChecked(False)
+        assert not menu.is_shown(key) and fired and f"{len(table) - 1}/{len(table)}" in menu.text()
+        menu.set_structures(table)  # the choice survives a new session
+        assert not menu.boxes[key].isChecked()
+        menu.set_all(True)
+        assert menu.is_shown(key)
+
+
+def test_gpu_view_data_matches_the_replay():
+    import gpu_scene
+
+    shaders = gpu_scene.web_shaders()
+    assert all(text.startswith("#version 410 core") and "${" not in text for text in shaders.values())
+    values = np.zeros((9, 8, 8), np.uint32)
+    values[8, 7, 7] = 5
+    bricks = gpu_scene.brick_maxima(values, values > 0)
+    assert bricks.shape == (2, 1, 1) and bricks[1, 0, 0] == 5 and bricks[0, 0, 0] == 0
+    with tempfile.TemporaryDirectory() as tmp:
+        folder = pathlib.Path(tmp) / "expert_drillings_dev" / "A_B" / "Specimen_1" / "session_001"
+        demo.build(folder, SPECIMEN)
+        session = data.ReviewSession(folder)
+        for t in (0.0, 5.0, 12.0, 20.9, 21.5, 25.9, 8.0):  # both sides of the volume reset
+            number, voxel = session.voxels.position_at(t)
+            ids, gpu_values, first = session.voxels.gpu_volume(number)
+            assert np.array_equal((ids > 0) & (gpu_values > voxel - first + 1), session.voxels.labels_at(t) > 0), t
+        session.close()
+
+
 def test_a_session_without_video_or_finish_still_opens():
     with tempfile.TemporaryDirectory() as tmp:
         folder = pathlib.Path(tmp) / "expert_drillings_dev" / "A_B" / "Specimen_1" / "session_001"

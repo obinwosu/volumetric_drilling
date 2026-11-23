@@ -26,6 +26,8 @@ HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 sys.path.insert(0, str(HERE))
 import session_data as data  # noqa: E402
+import gpu_scene  # noqa: E402
+import share_panel  # noqa: E402
 
 STYLE = """
 QWidget { background-color: #0B1C2C; color: #E6EEF5; font-size: 14px; }
@@ -42,6 +44,11 @@ QPushButton { background-color: #1E3A4F; border: 1px solid #2F8FBF; border-radiu
 QPushButton:hover { background-color: #2A4F68; }
 QPushButton:disabled { color: #5C7183; border-color: #1E3A4F; }
 QPushButton#play { background-color: #1F6F8B; font-weight: bold; min-width: 76px; }
+QToolButton { background-color: #1E3A4F; border: 1px solid #2F8FBF; border-radius: 4px; padding: 6px 12px; }
+QToolButton:hover { background-color: #2A4F68; }
+QToolButton::menu-indicator { subcontrol-position: right center; right: 4px; }
+QMenu { background-color: #12283A; border: 1px solid #2F5A75; }
+QLineEdit { background-color: #0F2433; border: 1px solid #1E3A4F; border-radius: 4px; padding: 4px 8px; }
 QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid #2F5A75; border-radius: 3px; background: #0F2433; }
 QCheckBox::indicator:checked { background-color: #2F8FBF; border-color: #2F8FBF; }
 QSplitter::handle { background-color: #1E3A4F; }
@@ -322,26 +329,107 @@ class Timeline(QtWidgets.QWidget):
             self._mouse(event)
 
 
+class StructureMenu(QtWidgets.QToolButton):
+    """A dropdown of every structure in the volume. It stays open while boxes are ticked."""
+
+    changed = QtCore.pyqtSignal()
+
+    def __init__(self):
+        super().__init__()
+        self.hidden = set()  # by label color, so the choice carries over to the next session
+        self.boxes = {}
+        self.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.popup = QtWidgets.QMenu(self)
+        self.setMenu(self.popup)
+        panel = QtWidgets.QWidget()
+        outer = QtWidgets.QVBoxLayout(panel)
+        outer.setContentsMargins(8, 6, 8, 6)
+        buttons = QtWidgets.QHBoxLayout()
+        for label, state in (("Show all", True), ("Hide all", False)):
+            button = QtWidgets.QPushButton(label)
+            button.clicked.connect(lambda _=False, on=state: self.set_all(on))
+            buttons.addWidget(button)
+        outer.addLayout(buttons)
+        self.scroll = QtWidgets.QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        outer.addWidget(self.scroll)
+        action = QtWidgets.QWidgetAction(self.popup)
+        action.setDefaultWidget(panel)
+        self.popup.addAction(action)
+        self.set_structures([])
+
+    def set_structures(self, table):
+        rows = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(rows)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        self.boxes = {}
+        for entry in table:
+            box = QtWidgets.QCheckBox(entry["name"])
+            pixmap = QtGui.QPixmap(14, 14)
+            pixmap.fill(QtGui.QColor.fromRgbF(*entry["color"]))
+            box.setIcon(QtGui.QIcon(pixmap))
+            box.setChecked(entry["hex"] not in self.hidden)
+            box.toggled.connect(lambda on, key=entry["hex"]: self._toggled(key, on))
+            layout.addWidget(box)
+            self.boxes[entry["hex"]] = box
+        layout.addStretch(1)
+        self.scroll.setWidget(rows)
+        self.scroll.setMinimumWidth(rows.sizeHint().width() + 24)
+        self.scroll.setFixedHeight(min(rows.sizeHint().height() + 4, 420))
+        self._update_text()
+
+    def is_shown(self, key):
+        return key not in self.hidden
+
+    def _toggled(self, key, on):
+        (self.hidden.discard if on else self.hidden.add)(key)
+        self._update_text()
+        self.changed.emit()
+
+    def set_all(self, on):
+        for key, box in self.boxes.items():
+            box.blockSignals(True)
+            box.setChecked(on)
+            box.blockSignals(False)
+            (self.hidden.discard if on else self.hidden.add)(key)
+        self._update_text()
+        self.changed.emit()
+
+    def _update_text(self):
+        shown = sum(box.isChecked() for box in self.boxes.values())
+        self.setText(f"Structures ({shown}/{len(self.boxes)})")
+
+
 class Scene3D(QtWidgets.QWidget):
-    """The bone at the current moment, rebuilt from the recorded voxels."""
+    """Every labelled structure at the current moment, drawn on the GPU (see gpu_scene.py)."""
+
+    PATH_HZ = 50.0
 
     def __init__(self):
         super().__init__()
         self.session = None
         self.available = False
-        self.cost_s = 0.03
-        self._voxel_position = None
+        self.cost_s = 0.002
         self._t = 0.0
+        self._epoch = None
+        self._first_voxel = 0
+        self._bone_keys = set()
+        self.setFocusPolicy(Qt.StrongFocus)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         bar = QtWidgets.QHBoxLayout()
-        self.check_bone = QtWidgets.QCheckBox("Bone")
-        self.check_ear = QtWidgets.QCheckBox("Inner ear")
+        self.structure_menu = StructureMenu()
+        self.structure_menu.changed.connect(self._options_changed)
+        bar.addWidget(self.structure_menu)
         self.check_removed = QtWidgets.QCheckBox("Removed")
         self.check_path = QtWidgets.QCheckBox("Path")
         self.check_follow = QtWidgets.QCheckBox("Microscope view")
-        for widget in (self.check_bone, self.check_ear, self.check_removed, self.check_path, self.check_follow):
-            widget.setChecked(True)
+        self.check_follow.setChecked(True)  # the drill path and removed bone start off
+        for widget in (self.check_removed, self.check_path, self.check_follow):
             widget.toggled.connect(self._options_changed)
             bar.addWidget(widget)
         bar.addWidget(QtWidgets.QLabel("Bone opacity"))
@@ -359,127 +447,56 @@ class Scene3D(QtWidgets.QWidget):
         if os.environ.get("FIVRS_REVIEW_NO_3D"):
             layout.addWidget(QtWidgets.QLabel("3D view off"), 1)
             return
-        try:
-            import vtk
-            from vtk.util import numpy_support
-            from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
-        except ImportError:
-            note = QtWidgets.QLabel("The 3D view needs VTK:  sudo apt install python3-vtk9")
-            note.setAlignment(Qt.AlignCenter)
-            layout.addWidget(note, 1)
-            return
-        self.vtk, self.np_vtk = vtk, numpy_support
-        self.widget = QVTKRenderWindowInteractor(self)
-        layout.addWidget(self.widget, 1)
-        self.renderer = vtk.vtkRenderer()
-        self.renderer.SetBackground(0.03, 0.06, 0.09)
-        self.widget.GetRenderWindow().AddRenderer(self.renderer)
-        # The drill path is drawn in a layer on top, so it stays visible inside the cavity.
-        self.overlay = vtk.vtkRenderer()
-        self.overlay.SetLayer(1)
-        self.overlay.InteractiveOff()
-        self.overlay.SetActiveCamera(self.renderer.GetActiveCamera())
-        self.widget.GetRenderWindow().SetNumberOfLayers(2)
-        self.widget.GetRenderWindow().AddRenderer(self.overlay)
-        style = vtk.vtkInteractorStyleTrackballCamera()
-        self.widget.SetInteractorStyle(style)
-        # Dragging the view by hand takes it off the recorded microscope.
-        style.AddObserver("StartInteractionEvent", lambda *_: self.check_follow.setChecked(False))
-        light = vtk.vtkLightKit()
-        light.AddLightsToRenderer(self.renderer)
-        self.surfaces = {}
+        self.note = QtWidgets.QLabel("")
+        self.note.setAlignment(Qt.AlignCenter)
+        self.note.setWordWrap(True)
+        self.note.hide()
+        layout.addWidget(self.note, 1)
+        self.view = gpu_scene.SceneWindow()
+        self.view.interacted.connect(lambda: self.check_follow.setChecked(False))
+        self.view.released.connect(self._take_keys_back)
+        self.view.failed.connect(self._gl_failed)
+        self.container = QtWidgets.QWidget.createWindowContainer(self.view, self)
+        self.container.setFocusPolicy(Qt.NoFocus)
+        self.container.setMinimumSize(120, 120)
+        layout.addWidget(self.container, 1)
         self.available = True
-        self._build_instruments()
 
-    def showEvent(self, event):
-        super().showEvent(event)
-        if self.available and not getattr(self, "_started", False):
-            self._started = True
-            self.widget.Initialize()
+    def _take_keys_back(self):
+        # A click lands in the native GL window; Space and the arrow keys belong to the review app.
+        self.activateWindow()
+        self.setFocus()
 
-    def _build_instruments(self):
-        vtk = self.vtk
-        self.burr_source = vtk.vtkSphereSource()
-        self.burr_source.SetThetaResolution(28)
-        self.burr_source.SetPhiResolution(20)
-        mapper = vtk.vtkPolyDataMapper()
-        mapper.SetInputConnection(self.burr_source.GetOutputPort())
-        self.burr_actor = vtk.vtkActor()
-        self.burr_actor.SetMapper(mapper)
-        self.burr_actor.GetProperty().SetColor(0.95, 0.72, 0.25)
-        self.burr_actor.GetProperty().SetSpecular(0.6)
-        self.shaft_source = vtk.vtkCylinderSource()
-        self.shaft_source.SetResolution(20)
-        self.shaft_source.SetHeight(1.2)
-        shaft_mapper = vtk.vtkPolyDataMapper()
-        shaft_mapper.SetInputConnection(self.shaft_source.GetOutputPort())
-        self.shaft_actor = vtk.vtkActor()
-        self.shaft_actor.SetMapper(shaft_mapper)
-        self.shaft_actor.GetProperty().SetColor(0.62, 0.68, 0.74)
-        self.path_data = vtk.vtkPolyData()
-        path_mapper = vtk.vtkPolyDataMapper()
-        path_mapper.SetInputData(self.path_data)
-        self.path_actor = vtk.vtkActor()
-        self.path_actor.SetMapper(path_mapper)
-        self.path_actor.GetProperty().SetColor(0.3, 0.85, 1.0)
-        self.path_actor.GetProperty().SetLineWidth(1.5)
-        self.path_actor.GetProperty().LightingOff()
-        for actor in (self.burr_actor, self.shaft_actor):
-            self.renderer.AddActor(actor)
-        self.overlay.AddActor(self.path_actor)
+    def _gl_failed(self, message):
+        self.available = False
+        self.container.hide()
+        self.note.setText(f"The 3D view could not start: {message}")
+        self.note.show()
 
-    def _surface(self, name, color, shape, volume, smooth=True):
-        vtk = self.vtk
-        buffer = np.zeros(int(np.prod(shape)), np.uint8)
-        image = vtk.vtkImageData()
-        image.SetDimensions(*shape)
-        dims = np.asarray(volume["dimensions_sim"], float)
-        image.SetSpacing(*(dims / np.asarray(shape, float)))
-        image.SetOrigin(*(-dims / 2.0))
-        scalars = self.np_vtk.numpy_to_vtk(buffer, deep=0, array_type=vtk.VTK_UNSIGNED_CHAR)
-        image.GetPointData().SetScalars(scalars)
-        contour = vtk.vtkFlyingEdges3D()
-        if smooth:
-            blur = vtk.vtkImageGaussianSmooth()
-            blur.SetInputData(image)
-            blur.SetStandardDeviations(0.8, 0.8, 0.8)
-            blur.SetRadiusFactors(1.6, 1.6, 1.6)
-            contour.SetInputConnection(blur.GetOutputPort())
-        else:
-            contour.SetInputData(image)
-        contour.SetValue(0, 127.0)
-        contour.ComputeNormalsOn()
-        mapper = vtk.vtkPolyDataMapper()
-        mapper.SetInputConnection(contour.GetOutputPort())
-        mapper.ScalarVisibilityOff()
-        actor = vtk.vtkActor()
-        actor.SetMapper(mapper)
-        actor.GetProperty().SetColor(*color)
-        actor.GetProperty().SetSpecular(0.12)
-        matrix = vtk.vtkMatrix4x4()
-        rotation, position = np.asarray(volume["R_world_volume"]), volume["p_world_volume"]
-        for r in range(3):
-            for c in range(3):
-                matrix.SetElement(r, c, float(rotation[r, c]))
-            matrix.SetElement(r, 3, float(position[r]))
-        actor.SetUserMatrix(matrix)
-        self.renderer.AddActor(actor)
-        self.surfaces[name] = {"buffer": buffer, "image": image, "actor": actor, "scalars": scalars}
+    def _load_epoch(self, number):
+        voxels = self.session.voxels
+        labels, values, self._first_voxel = voxels.gpu_volume(number)
+        self._epoch = number
+        table = voxels.structures
+        self._bone_keys = {entry["hex"] for entry in table if entry["name"] == "Bone"}
+        if [entry["hex"] for entry in table] != list(self.structure_menu.boxes):
+            self.structure_menu.set_structures(table)
+        self.frame = gpu_scene.VolumeFrame(self.session.meta["volume"], labels.shape)
+        self.view.set_volume(labels, values)
 
     def set_session(self, session, t):
         self.session = session
-        self._voxel_position = None
+        self._t = t
+        self._epoch = None
         if not self.available:
             return
-        for surface in self.surfaces.values():
-            self.renderer.RemoveActor(surface["actor"])
-        self.surfaces = {}
-        labels = session.voxels.labels_at(t) if session.voxels.epochs else None
-        if labels is not None:
-            volume = session.meta["volume"]
-            self._surface("bone", (0.93, 0.89, 0.76), labels.shape, volume)
-            self._surface("ear", (0.86, 0.26, 0.20), labels.shape, volume)
-            self._surface("removed", (0.25, 0.65, 0.95), labels.shape, volume)
+        if session.voxels.epochs:
+            self._load_epoch(session.voxels.position_at(t)[0])
+            moments = np.arange(0.0, session.duration + 1.0 / self.PATH_HZ, 1.0 / self.PATH_HZ)
+            path = np.column_stack([np.interp(moments, session.drill_t, session.drill[:, 2 + k]) for k in range(3)])
+            self.view.set_path(self.frame.point(path))
+        else:
+            self.structure_menu.set_structures([])
         self._options_changed()
         self.update_time(t, force=True)
         if not self.check_follow.isChecked() or session.camera_at(t) is None:
@@ -487,95 +504,50 @@ class Scene3D(QtWidgets.QWidget):
 
     def fit(self):
         if self.available:
-            self.renderer.ResetCamera()
-            self.renderer.ResetCameraClippingRange()
-            self.widget.GetRenderWindow().Render()
+            self.view.fit()
+
+    def _palette(self):
+        palette = np.zeros((256, 4), np.uint8)
+        for entry in self.session.voxels.structures:
+            alpha = 0
+            if self.structure_menu.is_shown(entry["hex"]):
+                alpha = round(self.opacity.value() * 2.55) if entry["hex"] in self._bone_keys else 255
+            palette[entry["id"]] = [*(round(c * 255) for c in entry["color"]), alpha]
+        return palette
 
     def _options_changed(self, *_):
-        if not self.available:
+        if not self.available or self.session is None or self._epoch is None:
             return
-        shown = {"bone": self.check_bone, "ear": self.check_ear, "removed": self.check_removed}
-        for name, surface in self.surfaces.items():
-            surface["actor"].SetVisibility(shown[name].isChecked())
-        if "bone" in self.surfaces:
-            self.surfaces["bone"]["actor"].GetProperty().SetOpacity(self.opacity.value() / 100.0)
-        if "removed" in self.surfaces:
-            self.surfaces["removed"]["actor"].GetProperty().SetOpacity(0.4)
-        self.path_actor.SetVisibility(self.check_path.isChecked())
-        if self.session is not None:
-            self.update_time(self._t, force=True)
+        self.view.set_palette(self._palette(), self.check_removed.isChecked())
+        self.update_time(self._t)
 
     def update_time(self, t, force=False):
-        if not self.available or self.session is None:
+        if not self.available or self.session is None or self._epoch is None:
             return
         began = time.perf_counter()
         self._t = t
         session = self.session
-        position = session.voxels.position_at(t) if session.voxels.epochs else None
-        if self.surfaces and (force or position != self._voxel_position):
-            self._voxel_position = position
-            labels = session.voxels.labels_at(t)
-            removed = session.voxels.removed_at(t)
-            for name, mask in (("bone", (labels == 1) | (labels == 3)), ("ear", labels == 2), ("removed", removed)):
-                surface = self.surfaces[name]
-                surface["buffer"][:] = (mask.ravel(order="F") * 255).astype(np.uint8)
-                surface["scalars"].Modified()
-                surface["image"].Modified()
-        self._place_drill(t)
-        if self.check_follow.isChecked():
-            self._follow_microscope(t)
-        self.renderer.ResetCameraClippingRange()
-        self.widget.GetRenderWindow().Render()
-        self.cost_s = 0.8 * self.cost_s + 0.2 * (time.perf_counter() - began)
-
-    def _place_drill(self, t):
-        vtk = self.vtk
-        session = self.session
+        number, voxel = session.voxels.position_at(t)
+        if number != self._epoch:
+            self._load_epoch(number)
+            self.view.set_palette(self._palette(), self.check_removed.isChecked())
         pose = session.drill_at(t)
+        axis = data.dataset.quat_to_matrix(pose[3:7])[:, 0]
         _, _, diameter = session.burr_at(t)
-        self.burr_source.SetRadius(diameter * 0.5)
-        rotation = data.dataset.quat_to_matrix(pose[3:7])
-        position = pose[:3]
-        for actor, offset in ((self.burr_actor, 0.0), (self.shaft_actor, 0.6)):
-            matrix = vtk.vtkMatrix4x4()
-            # The drill's shaft runs along its local +x from the burr. VTK's cylinder is along y.
-            axes = rotation if actor is self.burr_actor else rotation @ np.array([[0, 1, 0], [1, 0, 0], [0, 0, -1]], float)
-            origin = position + rotation[:, 0] * offset
-            for r in range(3):
-                for c in range(3):
-                    matrix.SetElement(r, c, float(axes[r, c]))
-                matrix.SetElement(r, 3, float(origin[r]))
-            actor.SetUserMatrix(matrix)
-        self.shaft_source.SetRadius(max(diameter * 0.22, 0.006))
-        if self.check_path.isChecked():
-            points = session.path_until(t)
-            polydata_points = vtk.vtkPoints()
-            polydata_points.SetData(self.np_vtk.numpy_to_vtk(points.astype(np.float32), deep=1))
-            lines = vtk.vtkCellArray()
-            if len(points) > 1:
-                lines.InsertNextCell(len(points))
-                for k in range(len(points)):
-                    lines.InsertCellPoint(k)
-            self.path_data.SetPoints(polydata_points)
-            self.path_data.SetLines(lines)
-            self.path_data.Modified()
-
-    def _follow_microscope(self, t):
-        camera = self.session.camera_at(t)
-        if camera is None:
-            return
-        position, look, up, fov = camera
-        target = np.asarray(self.session.meta["volume"]["p_world_volume"], float)
-        distance = max(float(np.dot(target - position, look)), 0.1)
-        view = self.renderer.GetActiveCamera()
-        view.SetPosition(*position)
-        view.SetFocalPoint(*(position + look * distance))
-        view.SetViewUp(*up)
-        view.SetViewAngle(float(np.degrees(fov)))
+        unit = self.frame.voxel
+        count = int(t * self.PATH_HZ) + 1 if self.check_path.isChecked() else 0
+        if self.check_follow.isChecked():
+            camera = session.camera_at(t)
+            if camera is not None:
+                position, look, up, fov = camera
+                self.view.set_camera(self.frame.point(position), self.frame.direction(look), self.frame.direction(up), fov)
+        self.view.set_frame(voxel - self._first_voxel + 1, self.frame.point(pose[:3]), self.frame.direction(axis),
+                            diameter * 0.5 / unit, max(diameter * 0.22, 0.006) / unit, 1.2 / unit, count)
+        self.cost_s = 0.8 * self.cost_s + 0.2 * (time.perf_counter() - began)
 
     def shutdown(self):
         if self.available:
-            self.widget.Finalize()
+            self.view.close()
 
 
 class ReviewWindow(QtWidgets.QWidget):
@@ -636,6 +608,8 @@ class ReviewWindow(QtWidgets.QWidget):
         self.curve_list.itemChanged.connect(self._curves_changed)
         curves_layout.addWidget(self.curve_list)
         side_layout.addWidget(curves, 3)
+        self.share = share_panel.SharePanel(self)
+        side_layout.addWidget(self.share)
         outer.addWidget(side)
 
         main = QtWidgets.QWidget()
@@ -810,6 +784,7 @@ class ReviewWindow(QtWidgets.QWidget):
             self.scene.set_session(session, 0.0)
             self._set_enabled(True)
             self._refresh(force=True)
+            self.share.set_session(folder)
             self.setWindowTitle(f"FIVRS Session Review: {session.meta.get('specimen', {}).get('name', '')}, "
                                 f"session {session.meta.get('session_number', '')}")
         finally:
@@ -862,28 +837,14 @@ class ReviewWindow(QtWidgets.QWidget):
     def _show_info(self):
         session = self.session
         meta, summary = session.meta, session.summary
-        who = meta.get("participant") or {}
         specimen = meta.get("specimen") or {}
-        check = (summary.get("replay_check") or {}).get("status", "not run")
-        verdict = {"exact": "exact match", "mismatch": "MISMATCH", "not_checked": "not checked"}.get(check, check)
-        video = session.video
-        video_text = "none"
-        if video is not None and video.count:
-            video_text = f"{'stereo' if 'right' in video.eyes else 'mono'}, {video.count:,} frames, {video.fps:.0f} fps"
-            if video.dropped:
-                video_text += f", {video.dropped} dropped"
-        burrs = " → ".join(str(b["size_mm"]) for b in summary.get("burr_sequence", [])) or "-"
-        lines = [
-            f"<b>{who.get('first_name', '')} {who.get('last_name', '')}</b>"
-            + (" <span style='color:#F0B35E'>(development)</span>" if meta.get("development") else ""),
-            f"{specimen.get('name', '')}, {specimen.get('laterality', '')} ear, session {meta.get('session_number', '')}",
-            f"{meta.get('started', '')}",
-            f"Length {clock(session.duration)[:-4]}, {summary.get('strokes', 0)} strokes",
-            f"Voxels {summary.get('voxels_removed', 0):,} (inner ear {summary.get('inner_ear_voxels_removed', 0):,})",
-            f"Burr {burrs} mm",
-            f"Video {video_text}",
-            f"Replay check: <b>{verdict}</b>",
-        ]
+        side = str(specimen.get("laterality") or "").capitalize()
+        lines = [f"<b>Case</b> {specimen.get('name', '')}, session {meta.get('session_number', '')}",
+                 f"<b>Side</b> {side + ' ear' if side else '-'}",
+                 f"<b>Length</b> {clock(session.duration)[:-4]}"]
+        # Only problems with the recording itself are added to the three facts.
+        if (summary.get("replay_check") or {}).get("status") == "mismatch":
+            lines.append("<span style='color:#F07F7F'>Replay does not match the recorded volume.</span>")
         if not summary:
             lines.append("<span style='color:#F07F7F'>Recording did not finish.</span>")
         self.info.setText("<br>".join(lines))
@@ -983,7 +944,7 @@ class ReviewWindow(QtWidgets.QWidget):
         if self.scene.isVisible():
             now = time.monotonic()
             # The 3D view takes what time is left: it never holds the video back.
-            if force or now - self._last_3d >= max(0.1, self.scene.cost_s * 3.0):
+            if force or now - self._last_3d >= max(1.0 / 60.0, self.scene.cost_s * 3.0):
                 self._last_3d = now
                 self.scene.update_time(self.t, force=False)
 

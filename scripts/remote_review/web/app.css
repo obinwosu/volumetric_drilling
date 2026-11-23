@@ -1,0 +1,126 @@
+:root {
+  color-scheme: dark;
+  --bg: #0b1c2c; --panel: #12283a; --well: #0f2433; --raised: #1e3a4f; --line: #2f5a75;
+  --text: #e6eef5; --muted: #9bb0c3; --accent: #2f8fbf; --accent-strong: #1f6f8b;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text);
+  font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+h1 { margin: 0; font-size: 18px; } h2 { margin: 0; font-size: 15px; } p { margin: 0; }
+.muted { color: var(--muted); font-size: 14px; }
+button, select { min-height: 44px; padding: 0 14px; color: var(--text); background: var(--raised);
+  border: 1px solid var(--line); border-radius: 8px; font: inherit; }
+button:hover { background: #2a4f68; }
+button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible, canvas:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px; }
+button.primary, button.play { background: var(--accent-strong); border-color: var(--accent); font-weight: 600; }
+button.link { min-height: 0; padding: 0 2px; background: none; border: 0; color: #7fcdf0; text-decoration: underline; }
+[hidden] { display: none !important; }
+body[data-version="phone"] .desktop-only { display: none !important; }
+body[data-version="desktop"] .phone-only { display: none !important; }
+
+.top { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: max(10px, env(safe-area-inset-top)) 16px 10px; border-bottom: 1px solid var(--raised); }
+.title { min-width: 0; }
+.finish { flex: none; }
+#finish { flex: none; white-space: nowrap; }
+.work, .feedback, .side { min-width: 0; }
+.toolbar { position: relative; display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.mode { display: flex; flex: 3 1 0; gap: 6px; }
+.mode button { flex: 1 1 0; padding: 0 6px; }
+.mode button[aria-pressed="true"] { background: var(--accent-strong); border-color: var(--accent); }
+.structures-button { flex: 1.3 1 0; padding: 0 8px; }
+
+.stage { display: grid; gap: 8px; }
+.pane { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: #050d15; border-radius: 8px; }
+.stage[data-video="0"] .video-pane, .stage[data-scene="0"] .scene-pane { display: none; }
+video, #scene { display: block; width: 100%; height: 100%; }
+video { object-fit: contain; }
+#scene { touch-action: none; cursor: grab; }
+#scene:active { cursor: grabbing; }
+.scene-note { position: absolute; inset: 0; display: grid; place-items: center; padding: 16px; text-align: center;
+  color: var(--muted); pointer-events: none; }
+.reset { position: absolute; right: 8px; top: 8px; background: rgba(18, 40, 58, .85); }
+#timeline { display: block; width: 100%; height: 66px; margin-top: 8px; border-radius: 6px; touch-action: none; cursor: pointer; }
+.transport { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.play { min-width: 80px; }
+.speed { display: inline-flex; align-items: center; gap: 6px; }
+.time { font-variant-numeric: tabular-nums; font-weight: 600; }
+.readout { font-variant-numeric: tabular-nums; }
+.spacer { flex: 1; }
+/* The live numbers change width every frame, so they get a line of their own and can never rewrap the controls. */
+body[data-version] .transport .readout { order: 10; flex: 0 0 100%; min-width: 0; height: 20px; line-height: 20px;
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.transport .time { white-space: nowrap; }
+
+.feedback { display: grid; gap: 12px; align-content: start; }
+form { display: grid; gap: 6px; }
+textarea { width: 100%; padding: 10px; color: var(--text); background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; font: inherit; resize: vertical; }
+.send-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.comments { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.comments li { padding: 10px 12px; background: var(--panel); border: 1px solid var(--raised); border-radius: 8px; }
+.comment-head { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 2px; }
+.comment-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+dialog { color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+dialog::backdrop { background: rgba(0, 0, 0, .45); }
+.sheet-head, .row-buttons { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.row-buttons { margin: 10px 0; } .row-buttons button { flex: 1; }
+.slider { display: grid; gap: 2px; margin-top: 10px; font-size: 14px; }
+.slider input { width: 100%; height: 36px; accent-color: var(--accent); }
+.structure-list { display: grid; }
+.check { display: flex; align-items: center; gap: 10px; min-height: 40px; }
+.check input { width: 20px; height: 20px; margin: 0; accent-color: var(--accent); }
+.swatch { flex: none; width: 14px; height: 14px; border-radius: 3px; }
+hr { border: 0; border-top: 1px solid var(--raised); margin: 8px 0; }
+
+/* Phone: one column, big targets, the 3D view gets a square. */
+body[data-version="phone"] .app { display: grid; gap: 16px; padding: 12px 16px calc(24px + env(safe-area-inset-bottom)); }
+body[data-version="phone"] .pane { aspect-ratio: 16 / 9; }
+body[data-version="phone"] .stage[data-video="0"] .scene-pane { aspect-ratio: 1 / 1; max-height: 68dvh; }
+body[data-version="phone"] .readout { flex-basis: 100%; }
+body[data-version="phone"] .speed { margin-left: auto; }
+body[data-version="phone"] dialog { position: fixed; width: min(420px, calc(100vw - 16px)); max-height: 86dvh;
+  margin: auto auto 8px; }
+
+/* Computer: the review app's layout, filling the window. */
+body[data-version="desktop"] { height: 100dvh; overflow: hidden; display: flex; flex-direction: column; font-size: 14px; }
+body[data-version="desktop"] h1 { font-size: 16px; }
+body[data-version="desktop"] button, body[data-version="desktop"] select { min-height: 32px; padding: 0 10px; }
+body[data-version="desktop"] button.link { min-height: 0; padding: 0 2px; }
+body[data-version="desktop"] .top { padding: 6px 12px; }
+body[data-version="desktop"] .app { flex: 1; min-height: 0; display: grid; gap: 10px; padding: 8px 10px;
+  grid-template-columns: 250px minmax(0, 1fr) 310px; }
+.side { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+.box { padding: 10px; background: var(--panel); border: 1px solid var(--raised); border-radius: 6px; }
+.curves-box { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 4px; }
+.curve-list { flex: 1; min-height: 0; overflow: auto; }
+.curve-list h3 { margin: 8px 0 2px; color: var(--muted); font-size: 13px; font-weight: 600; }
+.curve-list .check { min-height: 26px; gap: 8px; }
+.curve-list .check input { width: 15px; height: 15px; }
+dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 6px 0 0; font-size: 13px; }
+dt { color: var(--muted); } dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+body[data-version="desktop"] .work { display: flex; flex-direction: column; min-height: 0; }
+body[data-version="desktop"] .toolbar { flex: none; gap: 12px; }
+body[data-version="desktop"] .toolbar label { display: inline-flex; align-items: center; gap: 6px; }
+body[data-version="desktop"] .structures-button { flex: none; }
+body[data-version="desktop"] .stage { flex: 3 1 0; min-height: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+body[data-version="desktop"] .stage[data-video="0"], body[data-version="desktop"] .stage[data-scene="0"] { grid-template-columns: minmax(0, 1fr); }
+body[data-version="desktop"] .stage[data-video="0"][data-scene="0"] { display: none; }
+body[data-version="desktop"] .curves-wrap { flex: 2 1 0; min-height: 110px; margin-top: 8px; }
+body[data-version="desktop"] .curves-wrap[data-show="0"] { display: none; }
+#curves { display: block; width: 100%; height: 100%; border-radius: 6px; cursor: crosshair; }
+body[data-version="desktop"] #timeline { flex: none; height: 78px; }
+body[data-version="desktop"] .transport { flex: none; flex-wrap: wrap; row-gap: 4px; }
+body[data-version="desktop"] .transport > * { flex: none; }
+body[data-version="desktop"] .transport .spacer { flex: 1; }
+body[data-version="desktop"] .transport .check { min-height: 32px; gap: 6px; }
+body[data-version="desktop"] .transport .check input { width: 15px; height: 15px; }
+body[data-version="desktop"] .feedback { min-height: 0; overflow: auto; grid-template-rows: auto auto auto auto; }
+body[data-version="desktop"] dialog { position: absolute; z-index: 20; top: 38px; left: auto; right: auto; margin: 0;
+  width: 300px; max-height: min(620px, calc(100dvh - 130px)); overflow: auto; }
+
+@media (max-width: 1240px) {
+  body[data-version="desktop"] .app { grid-template-columns: 210px minmax(0, 1fr) 250px; }
+}

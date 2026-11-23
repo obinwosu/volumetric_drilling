@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#0b1c2c">
+<title>Case Review</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body data-version="phone">
+<header class="top">
+  <div class="title">
+    <h1 id="case-code">Case review</h1>
+    <p id="case-info" class="muted"></p>
+  </div>
+  <button id="finish" class="primary">Finish review</button>
+</header>
+
+<main class="app">
+  <aside class="side desktop-only" aria-label="Session">
+    <section class="box">
+      <h2>Session</h2>
+      <dl id="session-facts"></dl>
+    </section>
+    <section class="box curves-box">
+      <h2>Curves</h2>
+      <div id="curve-list" class="curve-list"></div>
+    </section>
+  </aside>
+
+  <section class="work" aria-label="Session replay">
+    <div class="toolbar">
+      <div class="phone-only mode" role="group" aria-label="View">
+        <button data-mode="video">Video</button>
+        <button data-mode="3d">3D</button>
+        <button data-mode="both">Both</button>
+      </div>
+      <label class="desktop-only">Show
+        <select id="layout">
+          <option value="1,1,1">All</option>
+          <option value="1,0,0">Video</option>
+          <option value="1,0,1">Video + curves</option>
+          <option value="1,1,0">Video + 3D</option>
+          <option value="0,1,1">3D + curves</option>
+          <option value="0,1,0">3D</option>
+          <option value="0,0,1">Curves</option>
+        </select>
+      </label>
+      <label class="desktop-only">Curve window
+        <select id="curve-window">
+          <option value="0">Whole session</option>
+          <option value="60">60 s</option>
+          <option value="30">30 s</option>
+          <option value="10">10 s</option>
+          <option value="3">3 s</option>
+        </select>
+      </label>
+      <button id="open-structures" class="structures-button" aria-haspopup="dialog">Structures</button>
+      <dialog id="structures" aria-label="Structures">
+        <div class="sheet-head">
+          <h2>Structures</h2>
+          <button id="close-structures">Done</button>
+        </div>
+        <label class="slider">Bone opacity <input id="bone-opacity" type="range" min="10" max="100" value="100"></label>
+        <div class="row-buttons">
+          <button id="show-all">Show all</button>
+          <button id="hide-all">Hide all</button>
+        </div>
+        <div id="structure-list" class="structure-list"></div>
+        <hr>
+        <label class="check"><input id="show-removed" type="checkbox"> Drilled-away bone</label>
+        <label class="check"><input id="show-path" type="checkbox"> Drill path (last 20 s)</label>
+        <label class="check"><input id="show-drill" type="checkbox" checked> Drill</label>
+      </dialog>
+    </div>
+
+    <div id="stage" class="stage">
+      <div class="pane video-pane"><video id="video" playsinline muted preload="metadata"></video></div>
+      <div class="pane scene-pane">
+        <canvas id="scene" aria-label="3D model. Drag to rotate, pinch or scroll to zoom, two fingers or Shift-drag to pan."></canvas>
+        <p id="scene-note" class="scene-note">Loading 3D</p>
+        <button id="reset-view" class="reset">Reset view</button>
+      </div>
+    </div>
+    <div class="curves-wrap desktop-only"><canvas id="curves" aria-label="Session curves. Click to seek."></canvas></div>
+    <canvas id="timeline" tabindex="0" role="slider" aria-label="Session time" aria-valuemin="0"></canvas>
+
+    <div class="transport">
+      <button id="play" class="play" aria-label="Play">Play</button>
+      <button class="desktop-only" data-step="-1">-1 s</button>
+      <button class="desktop-only" data-step="frame-back">-1 frame</button>
+      <button class="desktop-only" data-step="frame-next">+1 frame</button>
+      <button class="desktop-only" data-step="1">+1 s</button>
+      <label class="speed"><span class="desktop-only">Speed</span>
+        <select id="speed" aria-label="Playback speed">
+          <option value="0.1">0.1x</option>
+          <option value="0.25">0.25x</option>
+          <option value="0.5">0.5x</option>
+          <option value="1" selected>1x</option>
+          <option value="2">2x</option>
+          <option value="4">4x</option>
+          <option value="8">8x</option>
+        </select>
+      </label>
+      <label class="check desktop-only"><input id="loop" type="checkbox"> Loop</label>
+      <span id="time" class="time">0:00 / 0:00</span>
+      <span id="now-readout" class="muted readout"></span>
+      <span class="spacer desktop-only"></span>
+      <button id="mark-in" class="desktop-only">Mark start (I)</button>
+      <button id="mark-out" class="desktop-only">Mark end (O)</button>
+      <button id="mark-clear" class="desktop-only">Clear</button>
+    </div>
+  </section>
+
+  <aside class="feedback" aria-label="Feedback">
+    <h2>Feedback</h2>
+    <form id="comment-form">
+      <label for="comment">Comment at <button type="button" id="comment-time" class="link">0:00</button></label>
+      <textarea id="comment" rows="3" maxlength="2000" placeholder="What should change at this moment?"></textarea>
+      <div class="send-row">
+        <span id="comment-status" class="muted" role="status"></span>
+        <button type="submit" class="primary">Post comment</button>
+      </div>
+    </form>
+    <ol id="comments" class="comments"></ol>
+    <p id="no-comments" class="muted">No comments yet.</p>
+  </aside>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>

@@ -6,6 +6,7 @@
     session.value_at("speed", 12.3)
     session.drill_at(12.3)              x y z qx qy qz qw
     session.voxels.labels_at(12.3)      the bone at that moment: 0 air, 1 bone, 2 inner ear, 3 other
+    session.voxels.structures_at(12.3)  every labelled structure; structure_ids_at() gives its voxels
     session.video.frame_at(12.3)        BGR image (eye="left" or "right")
     export_video(...), export_csv(...)
 """
@@ -35,6 +36,10 @@ import cv2  # noqa: E402
 sys.path.insert(0, str(REPO / "scripts" / "expert_drilling"))
 import expert_dataset as dataset  # noqa: E402
 
+sys.path.insert(0, str(HERE))
+import structures  # noqa: E402
+
+MAX_STRUCTURES = 60
 DATA_FOLDERS = (("expert_drillings_dev", "Development"), ("expert_drillings", "Expert"),
                 ("reviewable_sessions", "Main"))
 SOLID_ALPHA = dataset.SOLID_ALPHA
@@ -80,6 +85,8 @@ class VoxelReplay:
         self._loaded = None
         self._base = None
         self._order = None
+        self._ids = None
+        self.structures = []
 
     @property
     def shape(self):
@@ -109,7 +116,91 @@ class VoxelReplay:
         if stop > start:
             indices = self.h5["voxels/indices"][start:stop].astype(np.intp)[::-1]
             order[indices[:, 0], indices[:, 1], indices[:, 2]] = np.arange(stop - 1, start - 1, -1)
+        self._read_structures(rgba, solid)
         self._base, self._order, self._loaded = labels, order, number
+
+    def _read_structures(self, rgba, solid):
+        """One id per label color in this epoch's volume, with each structure's bounding box."""
+        specimen = self.session.meta["specimen"]["labels"]
+        bone_hex = specimen.get("bone", "fff9db")
+        codes = (rgba[..., 0][solid].astype(np.uint32) << 16 | rgba[..., 1][solid].astype(np.uint32) << 8
+                 | rgba[..., 2][solid])
+        unique, inverse, counts = np.unique(codes, return_inverse=True, return_counts=True)
+        hexes = [f"{int(code):06x}" for code in unique]
+        lookup = np.zeros(len(unique), np.uint8)
+        kept = np.argsort(-counts, kind="stable")
+        other = None
+        ranked = []
+        for rank, k in enumerate(kept):
+            if rank < MAX_STRUCTURES - 1:
+                ranked.append(hexes[k])
+                lookup[k] = len(ranked)
+            else:  # a volume with stray colors: keep the list usable
+                other = other or len(ranked) + 1
+                lookup[k] = other
+        ids = np.zeros(solid.shape, np.uint8)
+        ids[solid] = lookup[inverse.ravel()]
+        table = [structures.describe(key, bone_hex) for key in ranked]
+        if other:
+            table.append({"hex": "other", "name": "Other labels", "color": (0.6, 0.6, 0.6)})
+        if "volume/inner_ear" in self.h5:  # the hollow cavity has no color in the voxels
+            ear = specimen["inner_ear"]
+            ear = ear if isinstance(ear, str) else ear[0]
+            if ear not in ranked:
+                table.append(structures.describe(ear, bone_hex))
+                cavity_id = len(table)
+            else:
+                cavity_id = ranked.index(ear) + 1
+            ids[self.h5["volume/inner_ear"][()]] = cavity_id
+        low = np.full((len(table) + 1, 3), np.iinfo(np.int32).max, np.int32)
+        high = np.full((len(table) + 1, 3), -1, np.int32)
+        for axis in range(3):
+            for k in range(ids.shape[axis]):
+                present = np.flatnonzero(np.bincount(np.take(ids, k, axis=axis).ravel(), minlength=len(table) + 1))
+                low[present, axis] = np.minimum(low[present, axis], k)
+                high[present, axis] = np.maximum(high[present, axis], k)
+        total = np.bincount(ids.ravel(), minlength=len(table) + 1)
+        for number, entry in enumerate(table, 1):
+            entry.update(id=number, voxels=int(total[number]), low=low[number].tolist(), high=high[number].tolist())
+        table = [entry for entry in table if entry["voxels"]]
+        table.sort(key=lambda entry: structures.menu_order(entry["hex"], bone_hex))
+        self.structures, self._ids = table, ids
+
+    def structures_at(self, t):
+        """The labelled structures of the volume at t: id, hex, name, color, voxels, low, high."""
+        self._load(self.position_at(t)[0])
+        return self.structures
+
+    def structure_ids_at(self, t):
+        """Each voxel's structure id at t (0 = empty). The hollow inner ear keeps its id."""
+        number, voxel = self.position_at(t)
+        self._load(number)
+        return np.where(self._order >= voxel, self._ids, 0).astype(np.uint8)
+
+    def structures_changed(self, before, after):
+        """Ids touched between two position_at() results; None means assume all of them."""
+        if before is None or after is None or before[0] != after[0]:
+            return None
+        self._load(after[0])
+        first, last = sorted((before[1], after[1]))
+        if first == last:
+            return set()
+        indices = self.h5["voxels/indices"][first:last].astype(np.intp)
+        return {int(k) for k in np.unique(self._ids[indices[:, 0], indices[:, 1], indices[:, 2]])}
+
+    def gpu_volume(self, number):
+        """(structure ids, per-voxel value, first voxel) of an epoch, for the GPU view.
+
+        Value 0 = air; NEVER = never removed; otherwise removal number - first voxel + 2. A voxel is
+        present at (epoch, voxel) from position_at() exactly when value > voxel - first + 1.
+        """
+        self._load(number)
+        first = self._voxel_at_batch(self.epochs[number]["first_batch"])
+        values = np.full(self._ids.shape, 0xFFFFFFFF, np.uint32)
+        removed = self._order < np.iinfo(np.int64).max
+        values[removed] = (self._order[removed] - first + 2).astype(np.uint32)
+        values[self._ids == 0] = 0
+        return self._ids, values, first
 
     def position_at(self, t):
         """(epoch number, voxels removed so far counted from the session start)."""
