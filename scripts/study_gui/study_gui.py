@@ -18,6 +18,7 @@ import review_tab
 import reviewable_session
 import haptic_monitor_toggle
 import haptics_preset
+import scrollable_tabs
 
 import datetime
 from enum import Enum
@@ -458,6 +459,11 @@ class Ui(QtWidgets.QWidget):
         # Main tab's "Generate reviewable session" box.
         self.reviewable = reviewable_session.ReviewableSession(self)
 
+        # Every tab scrolls, so the window fits any screen. Start Simulation stays visible.
+        if tabs is not None:
+            scrollable_tabs.make_tabs_scrollable(
+                tabs, {self.findChild(QtWidgets.QWidget, "tab_main"): [self.button_start_simulation]})
+
         # Pops up while the participant's pause menu is open (proctor_pause.py).
         self.proctor_pause = proctor_pause.ProctorPauseWindow(self)
 
@@ -561,11 +567,8 @@ class Ui(QtWidgets.QWidget):
             return
         idx = min(max(screen_index, 0), len(screens) - 1)
         geo = screens[idx].availableGeometry()
-        width = min(1800, max(1200, geo.width() - 80))
-        height = min(1200, max(900, geo.height() - 80))
+        x, y, width, height = scrollable_tabs.fit_to_screen(geo)
         self.resize(width, height)
-        x = geo.x() + max(20, (geo.width() - self.width()) // 2)
-        y = geo.y() + max(20, (geo.height() - self.height()) // 2)
         self.move(x, y)
         print(
             f"Study GUI placed on screen {idx}: {screens[idx].name()} "
